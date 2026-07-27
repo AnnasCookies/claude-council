@@ -1,0 +1,2869 @@
+{
+  "schemaVersion": 1,
+  "spec": "docs/forge/2026-07-27-standing-council-kernel-spec.md",
+  "acceptanceCriteria": ".forge/acceptance-criteria.md",
+  "updatedAt": "2026-07-27T20:12:24.818614Z",
+  "entries": [
+    {
+      "criterionId": "AC-SEC-001",
+      "specSections": [
+        "## Non-goals"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-002",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-003",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-004",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-005",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-006",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-007",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-008",
+      "specSections": [
+        "## Non-goals"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-009",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-001",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-002",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-001",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-002",
+      "specSections": [
+        "## Purpose"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-003",
+      "specSections": [
+        "## Purpose"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-004",
+      "specSections": [
+        "## Purpose"
+      ],
+      "stage": 1,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-001",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-002",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-003",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-004",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-005",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-006",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-007",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-008",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-009",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-010",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-011",
+      "specSections": [
+        "## Architecture"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-012",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-013",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-001",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-002",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-003",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-004",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-005",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-006",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-007",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-008",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-009",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-010",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-011",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-012",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-013",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-014",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-015",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-016",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-010",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-011",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-012",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-013",
+      "specSections": [
+        "## Verification contract"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-014",
+      "specSections": [
+        "## Verification contract"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-015",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-POL-017",
+      "specSections": [
+        "## Architecture",
+        "## Quorum and degraded operation"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-001",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-002",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-016",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-017",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-018",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-003",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-004",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-018",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-005",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-006",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-007",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-008",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-009",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-010",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-011",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-012",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-013",
+      "specSections": [
+        "## Dynamic role lenses"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-014",
+      "specSections": [
+        "### Run state"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-015",
+      "specSections": [
+        "### Run state"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-016",
+      "specSections": [
+        "### Run state"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-017",
+      "specSections": [
+        "### Run state"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-026",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-027",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-028",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-032",
+      "specSections": [
+        "### Layers"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-033",
+      "specSections": [
+        "## Core contracts"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-034",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-035",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-003",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-004",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-005",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-006",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-007",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-008",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-009",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-010",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-011",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-012",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-013",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-014",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-015",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-016",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-017",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-018",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-019",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-020",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-021",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-022",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-023",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-024",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-025",
+      "specSections": [
+        "## Records and migration API"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-026",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-027",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-028",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-029",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 2,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-001",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-002",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-003",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-014",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-004",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-005",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-006",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-007",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-008",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-009",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-015",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-016",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-019",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-020",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-018",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-010",
+      "specSections": [
+        "## Sources"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-011",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-012",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-021",
+      "specSections": [
+        "## Tool-free seats and evidence boundary"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-022",
+      "specSections": [
+        "## Non-goals"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-031",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-033",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-034",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-035",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-013",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-014",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-015",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-016",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-017",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-018",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-019",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-020",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-021",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-022",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-023",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-024",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-025",
+      "specSections": [
+        "### HTTP"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-026",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-027",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-028",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-023",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-024",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-025",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-029",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-030",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-019",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-029",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-036",
+      "specSections": [
+        "### CLI"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-020",
+      "specSections": [
+        "### Ordinary second opinion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-021",
+      "specSections": [
+        "### Ordinary second opinion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-022",
+      "specSections": [
+        "### Ordinary second opinion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-023",
+      "specSections": [
+        "### Ordinary second opinion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-024",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-025",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-026",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-027",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-028",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-029",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-030",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-031",
+      "specSections": [
+        "### Significant standing-council motion"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-032",
+      "specSections": [
+        "## Round protocol"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-033",
+      "specSections": [
+        "## Round protocol"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-034",
+      "specSections": [
+        "## Round protocol"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-035",
+      "specSections": [
+        "## Round protocol"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-036",
+      "specSections": [
+        "## Round protocol"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-037",
+      "specSections": [
+        "## Round protocol"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-038",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-039",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-040",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-041",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-042",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-043",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-044",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-045",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-046",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-047",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-048",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-LOGIC-049",
+      "specSections": [
+        "## Quorum and degraded operation"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-032",
+      "specSections": [
+        "## Provider and model registry"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-037",
+      "specSections": [
+        "## Health and model drift"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-038",
+      "specSections": [
+        "## Health and model drift"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-030",
+      "specSections": [
+        "## Health and model drift"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-039",
+      "specSections": [
+        "## Health and model drift"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-040",
+      "specSections": [
+        "## Health and model drift"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-041",
+      "specSections": [
+        "## Health and model drift"
+      ],
+      "stage": 3,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-001",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-002",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-003",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-004",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-005",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-006",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-007",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-008",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-009",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-010",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-011",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-012",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-013",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-014",
+      "specSections": [
+        "## Classification and fail-closed routing"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-015",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-016",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-017",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-018",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-019",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-020",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-021",
+      "specSections": [
+        "## Error behaviour"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-022",
+      "specSections": [
+        "## Non-goals"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-023",
+      "specSections": [
+        "## Non-goals"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-API-024",
+      "specSections": [
+        "## Product surface"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-019",
+      "specSections": [
+        "### Layers"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-005",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-006",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-007",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-008",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-009",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-010",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-011",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-012",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-013",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-014",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-015",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-016",
+      "specSections": [
+        "## Non-goals"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-017",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-018",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-019",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-020",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-021",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-022",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-023",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-024",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-025",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-026",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-027",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-028",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-029",
+      "specSections": [
+        "## Goals"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-030",
+      "specSections": [
+        "## Goals"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-031",
+      "specSections": [
+        "## Purpose"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-032",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-033",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-034",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-031",
+      "specSections": [
+        "## Public plugin safety"
+      ],
+      "stage": 4,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-035",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-036",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-037",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-038",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-039",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-040",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-041",
+      "specSections": [
+        "## Compatibility and cutover"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-042",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-043",
+      "specSections": [
+        "## Packaging"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-044",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-045",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-046",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-047",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-048",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-049",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-050",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-051",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-052",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-053",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-042",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-043",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-044",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-045",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-046",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-SEC-032",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-030",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-DATA-031",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-047",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-048",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-049",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-INT-050",
+      "specSections": [
+        "### Live smoke"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-CFG-017",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-054",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-055",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-056",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-057",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-058",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-059",
+      "specSections": [
+        "## Completion conditions"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    },
+    {
+      "criterionId": "AC-OPS-060",
+      "specSections": [
+        "### Packaging and integration"
+      ],
+      "stage": 5,
+      "implementationPaths": [],
+      "testPaths": [],
+      "evidenceIds": []
+    }
+  ]
+}
