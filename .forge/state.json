@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "revision": 2,
+  "revision": 3,
   "project": "standing-council-kernel",
   "worktree": "C:/tmp/forge-standing-council-public",
   "branch": "forge/standing-council-kernel",
   "mode": "interactive",
-  "status": "ready",
-  "currentStage": null,
+  "status": "running",
+  "currentStage": 1,
   "brief": ".forge/brief.md",
   "spec": "docs/forge/2026-07-27-standing-council-kernel-spec.md",
   "specHash": "af4a51e2b264e481042927b71e7def02dd980417f52e278d2136231f770c5644",
@@ -24,9 +24,9 @@
       "name": "Public Containment",
       "summary": "Remove unsafe automatic execution and close the current cancellation race while retaining a tested compatibility bridge.",
       "dependencies": [],
-      "status": "pending",
+      "status": "planning",
       "verdict": null,
-      "attempts": 0,
+      "attempts": 1,
       "planPath": null,
       "milestonePath": null,
       "stageDirectory": ".forge/stages/01-public-containment",
@@ -37,7 +37,7 @@
       "evidenceIndex": null,
       "evidenceSha": null,
       "inspectionPath": null,
-      "startedAt": null,
+      "startedAt": "2026-07-27T20:20:42.396Z",
       "completedAt": null,
       "telemetry": {
         "agentCount": 0,
@@ -207,10 +207,26 @@
       "startedAt": "2026-07-27T20:16:18.807Z",
       "completedAt": "2026-07-27T20:16:18.807Z",
       "resultRevision": 2
+    },
+    {
+      "operationId": "public-stage-1-plan-20260727-001",
+      "kind": "transition",
+      "phase": "plan",
+      "stage": 1,
+      "expectedRevision": 2,
+      "expectedStatus": "pending",
+      "destinationStatus": "planning",
+      "reason": "Begin the reviewed public containment stage.",
+      "patchHash": "1e990ed783a61864f7648169bf790f1308a35a29d53931d0cc782ee0c5ed414e",
+      "commitSha": null,
+      "status": "completed",
+      "startedAt": "2026-07-27T20:20:42.396Z",
+      "completedAt": "2026-07-27T20:20:42.396Z",
+      "resultRevision": 3
     }
   ],
   "workflow": null,
   "completion": null,
   "createdAt": "2026-07-27T20:15:02.644Z",
-  "updatedAt": "2026-07-27T20:16:18.807Z"
+  "updatedAt": "2026-07-27T20:20:42.396Z"
 }
