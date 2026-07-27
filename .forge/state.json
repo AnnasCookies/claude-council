@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 2,
+  "revision": 2,
+  "project": "standing-council-kernel",
+  "worktree": "C:/tmp/forge-standing-council-public",
+  "branch": "forge/standing-council-kernel",
+  "mode": "interactive",
+  "status": "ready",
+  "currentStage": null,
+  "brief": ".forge/brief.md",
+  "spec": "docs/forge/2026-07-27-standing-council-kernel-spec.md",
+  "specHash": "af4a51e2b264e481042927b71e7def02dd980417f52e278d2136231f770c5644",
+  "acceptanceCriteria": ".forge/acceptance-criteria.md",
+  "acceptanceCriteriaHash": "7c35ca8848f68a000873b44a4352722a3f4b8b91ce89d8ef77cf2dc21068b008",
+  "flags": {
+    "model": "auto",
+    "collaboration": "relay",
+    "inPlace": false
+  },
+  "stages": [
+    {
+      "number": 1,
+      "slug": "public-containment",
+      "name": "Public Containment",
+      "summary": "Remove unsafe automatic execution and close the current cancellation race while retaining a tested compatibility bridge.",
+      "dependencies": [],
+      "status": "pending",
+      "verdict": null,
+      "attempts": 0,
+      "planPath": null,
+      "milestonePath": null,
+      "stageDirectory": ".forge/stages/01-public-containment",
+      "baseSha": null,
+      "headSha": null,
+      "verifiedSpecHash": null,
+      "verifiedAcceptanceCriteriaHash": null,
+      "evidenceIndex": null,
+      "evidenceSha": null,
+      "inspectionPath": null,
+      "startedAt": null,
+      "completedAt": null,
+      "telemetry": {
+        "agentCount": 0,
+        "durationMs": 0
+      }
+    },
+    {
+      "number": 2,
+      "slug": "domain-and-policy-foundation",
+      "name": "Domain and Policy Foundation",
+      "summary": "Define strict schemas, fail-closed data policy, model routes, stable identity, records and dynamic role lenses.",
+      "dependencies": [
+        1
+      ],
+      "status": "pending",
+      "verdict": null,
+      "attempts": 0,
+      "planPath": null,
+      "milestonePath": null,
+      "stageDirectory": ".forge/stages/02-domain-and-policy-foundation",
+      "baseSha": null,
+      "headSha": null,
+      "verifiedSpecHash": null,
+      "verifiedAcceptanceCriteriaHash": null,
+      "evidenceIndex": null,
+      "evidenceSha": null,
+      "inspectionPath": null,
+      "startedAt": null,
+      "completedAt": null,
+      "telemetry": {
+        "agentCount": 0,
+        "durationMs": 0
+      }
+    },
+    {
+      "number": 3,
+      "slug": "provider-runtime",
+      "name": "Provider Runtime",
+      "summary": "Implement verified provider transports, tool isolation, evidence brokering, council rounds and deterministic quorum.",
+      "dependencies": [
+        2
+      ],
+      "status": "pending",
+      "verdict": null,
+      "attempts": 0,
+      "planPath": null,
+      "milestonePath": null,
+      "stageDirectory": ".forge/stages/03-provider-runtime",
+      "baseSha": null,
+      "headSha": null,
+      "verifiedSpecHash": null,
+      "verifiedAcceptanceCriteriaHash": null,
+      "evidenceIndex": null,
+      "evidenceSha": null,
+      "inspectionPath": null,
+      "startedAt": null,
+      "completedAt": null,
+      "telemetry": {
+        "agentCount": 0,
+        "durationMs": 0
+      }
+    },
+    {
+      "number": 4,
+      "slug": "facades-and-release-candidate",
+      "name": "Facades and Release Candidate",
+      "summary": "Ship health, doctor, self-check, command and skill facades as an immutable self-contained release candidate.",
+      "dependencies": [
+        3
+      ],
+      "status": "pending",
+      "verdict": null,
+      "attempts": 0,
+      "planPath": null,
+      "milestonePath": null,
+      "stageDirectory": ".forge/stages/04-facades-and-release-candidate",
+      "baseSha": null,
+      "headSha": null,
+      "verifiedSpecHash": null,
+      "verifiedAcceptanceCriteriaHash": null,
+      "evidenceIndex": null,
+      "evidenceSha": null,
+      "inspectionPath": null,
+      "startedAt": null,
+      "completedAt": null,
+      "telemetry": {
+        "agentCount": 0,
+        "durationMs": 0
+      }
+    },
+    {
+      "number": 5,
+      "slug": "legacy-removal-and-acceptance",
+      "name": "Legacy Removal and Acceptance",
+      "summary": "Delete the legacy engine only after private-host parity, then complete packaging, security and cross-platform acceptance.",
+      "dependencies": [
+        4
+      ],
+      "status": "pending",
+      "verdict": null,
+      "attempts": 0,
+      "planPath": null,
+      "milestonePath": null,
+      "stageDirectory": ".forge/stages/05-legacy-removal-and-acceptance",
+      "baseSha": null,
+      "headSha": null,
+      "verifiedSpecHash": null,
+      "verifiedAcceptanceCriteriaHash": null,
+      "evidenceIndex": null,
+      "evidenceSha": null,
+      "inspectionPath": null,
+      "startedAt": null,
+      "completedAt": null,
+      "telemetry": {
+        "agentCount": 0,
+        "durationMs": 0
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "decision-public-architecture-001",
+      "stage": null,
+      "summary": "Build the generic standing-council kernel in the owned public fork while keeping private policy, credentials and records in the private host pipeline.",
+      "reason": "The user approved the recommended split so provider/runtime logic is reusable without publishing private council state.",
+      "source": "human",
+      "criterionIds": [],
+      "findingIds": [],
+      "blockerIds": [],
+      "invalidationStageIds": [],
+      "observed": null,
+      "createdAt": "2026-07-27T20:15:41.947Z"
+    }
+  ],
+  "learnings": [],
+  "specAmendments": [],
+  "blockers": [],
+  "journal": [
+    {
+      "operationId": "record-decision-public-architecture-001",
+      "kind": "record",
+      "phase": "record",
+      "stage": null,
+      "expectedRevision": 0,
+      "expectedStatus": null,
+      "destinationStatus": null,
+      "reason": "Persist the human-approved public/private standing-council architecture.",
+      "patchHash": "df376fd389cc6ad9b83d127c0603a4edd5b302e513506a467159099c2e6e8b8e",
+      "commitSha": null,
+      "status": "completed",
+      "startedAt": "2026-07-27T20:15:41.947Z",
+      "completedAt": "2026-07-27T20:15:41.947Z",
+      "resultRevision": 1
+    },
+    {
+      "operationId": "initialise-ready-public-001",
+      "kind": "transition",
+      "phase": "transition",
+      "stage": null,
+      "expectedRevision": 1,
+      "expectedStatus": "initialising",
+      "destinationStatus": "ready",
+      "reason": "The committed initial contract is validated and has no open initialisation blocker; Stage 1 is self-contained.",
+      "patchHash": "cb8b26ba48f110db0d6f90dbcd8c04cfe1e16b3392263da3620396c03be1acd0",
+      "commitSha": null,
+      "status": "completed",
+      "startedAt": "2026-07-27T20:16:18.807Z",
+      "completedAt": "2026-07-27T20:16:18.807Z",
+      "resultRevision": 2
+    }
+  ],
+  "workflow": null,
+  "completion": null,
+  "createdAt": "2026-07-27T20:15:02.644Z",
+  "updatedAt": "2026-07-27T20:16:18.807Z"
+}
