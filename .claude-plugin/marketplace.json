@@ -1,0 +1,15 @@
+{
+  "name": "hex-plugins",
+  "description": "Explicit standing-council workflows and their bundled runtime",
+  "owner": {
+    "name": "hex",
+    "url": "https://github.com/hex"
+  },
+  "plugins": [
+    {
+      "name": "claude-council",
+      "source": "./",
+      "description": "Standing multi-model councils with scoped records and fail-closed data routing"
+    }
+  ]
+}

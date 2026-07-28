@@ -1,36 +1,13 @@
 ---
-description: Check connectivity and configuration status of all council providers
-allowed-tools: Bash(bash */scripts/check-status.sh*), Bash(bash */scripts/run-council.sh *)
+description: Diagnose configured standing-council provider routes
+argument-hint: '[--json]'
+allowed-tools: Bash(bun:*)
 ---
 
-Check the status of all configured AI providers.
+Invoke the bundled doctor and present its structured diagnostics:
 
-## Execution
-
-Run the status check script:
-
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/check-status.sh
+```text
+bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js doctor --json
 ```
 
-## Output
-
-Present the script output directly - it includes formatted status for each provider:
-- Connection status (connected, timeout, auth error, not configured)
-- Response time in milliseconds
-- Configured model name
-- Per-provider fix command for anything not available
-- Summary of available providers
-
-No additional formatting needed - the script handles all presentation.
-
-## Background Jobs
-
-Also list any background council jobs:
-
-```bash
-bash ${CLAUDE_PLUGIN_ROOT}/scripts/run-council.sh --jobs
-```
-
-If the output is non-empty, present it as a table (job id, status, created)
-and mention `/claude-council:result <job-id>`. If empty, omit the section.
+Report route resolution, configured primary and fallback selectors, requested/actual model identity, tool-isolation status, provider failures and remediation codes. Do not expose environment values or raw provider output. Do not invoke legacy status or provider scripts.

@@ -1,533 +1,105 @@
 # Architecture
 
-## System Overview
+## Runtime boundary
 
-```
-                           USER REQUEST
-                                |
-                                v
-                    +------------------------+
-                    |   /claude-council:ask  |
-                    |     (commands/ask.md)  |
-                    +------------------------+
-                                |
-                                v
-+------------------------------------------------------------------------+
-|                        query-council.sh                                 |
-|------------------------------------------------------------------------|
-|  1. Parse Arguments (--providers, --roles, --debate, --file, etc.)     |
-|  2. Discover Available Providers (API key OR CLI binary on PATH)       |
-|  3. Apply CLI-prefers-API policy (codex shadows openai, etc.)          |
-|  4. Resolve Roles (expand presets, assign to providers)                |
-|  5. Build Context (--file content, auto-context detection)             |
-+------------------------------------------------------------------------+
-                                |
-                                v
-                    +------------------------+
-                    |     ROUND 1: Query     |
-                    +------------------------+
-                                |
-        +-------+-------+-------+-------+-------+-------+
-        |       |       |       |       |       |       |
-        v       v       v       v       v       v       v
-   +--------+ +-----+ +------+ +-----+ +------+ +-----------+ +---------+
-   | gemini | |open | | grok | |perp | |codex | |antigravity| | grok-   |
-   |  .sh   | | .sh | |  .sh | |.sh  | |  .sh | |    .sh    | | cli.sh  |
-   +--------+ +-----+ +------+ +-----+ +------+ +-----------+ +---------+
-   (API)      (API)   (API)    (API)   (CLI)    (CLI)         (CLI)
-        |               |               |               |
-        |    +----------+----------+----------+        |
-        +--->|      lib/cache.sh   |<---------+--------+
-             | (check/store cache) |
-             +---------------------+
-                      |
-        +-------------+-------------+
-        |             |             |
-        v             v             v
-   [CACHE HIT]   [CACHE MISS]   [ERROR]
-        |             |             |
-        |             v             |
-        |      +-------------+      |
-        |      | lib/retry.sh|      |
-        |      | (exp backoff|      |
-        |      |  429/5xx)   |      |
-        |      +-------------+      |
-        |             |             |
-        +------+------+------+------+
-               |
-               v
-    +---------------------+
-    | Collect R1 Results  |
-    | {provider: {status, |
-    |   response, cached, |
-    |   role, model}}     |
-    +---------------------+
-               |
-               +------ [if --debate] ------+
-               |                           |
-               v                           v
-    +-------------------+       +------------------------+
-    | Output R1 Results |       |   ROUND 2: Rebuttals   |
-    +-------------------+       +------------------------+
-                                           |
-                        +------------------+------------------+
-                        |                  |                  |
-                        v                  v                  v
-                  +-----------+      +-----------+      +-----------+
-                  | Provider A|      | Provider B|      | Provider C|
-                  | sees B,C  |      | sees A,C  |      | sees A,B  |
-                  | responses |      | responses |      | responses |
-                  +-----------+      +-----------+      +-----------+
-                        |                  |                  |
-                        +--------+---------+--------+---------+
-                                 |
-                                 v
-                      +---------------------+
-                      | Collect R2 Results  |
-                      +---------------------+
-                                 |
-               +-----------------+
-               |
-               v
-    +---------------------+
-    |   Build JSON Output |
-    |---------------------|
-    | {                   |
-    |   metadata: {...},  |
-    |   round1: {...},    |
-    |   round2: {...}     |  <-- only if debate
-    | }                   |
-    +---------------------+
-               |
-               v
-    +---------------------+
-    | format-output.sh    |
-    | (terminal display)  |
-    +---------------------+
-               |
-               v
-    +---------------------+
-    | lib/export.sh       |  <-- if --output
-    | (markdown file)     |
-    +---------------------+
+`dist/cli.js` is the only installed runtime entry point. It is a self-contained Bun bundle and must run with `bun --no-install`; source files and `node_modules` are development inputs, not cache-time dependencies. Plugin commands contain prose and CLI invocation only.
+
+No hook or repository-controlled file can start a council automatically.
+
+```mermaid
+flowchart TD
+  A[Explicit CLI or slash command] --> B[Parse and validate command]
+  B --> C[Resolve scope and project policy]
+  C --> D[Select eligible provider families and governed lenses]
+  D --> E[Outbound policy and secret guard]
+  E -->|blocked| F[Structured blocked-policy result]
+  E -->|allowed| G[Policy preflight disclosure]
+  G --> H[Independent tool-free provider seats]
+  H --> I[Round response validation and redaction]
+  I --> J[Distinct-family quorum]
+  J -->|failed| K[blocked-quorum result]
+  J -->|passed| L[Completed result / chair adjudication]
+  L --> M[Scoped atomic session and resolution records]
 ```
 
-## Component Details
+## Domain and policy
 
-### Provider Scripts (`scripts/providers/*.sh`)
+`src/domain/` owns strict Zod contracts for classification, model routes, lenses, manifests, seat responses, quorum and run-state transitions.
 
-Each provider follows a consistent interface:
+`src/policy/data-guard.ts` evaluates the complete outbound request before any adapter is called. It combines:
 
-```
-INPUT:  --prompt-file <path>  the prompt; the orchestrator always uses this so a
-                              large prompt stays off the argv (see ARG_MAX below)
-        --image-file <path>   base64 image, passed only to vision-capable providers
-        --image-mime <type>   the image's MIME type (pairs with --image-file)
-        $1                    a literal prompt, for direct/manual invocation
-OUTPUT: stdout = AI response text
-EXIT:   0 = success, non-zero = failure (error to stderr)
-        3 = the requested model is unavailable for this key/region — the
-            orchestrator's model-fallback wrapper retries with a fallback
-            model instead of surfacing the error (see Model Fallback below)
-```
+- the motion classification;
+- project provider allowlists and per-provider ceilings;
+- exact provider/model destinations;
+- the full outbound payload;
+- an optional run-bound, payload-hash-bound override.
 
-Two flavors share the interface:
+Invalid or missing project policy, restricted data, an unknown provider, an exceeded ceiling or a high-confidence secret blocks transmission. Overrides cannot cover secret detection or unrestricted policy failures.
 
-- **API providers** (`gemini`, `openai`, `grok`, `perplexity`) — gated on
-  `{PROVIDER}_API_KEY`, talk to vendor APIs over HTTPS, charge per call.
-- **CLI providers** (`codex`, `antigravity`, `grok-cli`) — gated on the binary
-  being on `PATH`, use the user's existing CLI subscription auth, no per-call cost.
-  When both an API and CLI sibling exist (codex+openai, antigravity+gemini,
-  grok-cli+grok), the orchestrator prefers the CLI by default; explicit
-  `--providers` wins over the policy. If a CLI provider fails at query time, the
-  council retries through its API sibling (when that key is set) and marks the
-  slot as a fallback.
+`src/policy/secrets.ts` uses deterministic high-confidence detectors. Redaction markers carry only a secret kind and an eight-character digest; raw secret values never enter errors, diagnostics or records.
 
-Environment-based configuration:
-- `{PROVIDER}_API_KEY` - Required authentication for API providers
-- `{PROVIDER}_MODEL` - Model override (also applies to CLI providers via
-  `CODEX_MODEL` / `ANTIGRAVITY_MODEL` / `GROK_CLI_MODEL`)
-- `COUNCIL_MAX_TOKENS` - Response length limit (API providers only)
-- `COUNCIL_DEBUG` - Enable verbose logging
+## Evidence boundary
 
-### Vision / Image Input (`--image`)
+`src/evidence/schema.ts` admits four explicit source shapes:
 
-A single image can be attached with `--image=path` (png/jpg/jpeg/webp/gif,
-≤10 MB). `query-council.sh` validates it once at the edge, base64-encodes it to a
-temp file, and folds only its SHA-256 into the cache key (`COUNCIL_IMAGE_HASH`) —
-the bytes never enter the prompt string.
+- trusted local instruction;
+- untrusted local instruction;
+- untrusted repository evidence;
+- untrusted public HTTPS evidence.
 
-Per-provider disposition when an image is attached:
-- **gemini, openai, grok, perplexity** (vision-capable) receive the image —
-  gemini as an `inlineData` part, openai as `input_image` (Responses API) or
-  `image_url` (Chat Completions), grok and perplexity as an OpenAI-compatible
-  `image_url` data-URI on their `/chat/completions` endpoint.
-- **codex, antigravity, grok-cli** (CLI, cannot accept an image) route to their
-  vision API sibling — codex→openai, antigravity→gemini, grok-cli→grok — with
-  the image.
+Only a host-authored local instruction can be trusted. Repository paths must be relative and web locators must be public HTTPS addresses. `normaliseEvidence` hashes original source content, redacts it and encloses every untrusted excerpt in a delimiter-safe `untrusted-evidence` envelope. Every seat receives the same rendered pack.
 
-Privacy invariant: only the image's SHA-256 keys the cache. The base64 lives
-solely in a temp file passed to providers; it is never written to cache entries
-or the saved `council-*.md` transcripts.
+Evidence collection itself is read-only. It does not run repository code, shell commands, write tools or panel tools. Provider seats receive no tools.
 
-### Cache Layer (`scripts/lib/cache.sh`)
+## Provider execution
 
-```
-Cache Key = SHA256("provider:model:verbosity:max_tokens:image_sha256:prompt")
-  (verbosity, token cap, and any attached-image hash all bust the cache, so a
-   --verbosity or --image change re-queries instead of reusing a stale answer)
+`src/providers/index.ts` constructs one adapter per governed provider family:
 
-cache_get(key) -> response | empty
-cache_set(key, provider, model, prompt, response)
-cache_clear()
+| Family    | Transport              | Identity rule                                          |
+| --------- | ---------------------- | ------------------------------------------------------ |
+| Anthropic | isolated local CLI     | trusted absolute executable; tool-free, stateless argv |
+| OpenAI    | HTTPS Responses API    | actual model must be present in the response           |
+| xAI       | HTTPS chat completions | actual model must be present in the response           |
+| Google    | HTTPS generateContent  | actual model version must be present in the response   |
+| DeepSeek  | HTTPS chat completions | actual model must be present in the response           |
+| Moonshot  | HTTPS chat completions | actual model must be present in the response           |
 
-Storage: $COUNCIL_CACHE_DIR/{key}.json
-TTL: $COUNCIL_CACHE_TTL seconds (default 3600)
+HTTP retries are bounded and limited to retryable network, 429 and server failures. CLI execution has a hard deadline and terminates the process group on POSIX or the complete process tree on Windows. Provider arguments are explicit argv plus stdin; no shell wrapper constructs the request.
+
+Fallbacks remain within one provider family and only use registry-approved selectors. Missing credentials produce `unconfigured`/`skipped` responses. A failure is never relabelled as another family.
+
+Structured provider answers contain recommendation, evidence, assumptions, risks, uncertainty and a decisive test. Malformed answers fail the seat. Returned content is redacted before it reaches round state, output or persistence.
+
+## Lenses, rounds and quorum
+
+`src/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
+
+`CouncilRunner` executes all seats in a round concurrently and preserves canonical family/seat ordering in the result. Round one is blind analysis; round two is rebuttal; round three is optional refinement. Prior responses are carried as explicitly untrusted data.
+
+Quorum counts successful distinct provider families across the run. Ordinary resolution needs three families. Significant resolution needs four families and a successful contrarian lens. Failed quorum disables synthesis; the facade cannot convert it into consensus.
+
+## Records and migration
+
+`CouncilStore` separates:
+
+```text
+<root>/general/
+<root>/projects/<project-id>/
 ```
 
-### Retry Logic (`scripts/lib/retry.sh`)
+Each scope has its own sessions, resolutions and ledger. Inputs are Zod-validated, identifiers are path-safe and writes use same-directory temporary files, fsync, atomic rename and a scoped cross-process lock. Duplicate run, motion and resolution identifiers fail. A project record cannot mutate general history or another project.
 
-```
-curl_with_retry():
-  - Retries on: 429 (rate limit), 5xx (server error)
-  - Fails fast on: timeout, other 4xx (client error)
-  - Backoff: exponential (1s, 2s, 4s...)
-  - Max retries: $COUNCIL_MAX_RETRIES (default 3)
+General-history migration is a two-step boundary:
 
-curl_secret_config(header...):
-  - writes the auth header(s) to a mode-600 temp file and echoes its path
-  - callers pass it via `curl --config <file>` so API keys never ride the
-    process argv (ps-visible) or a URL query string
-```
+1. `migrate-general plan` reads and hashes the source, classifies entries in memory and writes a reviewable plan. It does not mutate records.
+2. `migrate-general apply` requires explicit approval tied to the exact plan hash, verifies the source hash, publishes a byte-identical archive first, then writes provenance-bearing destinations and a manifest.
 
-### Model Fallback (`scripts/lib/retry.sh`, `scripts/lib/model_fallback.sh`)
+Unresolved items or source drift fail closed.
 
-```
-is_model_unavailable_error(body):        # retry.sh
-  - true only for a 403/404, or a 400 whose message names the model
-  - excludes 401/429/5xx: no other model fixes those
-  - reads .http_status, stamped onto every >=400 body by ensure_error_body
-    (handles xAI's bare-string .error as well as the usual .error.message)
+## Health and offline verification
 
-model_fallback_for(provider) -> model    # model_fallback.sh
-  - one verified fallback per API provider (openai, grok, gemini, perplexity)
-  - empty for CLI providers, which degrade to their API sibling instead
+`health --json` probes exact routes and emits a secret-free baseline. Baseline comparison reports newly unavailable families, actual-model changes, configured-route changes and total outage.
 
-model_unavailable_cached/remember(provider, model, key_hash):
-  - TTL-cached "unavailable" verdict, scoped to provider + preferred model + key
-  - written only once the fallback model has actually answered
-  - independent of the response cache; tunable via COUNCIL_AVAILABILITY_TTL
-```
+`doctor --json` additionally reports endpoint/executable resolution, tool isolation, candidate successor warnings and remediation codes. Health output never retains environment values or raw provider output.
 
-`query-council.sh`'s `run_provider_with_model_fallback` wraps a provider
-script: a preferred-model exit 3 (see Provider Scripts below), or a cached
-verdict, retries once with the fallback. The substitution is reported on the
-response header, on stderr, and folded into the synthesis prompt.
-
-### Role System (`scripts/lib/roles.sh`)
-
-```
-config/roles.json defines:
-  - Individual roles (security, performance, etc.)
-  - Role presets (balanced, security-focused, etc.)
-
-Role injection prepends instructions to prompt:
-  "As a [ROLE], focus on [CONCERNS]..."
-```
-
-### Prompt Templates (`scripts/lib/prompts.sh`, `prompts/*.md`)
-
-```
-load_prompt_template(name):  reads prompts/<name>.md
-interpolate_template(t, KEY=VALUE...): fills {{KEY}} slots
-  - unfilled slots collapse to empty
-Templates: role-injection, synthesis (calibration rules),
-           stop-review-gate (ALLOW:/BLOCK: first-line contract)
-```
-
-### Job Store (`scripts/lib/jobs.sh`)
-
-```
-State dir: $COUNCIL_JOBS_DIR, else
-           $CLAUDE_PLUGIN_DATA/jobs/<cwd-hash>, else tmp
-Per job:   <id>.json (status, pid, outfile, timestamps) + <id>.log
-Lifecycle: queued -> running -> completed | failed | cancelled
-  - run-council.sh --async re-execs itself detached as --job-worker=<id>
-  - worker exit trap converts crashes to failed
-  - --result echoes the outfile path (exit 2 while in flight)
-  - --cancel marks cancelled first, then kills the process tree
-  - jobs_prune drops oldest terminal jobs beyond COUNCIL_MAX_JOBS
-```
-
-### Output Contract (`schemas/`, `scripts/validate-analysis.sh`)
-
-```
-schemas/agent-analysis.schema.json documents the deep-execution
-agent reply shape; validate-analysis.sh enforces it with jq,
-listing every violation. Invalid replies render raw under a
-visible marker - model output is never silently dropped
-(same rule as format-output.sh's render_response).
-```
-
-### Stop Gate (`hooks/hooks.json`, `scripts/stop-review-gate.sh`)
-
-```
-Stop hook, opt-in via .claude/council-stop-gate.json.
-Reviews `git diff HEAD` through one provider using the
-stop-review-gate prompt; blocks only on first-line BLOCK:.
-Loop guards: stop_hook_active check + per-session block
-counter capped at max_iterations. Reviewer failure => allow.
-```
-
-## Data Flow
-
-### Standard Query
-
-```
-User -> parse args -> discover providers -> check cache
-                                               |
-                    +-----------+--------------+
-                    |           |
-               [HIT]         [MISS]
-                 |              |
-                 |         query API -> store cache
-                 |              |
-                 +------+-------+
-                        |
-                    format output -> display
-```
-
-### Debate Mode
-
-```
-User -> Round 1 (parallel queries)
-             |
-        collect responses
-             |
-        Round 2 (each sees others' R1)
-             |
-        collect rebuttals
-             |
-        combined output with debate insights
-```
-
-### Agent-Enhanced Mode (--agents)
-
-```
-User -> ask.md detects --agents flag (or NL trigger)
-             |
-        spawn N parallel Claude subagents (background)
-             |
-    +--------+--------+--------+--------+
-    |        |        |        |        |
-    v        v        v        v        v
- Agent:   Agent:   Agent:   Agent:   ...
- Gemini   OpenAI   Grok     Perplexity
-    |        |        |        |
-    | Each agent independently:
-    | 1. Runs provider curl script
-    | 2. Evaluates response quality
-    | 3. Retries with reformulated prompt if poor
-    | 4. Asks follow-up questions for depth
-    | 5. Returns structured analysis:
-    |    - Key recommendations
-    |    - Confidence level
-    |    - Unique perspective
-    |    - Blind spots
-    |        |        |        |
-    +--------+--------+--------+
-             |
-        orchestrator collects all analyses
-             |
-        enhanced synthesis:
-        - confidence-weighted consensus
-        - cross-provider blind spot analysis
-        - divergence with context
-             |
-        save to council-cache
-```
-
-Key difference from standard mode: subagents do meaningful analytical
-work beyond the API call, pre-digesting each response before synthesis.
-
-### Local Council Mode (--local / no providers)
-
-```
-User -> ask.md (--local, or accepts the offer when no providers found)
-             |
-        skill asks how many members (unless --roles given); local_council_roles
-        resolves that many from a diverse order (default 4, up to 8)
-             |
-        spawn one general-purpose subagent per role (background, blind to each other)
-             |
-    +--------+--------+--------+
-    |        |        |        |
-    v        v        v        v
- Member:  Member:  Member:  Member:
- devil    simplicity security scalability
-    |        |        |        |
-    | Each member (Claude, general-purpose subagent):
-    | - Answers the role-injected question on its own
-    | - Returns Position / Key points / Risks & blind spots / Confidence
-    |        |        |
-    +--------+--------+
-             |
-        orchestrator collects all perspectives
-             |
-        honest synthesis (angles, NOT consensus):
-        - shared starting points to pressure-test
-        - genuine tensions between roles
-        - cross-member blind spots
-             |
-        save to council-cache
-```
-
-Key difference from agent mode: members do **not** call any provider — each one
-*is* the answerer (Claude under a role). Because they share a model, the
-synthesis is framed around independent angles and blind-spot coverage, never as
-cross-vendor consensus. This is the zero-provider fallback so the plugin is
-usable on a Claude subscription alone.
-
-## File Structure
-
-```
-claude-council/
-├── .claude-plugin/
-│   └── plugin.json              # Plugin manifest
-├── .github/
-│   └── workflows/
-│       └── tests.yml            # bats on ubuntu + macos; shellcheck blocks a merge
-├── agents/
-│   └── council-advisor.md       # Proactive suggestions
-├── commands/
-│   ├── ask.md                   # Main /ask command
-│   ├── result.md                # /result — fetch/list/cancel background jobs
-│   └── status.md                # /status command
-├── config/
-│   └── roles.json               # Role definitions
-├── docs/
-│   └── ARCHITECTURE.md          # This file
-├── hooks/
-│   └── hooks.json               # Stop hook registration (stop gate)
-├── prompts/
-│   ├── role-injection.md        # {{VAR}} template for role-wrapped prompts
-│   ├── synthesis.md             # Synthesis structure + calibration rules
-│   └── stop-review-gate.md      # Stop-gate reviewer contract
-├── schemas/
-│   └── agent-analysis.schema.json  # Deep-execution agent reply contract
-├── scripts/
-│   ├── query-council.sh         # Main orchestrator
-│   ├── run-council.sh           # Query + format pipeline, sync and --async
-│   ├── format-output.sh         # Terminal formatter
-│   ├── check-status.sh          # Provider health check
-│   ├── stop-review-gate.sh      # Opt-in Stop hook reviewer
-│   ├── validate-analysis.sh     # Enforces the agent-analysis schema
-│   ├── release.sh               # Version bump and tagging
-│   ├── dev/
-│   │   └── demo-pane.sh         # Visual test harness for the streaming pane
-│   ├── providers/
-│   │   ├── gemini.sh            # API
-│   │   ├── openai.sh            # API
-│   │   ├── grok.sh              # API
-│   │   ├── perplexity.sh        # API
-│   │   ├── codex.sh             # CLI (subscription auth, shadows openai)
-│   │   ├── antigravity.sh       # CLI (subscription auth, shadows gemini)
-│   │   └── grok-cli.sh          # CLI (subscription auth, shadows grok)
-│   └── lib/
-│       ├── cache.sh             # Caching utilities
-│       ├── display.sh           # Streaming tmux pane + iTerm2 lifecycle
-│       ├── export.sh            # Markdown export
-│       ├── hash.sh              # Portable SHA-256 helper (shasum / sha256sum)
-│       ├── jobs.sh              # Background job store
-│       ├── keys.sh              # API key resolution (XAI_API_KEY ↔ GROK_API_KEY)
-│       ├── model_fallback.sh    # Fallback model per provider + TTL-cached unavailable verdicts
-│       ├── pane-watcher.sh      # Runs in the tmux pane: streams status + rendered responses
-│       ├── prompts.sh           # Template loading + {{VAR}} interpolation
-│       ├── providers.sh         # Discovery + CLI-prefers-API policy + vendor display
-│       ├── render.pl            # Dependency-free markdown renderer (perl fallback)
-│       ├── render.py            # Council-tuned Rich markdown renderer
-│       ├── retry.sh             # Retry with backoff + off-argv secret config
-│       ├── roles.sh             # Role management
-│       ├── tokens.sh            # Reasoning-model token-cap bumping
-│       └── verbosity.sh         # Shared system prompt, inline-answer guard, verbosity directives
-├── skills/
-│   ├── council-execution/
-│   │   └── SKILL.md             # Standard query execution
-│   ├── deep-execution/
-│   │   ├── SKILL.md             # Agent-enhanced execution (--agents)
-│   │   └── agent-prompt-template.md  # Subagent prompt template
-│   ├── local-council-execution/
-│   │   ├── SKILL.md             # Local Claude-only council (--local / no providers)
-│   │   └── agent-prompt-template.md  # Council-member prompt template
-│   └── provider-integration/
-│       ├── SKILL.md             # Adding providers guide
-│       └── api-patterns.md      # API integration patterns
-├── tests/
-│   ├── run_tests.sh             # Test runner
-│   ├── test_helper.bash         # Shared test utilities
-│   ├── fixtures/
-│   │   └── fake-clis.bash       # Fake codex/agy/grok binaries on PATH
-│   ├── agent-analysis.bats
-│   ├── argmax.bats              # ARG_MAX marshalling round-trip guards
-│   ├── cache.bats
-│   ├── check-status.bats
-│   ├── cli-providers.bats       # CLI providers (codex, antigravity, grok-cli)
-│   ├── display.bats
-│   ├── export.bats
-│   ├── fake-clis.bats
-│   ├── format-output.bats
-│   ├── image.bats               # Vision / --image routing + privacy guards
-│   ├── jobs.bats
-│   ├── keys.bats
-│   ├── model_fallback.bats      # Classifier, fallback pairs, verdict cache, gated real-API test
-│   ├── pane-watcher.bats
-│   ├── prompts.bats
-│   ├── providers.bats           # API provider payloads + secret hygiene
-│   ├── release.bats
-│   ├── retry.bats
-│   ├── roles.bats
-│   ├── stop-gate.bats
-│   ├── theme.bats
-│   ├── tokens.bats
-│   ├── verbosity.bats
-│   └── query-council.bats
-├── .shellcheckrc               # Points shellcheck at the sourced libs
-├── CHANGELOG.md
-├── LICENSE
-├── README.md
-└── TESTING.md
-```
-
-## Configuration Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GEMINI_API_KEY` | - | Google AI Studio key |
-| `OPENAI_API_KEY` | - | OpenAI API key |
-| `XAI_API_KEY` | - | xAI API key (preferred) |
-| `GROK_API_KEY` | - | xAI API key (legacy alias; `XAI_API_KEY` wins if both set) |
-| `PERPLEXITY_API_KEY` | - | Perplexity API key |
-| `{PROVIDER}_MODEL` | varies | Model override (API providers) |
-| `CODEX_MODEL` | (unset) | Model passed to `codex exec -m`, only when set (else the codex CLI's own configured model) |
-| `ANTIGRAVITY_MODEL` | (unset) | Model passed to `agy --model`, only when set (else the model selected in the Antigravity app) |
-| `GROK_CLI_MODEL` | (unset) | Model passed to `grok -m`, only when set (else the grok CLI's own default) |
-| `COUNCIL_MAX_TOKENS` | 2048 | Max response tokens |
-| `COUNCIL_MAX_RETRIES` | 3 | Retry attempts |
-| `COUNCIL_RETRY_DELAY` | 1 | Initial retry delay (s) |
-| `COUNCIL_TIMEOUT` | 300 | Request timeout (s) |
-| `COUNCIL_CACHE_DIR` | .claude/council-cache | Cache location |
-| `COUNCIL_CACHE_TTL` | 3600 | Cache lifetime (s) |
-| `COUNCIL_AVAILABILITY_TTL` | 86400 | Model-unavailable verdict cache lifetime (s); `0` re-checks every query |
-| `COUNCIL_JOBS_DIR` | per-workspace under `$CLAUDE_PLUGIN_DATA` | Background job state location |
-| `COUNCIL_MAX_JOBS` | 20 | Terminal-status jobs kept before pruning |
-| `COUNCIL_PROMPTS_DIR` | prompts/ | Prompt template location |
-| `COUNCIL_DEBUG` | - | Enable debug output |
-| `COUNCIL_NO_PANE` | - | Set to `1` to disable the streaming tmux pane globally |
-| `COUNCIL_RENDERER` | auto | `perl` forces the built-in perl renderer; otherwise the pane prefers Rich when a Rich-capable Python exists (python3 with a modern rich, else `uv run --no-project --with rich`), with perl as the fallback |
-| `COUNCIL_RICH_PROBE_TIMEOUT` | 10 | Seconds before the pane-open uv probe for Rich is abandoned (guards against a cold uv cache on a dead network stalling pane opening) |
-| `COUNCIL_THEME` | auto-detected | Force pane render palette (emphasis + muted text): `light` / `dark` (else OSC 11 query; `COLORFGBG` only asserts `light`, never `dark` since it goes stale; otherwise attribute-only emphasis that inherits the foreground, and muted text keeps faint/bright-black) |
-| `COUNCIL_AUTO_CLOSE` | - | Set to `1` to auto-close the pane on completion (skip the keypress wait); used by tests/demos |
-| `COUNCIL_ATTENTION_THRESHOLD` | 2000 | iTerm2 dock-bounce threshold in ms (only triggers if total elapsed >= this) |
-| `COUNCIL_VERBOSITY` | standard | Response style: `brief` / `standard` / `detailed` (prepended to all providers' system prompts) |
-| `OPENAI_REASONING_EFFORT` | medium | Reasoning model effort |
-| `PERPLEXITY_RECENCY` | - | Search recency filter |
+`self-check --json` is offline. It validates the bundled registry, provider family set and governed lens catalogue without constructing a request or probing a provider.
