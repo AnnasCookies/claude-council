@@ -1,14 +1,14 @@
 {
   "name": "claude-council",
-  "version": "2026.7.9",
-  "description": "Consult multiple AI coding agents (Gemini, OpenAI, Grok, Perplexity, plus codex, antigravity, and grok CLIs when installed) to get diverse perspectives on coding problems",
+  "version": "2026.7.10",
+  "description": "Consult multiple AI coding agents (Gemini, OpenAI, Grok, Perplexity, plus Codex, Antigravity, and Grok CLIs when installed) to get diverse perspectives on coding problems",
   "author": {
-    "name": "hex",
-    "url": "https://github.com/hex"
+    "name": "AnnasCookies",
+    "url": "https://github.com/AnnasCookies"
   },
   "license": "MIT",
-  "homepage": "https://github.com/hex/claude-council",
-  "repository": "https://github.com/hex/claude-council",
+  "homepage": "https://github.com/AnnasCookies/claude-council",
+  "repository": "https://github.com/AnnasCookies/claude-council",
   "keywords": [
     "multi-agent",
     "council",
