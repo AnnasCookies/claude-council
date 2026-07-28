@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "revision": 3,
+  "revision": 4,
   "project": "standing-council-kernel",
   "worktree": "C:/tmp/forge-standing-council-public",
   "branch": "forge/standing-council-kernel",
   "mode": "interactive",
-  "status": "running",
-  "currentStage": 1,
+  "status": "blocked",
+  "currentStage": null,
   "brief": ".forge/brief.md",
   "spec": "docs/forge/2026-07-27-standing-council-kernel-spec.md",
   "specHash": "af4a51e2b264e481042927b71e7def02dd980417f52e278d2136231f770c5644",
@@ -24,7 +24,7 @@
       "name": "Public Containment",
       "summary": "Remove unsafe automatic execution and close the current cancellation race while retaining a tested compatibility bridge.",
       "dependencies": [],
-      "status": "planning",
+      "status": "blocked",
       "verdict": null,
       "attempts": 1,
       "planPath": null,
@@ -174,7 +174,17 @@
   ],
   "learnings": [],
   "specAmendments": [],
-  "blockers": [],
+  "blockers": [
+    {
+      "id": "stage-1-operational-recovery-e752d42",
+      "stage": 1,
+      "kind": "operational",
+      "reason": "Forge records Stage 1 as planning at revision 3, but commit e752d42 contains the completed cross-stage implementation. This run cannot retroactively absorb or certify those edits; initialise a separate provenance-repair pipeline from the clean checkpoint without claiming implementation-stage evidence.",
+      "status": "open",
+      "createdAt": "2026-07-28T16:42:10.984Z",
+      "resolvedAt": null
+    }
+  ],
   "journal": [
     {
       "operationId": "record-decision-public-architecture-001",
@@ -223,10 +233,26 @@
       "startedAt": "2026-07-27T20:20:42.396Z",
       "completedAt": "2026-07-27T20:20:42.396Z",
       "resultRevision": 3
+    },
+    {
+      "operationId": "stage-1-block-recovery-e752d42-20260728",
+      "kind": "transition",
+      "phase": "plan",
+      "stage": 1,
+      "expectedRevision": 3,
+      "expectedStatus": "planning",
+      "destinationStatus": "blocked",
+      "reason": "Record the irreconcilable Forge state and Git provenance mismatch after preserving the working implementation.",
+      "patchHash": "a4c437947179fd193aed2d9c03fc3187967843c6931c770c05a28a0a6fbe5ad6",
+      "commitSha": null,
+      "status": "completed",
+      "startedAt": "2026-07-28T16:42:10.984Z",
+      "completedAt": "2026-07-28T16:42:10.984Z",
+      "resultRevision": 4
     }
   ],
   "workflow": null,
   "completion": null,
   "createdAt": "2026-07-27T20:15:02.644Z",
-  "updatedAt": "2026-07-27T20:20:42.396Z"
+  "updatedAt": "2026-07-28T16:42:10.984Z"
 }
