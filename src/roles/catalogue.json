@@ -1,0 +1,122 @@
+[
+  {
+    "category": "domain",
+    "name": "strategist",
+    "prompt": "State the strategic objective, option trade-offs, and recommended direction.",
+    "applicability": {
+      "domains": ["*"],
+      "impacts": [],
+      "contested": false
+    }
+  },
+  {
+    "category": "domain",
+    "name": "architect",
+    "prompt": "Specify boundaries, dependencies, failure modes, and the recommended architecture.",
+    "applicability": {
+      "domains": ["architecture", "infrastructure", "integration", "platform", "systems"],
+      "impacts": [],
+      "contested": false
+    }
+  },
+  {
+    "category": "domain",
+    "name": "designer",
+    "prompt": "State user needs, interaction consequences, accessibility risks, and the preferred design.",
+    "applicability": {
+      "domains": ["accessibility", "design", "product", "ui", "ux"],
+      "impacts": [],
+      "contested": false
+    }
+  },
+  {
+    "category": "domain",
+    "name": "researcher",
+    "prompt": "Assess evidence quality, uncertainty, competing explanations, and remaining knowledge gaps.",
+    "applicability": {
+      "domains": ["*", "analysis", "data", "evidence", "research", "science"],
+      "impacts": [],
+      "contested": false
+    }
+  },
+  {
+    "category": "maintainer",
+    "name": "maintainer",
+    "prompt": "Assess simplicity, testability, operability, change cost, and maintainer-facing trade-offs.",
+    "applicability": {
+      "domains": [],
+      "impacts": ["low", "medium", "high"],
+      "contested": false
+    }
+  },
+  {
+    "category": "maintainer",
+    "name": "operator",
+    "prompt": "State deployment, observability, recovery, and day-two operating requirements.",
+    "applicability": {
+      "domains": ["*", "deployment", "infrastructure", "operations", "performance", "reliability"],
+      "impacts": ["medium", "high"],
+      "contested": false
+    }
+  },
+  {
+    "category": "risk",
+    "name": "security",
+    "prompt": "Identify threat actors, attack paths, required controls, and residual security risk.",
+    "applicability": {
+      "domains": ["*", "authentication", "authorisation", "identity", "privacy", "security"],
+      "impacts": ["medium", "high"],
+      "contested": false
+    }
+  },
+  {
+    "category": "risk",
+    "name": "privacy",
+    "prompt": "Trace personal-data use, minimisation, access boundaries, retention, and residual privacy risk.",
+    "applicability": {
+      "domains": ["*", "compliance", "data", "identity", "privacy", "research"],
+      "impacts": ["medium", "high"],
+      "contested": false
+    }
+  },
+  {
+    "category": "systems",
+    "name": "systems",
+    "prompt": "Analyse integration, scaling, lifecycle, and emergent system consequences.",
+    "applicability": {
+      "domains": ["architecture", "infrastructure", "performance"],
+      "impacts": [],
+      "contested": false
+    }
+  },
+  {
+    "category": "systems",
+    "name": "performance",
+    "prompt": "Quantify critical latency, throughput, capacity, and resource trade-offs.",
+    "applicability": {
+      "domains": ["performance"],
+      "impacts": [],
+      "contested": false
+    }
+  },
+  {
+    "category": "contrarian",
+    "name": "critic",
+    "prompt": "Present the strongest evidence-based objections and the conditions that would reverse them.",
+    "applicability": {
+      "domains": ["*"],
+      "impacts": ["high"],
+      "contested": true
+    }
+  },
+  {
+    "category": "contrarian",
+    "name": "devil's advocate",
+    "prompt": "Argue the strongest plausible counter-case and expose hidden assumptions or paths not taken.",
+    "applicability": {
+      "domains": [],
+      "impacts": ["high"],
+      "contested": true
+    }
+  }
+]

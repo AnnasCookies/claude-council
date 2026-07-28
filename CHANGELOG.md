@@ -4,6 +4,76 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## Unreleased
+
+### Added
+
+- A strict Bun/TypeScript standing-council core for classification, policy,
+  secret handling, exact model routes, dynamic lenses, provider-family quorum,
+  evidence envelopes, health diagnostics and scope-separated records.
+- Explicit `run`, `council`, `second-opinion`, `health`, `doctor`,
+  `migrate-general`, `jobs`, `result` and `cancel` CLI facades backed by the
+  self-contained `dist/cli.js` runtime.
+- A self-hosted `hex-plugins` marketplace manifest and harness-neutral council
+  and second-opinion skills.
+
+### Changed
+
+- Provider execution now uses six governed family adapters with exact
+  requested/actual identity and same-family fallback only.
+- Slash commands invoke `bun --no-install` against the bundled runtime rather
+  than duplicating provider or policy logic.
+- Dynamic role assignments are now persisted with motion identity, remain stable across identity-checked retries and rotate between distinct motions.
+- Significant-motion synthesis now requires blind-round family/contrarian quorum plus at least three verified rebuttals; optional refinement cannot repair either gate.
+- Append-only session retries retain one canonical resolution per motion; contradictory retry resolutions fail closed.
+- Normal quorum now requires three verified families for ordinary motions and four for significant motions; the lower two/three-family usability floors produce explicit degraded results rather than false success or hard blocking.
+- Three-round refinement requires an explicit, policy-scanned resolving question that is preserved in the immutable session protocol.
+- Degraded resolutions require append-only chair acceptance, final-round consensus counts distinct provider families, and resolved-motion retries return an explicit record outcome without discarding the completed execution.
+
+### Removed
+
+- Automatic Stop-hook execution and repository-controlled council activation.
+
+### Security
+
+- Project runs block before provider dispatch when policy is absent or invalid.
+- High-confidence secrets hard-block outbound requests and are redacted from
+  provider answers, diagnostics and persisted records.
+- Allowlisted project providers without an explicit classification ceiling now fail closed.
+- Panel seats are tool-free; repository and web content remains untrusted
+  evidence.
+
+## 2026.7.10
+
+### Added
+
+- User-owned `$HOME/.claude/council-policy.json` execution policy with closed
+  `allow`, `strict`, and `deny` states. Missing policy defaults to `strict`;
+  invalid policy fails closed.
+- Bounded lifecycle inputs, process-tree termination and atomic first-terminal
+  job state updates across API and CLI provider paths.
+- Linux and Windows Stage 1 containment checks in CI.
+
+### Changed
+
+- Package ownership, install instructions and repository metadata now identify
+  the maintained `AnnasCookies/claude-council` fork.
+- Provider arguments are transported as explicit argv plus stdin or private
+  prompt files; subprocesses run from neutral temporary directories with
+  sanitised environments.
+
+### Removed
+
+- The automatic Stop-hook review route and its repository-controlled policy.
+- Unavailable `pi`, Copilot and legacy composed-council voting surfaces.
+
+### Security
+
+- Repository content cannot lower the user's execution policy or trigger a
+  provider request during plugin loading.
+- Timeouts and cancellation terminate the observed process group or complete
+  Windows process tree before a terminal state is published.
+
 ## 2026.7.9
 
 ### Fixed
@@ -109,8 +179,8 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   `.error` as a bare string rather than an object. `.error.message` on a string
   raises a jq error rather than yielding null, and `//` does not catch a raise —
   so the existing check read every xAI failure as "no usable message" and
-  replaced the body, printing `Error from Grok: HTTP 403` instead of *"The
-  model grok-4.5 is not available in your region."*
+  replaced the body, printing `Error from Grok: HTTP 403` instead of _"The
+  model grok-4.5 is not available in your region."_
 - **Any OpenAI API error crashed the provider script instead of reporting it.**
   On the `/v1/responses` path — which the default model `gpt-5.6-sol` uses —
   the text extraction iterated `.output[]` over an error body that has no
@@ -330,7 +400,7 @@ Makes the streaming pane's muted text readable on light/cream backgrounds.
 
 ### Fixed
 
-- **Light-background pane contrast** — the pane's *muted* text (link URLs, table
+- **Light-background pane contrast** — the pane's _muted_ text (link URLs, table
   grid lines, `---` rules, sub-headings, and the "waiting on" label) now adapts
   to the terminal theme the way bold/italic emphasis already did. On light/cream
   backgrounds these render as a readable dark gray instead of the faint
@@ -423,10 +493,10 @@ and gemini-CLI robustness fixes.
 - **Local council (`--local`).** Convene a council using Claude alone when no
   provider keys or CLIs are configured. Spawns N independent subagents — each a
   different role from `config/roles.json`, blind to the others — and synthesizes
-  them. When a query finds no providers, the command now *offers* a local council
+  them. When a query finds no providers, the command now _offers_ a local council
   instead of erroring. You choose how many members to convene (default 4, up to
   8); `--roles` still selects specific lenses. Output is explicitly framed as
-  same-model *angles and blind-spot coverage*, not cross-vendor consensus.
+  same-model _angles and blind-spot coverage_, not cross-vendor consensus.
 
 ### Fixed
 
@@ -455,14 +525,14 @@ Streaming-pane robustness fixes for the tty probe and light-terminal rendering.
 ### Fixed
 
 - **Streaming pane no longer leaks a `/dev/tty` error.** The tty-writability
-  probe silenced stderr *after* the failing redirect, so headless runs printed
+  probe silenced stderr _after_ the failing redirect, so headless runs printed
   a stray `query-council.sh: line 407: /dev/tty: Device not configured`.
   Extracted into `council_probe_tty()` with stderr silenced first.
 
 - **Light-theme contrast.** Bold/italic were rendered invisible bright-white on
   light terminals because `COLORFGBG` goes stale (reports `15;0` "dark" on a
   light terminal). `council_detect_theme` now trusts `COLORFGBG` only to assert
-  *light*; anything ambiguous falls back to attribute-only emphasis that
+  _light_; anything ambiguous falls back to attribute-only emphasis that
   inherits the real foreground — readable on any theme.
 
 - **`COUNCIL_THEME` no longer clobbered when forwarding to the pane.**
@@ -520,7 +590,7 @@ claude-council's bash architecture.
 
 - **Provider status is two-tier with fix commands.** `check-status.sh`
   distinguishes installed-but-unauthenticated codex (via `codex login
-  status`) from available, and every failure state prints the exact
+status`) from available, and every failure state prints the exact
   remediation (`export KEY=...`, `codex login`, install command).
 
 ### Fixes
@@ -559,7 +629,7 @@ claude-council's bash architecture.
   (e.g. `grok-build-0.1`) is a reasoning model that was missing from Grok's
   token-bump list, so responses were capped at the 2048 default and truncated
   long answers mid-sentence. It now gets the 32768 cap. xAI caps `max_tokens`
-  on grok-build's *visible* output only (internal thinking is uncapped), so the
+  on grok-build's _visible_ output only (internal thinking is uncapped), so the
   bump guards against long answers being cut off.
 
 - **Perplexity reasoning models now get the token bump.** `sonar-reasoning*`

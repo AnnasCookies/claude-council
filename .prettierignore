@@ -1,0 +1,8 @@
+.forge/
+coverage/
+dist/
+test-results/
+tests/.tmp/
+tests/tmp/
+*.lcov
+*.tap

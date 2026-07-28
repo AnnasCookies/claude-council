@@ -1,0 +1,32 @@
+{
+  "name": "claude-council",
+  "version": "2026.7.10",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "bin": {
+    "claude-council": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "bun build src/cli.ts --target=bun --outfile dist/cli.js",
+    "test": "bun test tests/core",
+    "check:types": "tsc --noEmit",
+    "lint": "prettier --check . && eslint .",
+    "check:release": "bun tests/security/repository-privacy.ts && bun tests/release/repository-ownership.ts",
+    "check:package": "bun run build && bun --no-install dist/cli.js self-check --json",
+    "check": "bun run check:types && bun run lint && bun run test && bun run check:release && bun run check:package"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/proper-lockfile": "^4.1.4",
+    "eslint": "latest",
+    "prettier": "latest",
+    "typescript": "^6.0.0",
+    "typescript-eslint": "latest"
+  }
+}

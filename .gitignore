@@ -1,11 +1,22 @@
+# Bun/TypeScript dependencies and generated test artefacts
+node_modules/
+coverage/
+test-results/
+tests/.tmp/
+tests/tmp/
+*.tsbuildinfo
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
 # Local per-developer settings (md, json, etc.)
 .claude/*.local.*
 
 # Local commands (dev workflows)
 .claude/commands/
 
-# Response cache
-.claude/council-cache/
 
 # Issue tracker (personal)
 .beads/

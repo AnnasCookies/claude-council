@@ -1,0 +1,32 @@
+{
+  "anthropic": {
+    "primary": "claude-opus-5",
+    "fallbacks": [],
+    "transport": "cli"
+  },
+  "openai": {
+    "primary": "gpt-5.6-sol",
+    "fallbacks": [],
+    "transport": "http"
+  },
+  "xai": {
+    "primary": "grok-4.5",
+    "fallbacks": [],
+    "transport": "http"
+  },
+  "google": {
+    "primary": "gemini-3.1-pro-preview",
+    "fallbacks": ["gemini-3.6-flash"],
+    "transport": "http"
+  },
+  "deepseek": {
+    "primary": "deepseek-v4-pro",
+    "fallbacks": ["deepseek-v4-flash"],
+    "transport": "http"
+  },
+  "moonshot": {
+    "primary": "kimi-k3",
+    "fallbacks": [],
+    "transport": "http"
+  }
+}

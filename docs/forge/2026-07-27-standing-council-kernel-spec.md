@@ -115,7 +115,7 @@ Ordering is `public < internal < confidential < restricted`.
 
 Each run requires an explicit effective classification. Project runs require an applicable project policy. Missing or malformed policy produces `blocked-policy`; it never defaults to public.
 
-The complete outbound payload is scanned after lenses, evidence and prior-round responses are assembled. High-confidence secrets always block. `restricted` always blocks external transmission. Provider ceilings and allowlists are enforced per route. An unavailable or disallowed provider is an absent seat; it is never replaced by a different family under the original identity.
+The complete outbound payload is scanned after lenses, evidence and prior-round responses are assembled. High-confidence secrets always block. `restricted` always blocks external transmission. Provider ceilings and allowlists are enforced per route; an allowlisted route with no configured ceiling fails closed. An unavailable or disallowed provider is an absent seat; it is never replaced by a different family under the original identity.
 
 A permitted one-run policy override records reason, authorising source, affected providers, classification, destinations and timestamp. It cannot override secret detection, `restricted`, missing project identity or unknown classification.
 
@@ -145,7 +145,7 @@ Registry invariants:
 - fallbacks stay within one provider family;
 - requested identity is always returned, while actual identity is returned only when observed;
 - an unobservable actual model is represented as `modelIdentity: unverified`, never copied from the request;
-- an identity-unverified seat may establish provider-family diversity but forces the run to `degraded`;
+- an identity-unverified seat does not establish voting diversity and contributes to a `degraded` or `blocked-quorum` outcome when the verified-family floor is missed;
 - fallback use is explicit;
 - successor discovery warns but never mutates routing;
 - user overrides are parsed, merged and reparsed;
@@ -164,7 +164,7 @@ Provider family and role are separate axes. Every motion selects only relevant l
 - contrarian;
 - chair synthesis, which is never a seat vote.
 
-The selected set must include domain, maintainability, failure/risk and counter-position coverage. Significant motions additionally require a contrarian response. Assignment is a deterministic permutation derived from the motion ID and prior assignments. A role stays fixed during one motion and rotates between motions. Missing or duplicate mandatory lenses fail before provider calls.
+The selected set must include domain, maintainability, failure/risk and counter-position coverage. Significant motions additionally require a contrarian response. Assignment is a deterministic permutation derived from the motion ID and persisted prior assignments. A role stays fixed across retries of one motion and rotates between motions. Missing or duplicate mandatory lenses fail before provider calls.
 
 ## Round protocol
 
@@ -179,7 +179,7 @@ The selected set must include domain, maintainability, failure/risk and counter-
 - Round one is blind independent analysis.
 - Round two supplies the same evidence pack and normalised round-one responses for rebuttal.
 - Round three is optional, capped and allowed only when a material disagreement plus a specific resolving question remain.
-- At least four successful distinct provider families, a successful contrarian lens and at least three valid rebuttals are required for normal resolution.
+- The blind analysis round must contain at least four successful distinct provider families and a successful contrarian lens; at least three verified round-two rebuttals are separately required for normal resolution. An optional refinement neither repairs blind-round quorum nor raises the rebuttal threshold.
 
 The chair is the host session agent. It frames the motion, approves evidence, opens rounds and adjudicates. It does not vote and its synthesis cannot convert failed quorum into consensus.
 
@@ -232,7 +232,7 @@ The first terminal state wins. Run-state transitions are immutable and covered b
 
 Generic records are append-only and scoped to either `general` or a stable project identifier derived from canonical repository identity. Human display names are metadata, not storage keys.
 
-Record writes use temporary file, flush where supported, atomic rename and post-write parse/hash verification. Duplicate motion/session IDs are rejected. Session records include policy and destination decisions but never credential values.
+Record writes use temporary file, flush where supported, atomic rename and post-write parse/hash verification. Duplicate run/session and resolution IDs are rejected. A motion ID may recur under distinct run IDs only when its canonical motion text and seat-to-lens assignments are unchanged, and at most one resolution may exist for that motion. Session records include policy and destination decisions but never credential values.
 
 `migrate-general plan` accepts caller-supplied project taxonomy and match rules, performs generic classification without writes, and emits proposed destinations plus a mandatory unresolved bucket. The public package contains no private taxonomy. `apply` requires an approved plan hash and authorisation metadata, writes an immutable archive first, appends new records atomically, verifies counts and hashes, and never deletes the source archive.
 

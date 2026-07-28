@@ -6,7 +6,7 @@ User instruction, 2026-07-27:
 
 > alright do it per your recommendation using the forge lets see how it goes!
 
-Approved architectural source: `C:/Users/GarethRadley/.claude/docs/superpowers/specs/2026-07-27-standing-council-kernel-design.md`.
+Approved architectural source: private standing-council design specification dated 2026-07-27.
 
 ## Repository scope
 

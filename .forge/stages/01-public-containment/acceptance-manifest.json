@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "stage": 1,
+  "stageSlug": "public-containment",
+  "required": true,
+  "successCriteria": [
+    "Plugin discovery and repository content cannot trigger a provider request.",
+    "User-owned deny or strict policy cannot be weakened by repository content.",
+    "Every current numeric, enum, provider, lifecycle and status input is validated before unsafe interpretation or launch.",
+    "Timeout and cancellation are immutable first terminal states under delayed completion races.",
+    "The public tree contains no private material and release refuses a wrong fork while preserving upstream MIT attribution.",
+    "The complete existing Bats suite passes on the supported POSIX runner."
+  ],
+  "checks": [
+    {
+      "id": "public-privacy",
+      "type": "behavioural",
+      "criterionIds": ["AC-SEC-008"],
+      "command": ["bun", "tests/security/repository-privacy.ts"],
+      "expectedExitCode": 0,
+      "platform": "cross-platform",
+      "manualRequired": false
+    },
+    {
+      "id": "public-ownership",
+      "type": "behavioural",
+      "criterionIds": ["AC-OPS-002", "AC-OPS-003", "AC-OPS-004"],
+      "command": ["bun", "tests/release/repository-ownership.ts"],
+      "expectedExitCode": 0,
+      "platform": "cross-platform",
+      "manualRequired": false
+    },
+    {
+      "id": "public-containment",
+      "type": "security",
+      "criterionIds": ["AC-SEC-001", "AC-SEC-002", "AC-SEC-003", "AC-SEC-004"],
+      "command": ["bash", "tests/run_tests.sh", "tests/containment.bats"],
+      "expectedExitCode": 0,
+      "platform": "supported POSIX CI",
+      "manualRequired": false
+    },
+    {
+      "id": "public-lifecycle-security",
+      "type": "security",
+      "criterionIds": ["AC-SEC-005", "AC-SEC-006", "AC-SEC-007", "AC-SEC-009"],
+      "command": ["bash", "tests/run_tests.sh", "tests/lifecycle-security.bats"],
+      "expectedExitCode": 0,
+      "platform": "supported POSIX CI",
+      "manualRequired": false
+    },
+    {
+      "id": "public-terminal-race",
+      "type": "behavioural",
+      "criterionIds": ["AC-LOGIC-001", "AC-LOGIC-002"],
+      "command": ["bash", "tests/run_tests.sh", "tests/terminal-race.bats"],
+      "expectedExitCode": 0,
+      "platform": "supported POSIX CI",
+      "manualRequired": false
+    },
+    {
+      "id": "public-regression",
+      "type": "regression",
+      "criterionIds": ["AC-OPS-001"],
+      "command": ["bash", "tests/run_tests.sh"],
+      "expectedExitCode": 0,
+      "platform": "supported POSIX CI",
+      "manualRequired": false
+    }
+  ],
+  "manualChecks": [],
+  "contracts": [
+    ".forge/stages/01-public-containment/contract.json",
+    ".forge/stages/01-public-containment/ownership.json"
+  ],
+  "milestoneTests": [
+    "tests/security/repository-privacy.ts",
+    "tests/release/repository-ownership.ts",
+    "tests/containment.bats",
+    "tests/lifecycle-security.bats",
+    "tests/terminal-race.bats"
+  ]
+}

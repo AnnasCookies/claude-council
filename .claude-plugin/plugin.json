@@ -1,7 +1,7 @@
 {
   "name": "claude-council",
   "version": "2026.7.10",
-  "description": "Consult multiple AI coding agents (Gemini, OpenAI, Grok, Perplexity, plus Codex, Antigravity, and Grok CLIs when installed) to get diverse perspectives on coding problems",
+  "description": "Explicit standing multi-model councils with scoped records, fail-closed data routing, dynamic lenses and provider-family quorum",
   "author": {
     "name": "AnnasCookies",
     "url": "https://github.com/AnnasCookies"
@@ -9,15 +9,5 @@
   "license": "MIT",
   "homepage": "https://github.com/AnnasCookies/claude-council",
   "repository": "https://github.com/AnnasCookies/claude-council",
-  "keywords": [
-    "multi-agent",
-    "council",
-    "gemini",
-    "openai",
-    "grok",
-    "perplexity",
-    "codex",
-    "cli",
-    "perspectives"
-  ]
+  "keywords": ["multi-model", "standing-council", "second-opinion", "data-policy", "quorum", "bun"]
 }
