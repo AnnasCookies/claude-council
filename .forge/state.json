@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "revision": 4,
+  "revision": 5,
   "project": "standing-council-kernel",
   "worktree": "C:/tmp/forge-standing-council-public",
   "branch": "forge/standing-council-kernel",
@@ -170,6 +170,19 @@
       "invalidationStageIds": [],
       "observed": null,
       "createdAt": "2026-07-27T20:15:41.947Z"
+    },
+    {
+      "id": "decision-provenance-repair-e752d42",
+      "stage": null,
+      "summary": "Preserve commit e752d42 as an implementation checkpoint and use a separate provenance-repair pipeline for subsequent release work.",
+      "reason": "The original Forge run stopped in Stage 1 planning and cannot retroactively certify the completed cross-stage implementation. The blocked run remains the audit record; any replacement run may claim only work planned, executed and evidenced after its own initial state, including release provenance, committed-package installation and delivery.",
+      "source": "human",
+      "criterionIds": [],
+      "findingIds": [],
+      "blockerIds": [],
+      "invalidationStageIds": [],
+      "observed": null,
+      "createdAt": "2026-07-28T16:45:38.155Z"
     }
   ],
   "learnings": [],
@@ -249,10 +262,26 @@
       "startedAt": "2026-07-28T16:42:10.984Z",
       "completedAt": "2026-07-28T16:42:10.984Z",
       "resultRevision": 4
+    },
+    {
+      "operationId": "record-decision-provenance-repair-e752d42-20260728",
+      "kind": "record",
+      "phase": "record",
+      "stage": null,
+      "expectedRevision": 4,
+      "expectedStatus": null,
+      "destinationStatus": null,
+      "reason": "Persist the human-approved recovery boundary after the interrupted cross-stage implementation.",
+      "patchHash": "8e89857513cb52a3c051b7691e2027d90edaaed82e841ceaf1596cd120baf04e",
+      "commitSha": null,
+      "status": "completed",
+      "startedAt": "2026-07-28T16:45:38.155Z",
+      "completedAt": "2026-07-28T16:45:38.155Z",
+      "resultRevision": 5
     }
   ],
   "workflow": null,
   "completion": null,
   "createdAt": "2026-07-27T20:15:02.644Z",
-  "updatedAt": "2026-07-28T16:42:10.984Z"
+  "updatedAt": "2026-07-28T16:45:38.155Z"
 }
