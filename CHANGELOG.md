@@ -6,6 +6,8 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
 ## Unreleased
 
+## 2026.7.11
+
 ### Added
 
 - A strict Bun/TypeScript standing-council core for classification, policy,
@@ -21,6 +23,11 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
 - Provider execution now uses six governed family adapters with exact
   requested/actual identity and same-family fallback only.
+- OpenAI now uses the authenticated, tool-free OMP subscription CLI at exact
+  model `gpt-5.6-sol`; `OPENAI_API_KEY` is neither read nor used as fallback.
+- Google now uses authenticated Antigravity CLI (`agy`) with exact primary
+  `gemini-3.1-pro-high` and approved fallback `gemini-3.6-flash-high`;
+  `GEMINI_API_KEY` is neither read nor used as fallback.
 - Slash commands invoke `bun --no-install` against the bundled runtime rather
   than duplicating provider or policy logic.
 - Dynamic role assignments are now persisted with motion identity, remain stable across identity-checked retries and rotate between distinct motions.
@@ -40,8 +47,16 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 - High-confidence secrets hard-block outbound requests and are redacted from
   provider answers, diagnostics and persisted records.
 - Allowlisted project providers without an explicit classification ceiling now fail closed.
-- Panel seats are tool-free; repository and web content remains untrusted
-  evidence.
+- CLI seats cannot access repository or web content. AGY receives an ephemeral
+  home whose sole permission is reading the staged council prompt; any other
+  tool event fails identity verification.
+- OpenAI runs in a dedicated OMP profile with the advisor, tools and every
+  ambient configuration discovery provider disabled by a one-shot overlay.
+- Subscription streams now fail closed on malformed, duplicate or conflicting
+  terminal events; AGY prompt reads require the exact owned canonical path.
+- CLI output is byte-bounded, execution rejects governed transport drift, and
+  repository-executable checks resolve the same package root in source and
+  bundled layouts.
 
 ## 2026.7.10
 

@@ -7,7 +7,7 @@
   "openai": {
     "primary": "gpt-5.6-sol",
     "fallbacks": [],
-    "transport": "http"
+    "transport": "subscription-cli"
   },
   "xai": {
     "primary": "grok-4.5",
@@ -15,9 +15,9 @@
     "transport": "http"
   },
   "google": {
-    "primary": "gemini-3.1-pro-preview",
-    "fallbacks": ["gemini-3.6-flash"],
-    "transport": "http"
+    "primary": "gemini-3.1-pro-high",
+    "fallbacks": ["gemini-3.6-flash-high"],
+    "transport": "subscription-cli"
   },
   "deepseek": {
     "primary": "deepseek-v4-pro",

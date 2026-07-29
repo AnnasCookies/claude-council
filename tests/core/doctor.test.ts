@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import type { SeatResponse } from '../../src/domain/schemas';
+import type { ModelTransport, SeatResponse } from '../../src/domain/schemas';
 import type {
   Availability,
   HealthResult,
@@ -15,7 +15,7 @@ const CAPTURED_AT = '2026-07-28T00:00:00.000Z';
 class DiagnosticAdapter implements ProviderAdapter {
   constructor(
     readonly family: HealthResult['provider'],
-    readonly transport: 'http' | 'cli',
+    readonly transport: ModelTransport,
     private readonly available: Availability,
     private readonly health: HealthResult,
   ) {}
@@ -83,8 +83,8 @@ describe('doctor diagnostics', () => {
     expect(report.diagnostics).toHaveLength(2);
     expect(report.diagnostics[0]).toMatchObject({
       provider: 'openai',
-      resolution: { kind: 'endpoint', status: 'resolved' },
-      toolIsolation: 'not-applicable',
+      resolution: { kind: 'executable', status: 'resolved' },
+      toolIsolation: 'supported',
       status: 'healthy',
       errorCategory: 'none',
     });
