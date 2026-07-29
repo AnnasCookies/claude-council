@@ -78,7 +78,7 @@ const REMEDIATION_ACTIONS: Record<RemediationCode, string> = {
 };
 
 function routeResolution(probe: ProviderProbe): RouteResolution {
-  const kind = probe.transport === 'cli' ? 'executable' : 'endpoint';
+  const kind = probe.transport === 'http' ? 'endpoint' : 'executable';
   const status =
     probe.availability === 'unconfigured' || probe.status === 'unconfigured'
       ? 'unresolved'

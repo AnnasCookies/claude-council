@@ -566,8 +566,8 @@ GFS4: `);
       }
     }
     var fs$writeFile = fs2.writeFile;
-    fs2.writeFile = writeFile;
-    function writeFile(path, data, options, cb) {
+    fs2.writeFile = writeFile2;
+    function writeFile2(path, data, options, cb) {
       if (typeof options === "function")
         cb = options, options = null;
       return go$writeFile(path, data, options, cb);
@@ -1491,12 +1491,12 @@ var require_adapter = __commonJS((exports, module) => {
     return newFs;
   }
   function toPromise(method) {
-    return (...args) => new Promise((resolve2, reject) => {
+    return (...args) => new Promise((resolve3, reject) => {
       args.push((err, result) => {
         if (err) {
           reject(err);
         } else {
-          resolve2(result);
+          resolve3(result);
         }
       });
       method(...args);
@@ -1568,7 +1568,7 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 // src/cli.ts
 import { createHash as createHash4 } from "crypto";
 import { readdir as readdir2 } from "fs/promises";
-import { isAbsolute as isAbsolute4, join as join3, resolve as resolve4 } from "path";
+import { isAbsolute as isAbsolute4, join as join4, resolve as resolve5 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -15872,7 +15872,7 @@ var ProjectPolicySchema = exports_external.strictObject({
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema
 });
-var ModelTransportSchema = exports_external.enum(["http", "cli"]);
+var ModelTransportSchema = exports_external.enum(["http", "cli", "subscription-cli"]);
 var ModelRouteSchema = exports_external.strictObject({
   primary: NonEmptyStringSchema,
   fallbacks: exports_external.array(NonEmptyStringSchema),
@@ -15965,8 +15965,9 @@ var SeatResponseSchema = exports_external.discriminatedUnion("status", [
 ]);
 
 // src/execution/provider.ts
-import { tmpdir } from "os";
-import { isAbsolute as isAbsolute2 } from "path";
+import { existsSync as existsSync2 } from "fs";
+import { homedir, tmpdir } from "os";
+import { isAbsolute as isAbsolute2, join as join2, normalize, resolve as resolve2 } from "path";
 
 // src/policy/secrets.ts
 import { createHash } from "crypto";
@@ -16142,9 +16143,23 @@ function scanAndRedact(text) {
 }
 
 // src/execution/cli.ts
-import { realpath, mkdtemp, rm } from "fs/promises";
+import { existsSync, realpathSync } from "fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
 import { isAbsolute, join, relative, resolve } from "path";
-var repositoryRoot = resolve(import.meta.dir, "..", "..");
+var CLI_OUTPUT_LIMIT_BYTES = 1024 * 1024;
+function findPackageRoot(startDirectory) {
+  let candidate = realpathSync(startDirectory);
+  while (true) {
+    if (existsSync(join(candidate, "package.json")))
+      return candidate;
+    const parent = resolve(candidate, "..");
+    if (parent === candidate) {
+      throw new Error("claude-council package root could not be resolved");
+    }
+    candidate = parent;
+  }
+}
+var repositoryRoot = findPackageRoot(import.meta.dir);
 var inheritedEnvironment = [
   "PATH",
   "SystemRoot",
@@ -16188,6 +16203,27 @@ function isolatedEnvironment(additions) {
   }
   return environment;
 }
+function ownedPath(workingDirectory, requestedPath) {
+  if (!requestedPath || isAbsolute(requestedPath))
+    return;
+  const destination = resolve(workingDirectory, requestedPath);
+  return inside(workingDirectory, destination) ? destination : undefined;
+}
+function resolveOwnedValue(value, workingDirectory) {
+  return typeof value === "function" ? value(workingDirectory) : value;
+}
+async function stageRequestFiles(request, workingDirectory) {
+  for (const [requestedPath, value] of Object.entries(request.files ?? {})) {
+    const destination = ownedPath(workingDirectory, requestedPath);
+    if (!destination)
+      throw new Error(`invalid staged file path: ${requestedPath}`);
+    await mkdir(resolve(destination, ".."), { recursive: true, mode: 448 });
+    await writeFile(destination, resolveOwnedValue(value, workingDirectory), {
+      encoding: "utf8",
+      mode: 384
+    });
+  }
+}
 function failedResult(executable, startedAt, errorCode, stderr) {
   return {
     status: "failed",
@@ -16199,6 +16235,25 @@ function failedResult(executable, startedAt, errorCode, stderr) {
     treeTerminated: false,
     errorCode
   };
+}
+async function readBoundedOutput(stream, onLimit) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done)
+      return { text: Buffer.concat(chunks, totalBytes).toString("utf8"), exceeded: false };
+    if (totalBytes + value.byteLength > CLI_OUTPUT_LIMIT_BYTES) {
+      onLimit();
+      await reader.cancel().catch(() => {
+        return;
+      });
+      return { text: "", exceeded: true };
+    }
+    chunks.push(value);
+    totalBytes += value.byteLength;
+  }
 }
 async function runIsolatedCli(request) {
   const startedAt = Date.now();
@@ -16212,13 +16267,27 @@ async function runIsolatedCli(request) {
   if (inside(repositoryRoot, executable)) {
     return failedResult(executable, startedAt, "repository-executable", "repository-local executables are not permitted");
   }
-  const workingDirectory = await mkdtemp(join(resolve(request.cwd), "claude-council-cli-"));
+  const workingDirectory = await realpath(await mkdtemp(join(resolve(request.cwd), "claude-council-cli-")));
   try {
+    let args;
+    try {
+      await stageRequestFiles(request, workingDirectory);
+      args = request.args.map((value) => resolveOwnedValue(value, workingDirectory));
+    } catch (error51) {
+      return failedResult(executable, startedAt, "invalid-request", error51 instanceof Error ? error51.message : "failed to prepare CLI inputs");
+    }
+    const environment = isolatedEnvironment(request.env);
+    for (const name of request.workingDirectoryEnv ?? []) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        return failedResult(executable, startedAt, "invalid-request", `invalid environment name: ${name}`);
+      }
+      environment[name] = workingDirectory;
+    }
     let processHandle;
     try {
-      processHandle = Bun.spawn([executable, ...request.args], {
+      processHandle = Bun.spawn([executable, ...args], {
         cwd: workingDirectory,
-        env: isolatedEnvironment(request.env),
+        env: environment,
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
@@ -16230,10 +16299,12 @@ async function runIsolatedCli(request) {
     }
     processHandle.stdin.write(request.stdin);
     processHandle.stdin.end();
-    let timedOut = false;
+    let terminationReason = null;
     let treeTerminated = false;
-    const terminateTree = () => {
-      timedOut = true;
+    const terminateTree = (reason) => {
+      if (terminationReason !== null)
+        return;
+      terminationReason = reason;
       if (process.platform === "win32") {
         const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
         if (systemRoot) {
@@ -16258,40 +16329,60 @@ async function runIsolatedCli(request) {
         }
       }
     };
-    const timer = setTimeout(terminateTree, request.timeoutMs);
+    const timer = setTimeout(() => terminateTree("timeout"), request.timeoutMs);
     try {
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(processHandle.stdout).text(),
-        new Response(processHandle.stderr).text(),
+      const [stdoutResult, stderrResult, exitCode] = await Promise.all([
+        readBoundedOutput(processHandle.stdout, () => terminateTree("output-limit")),
+        readBoundedOutput(processHandle.stderr, () => terminateTree("output-limit")),
         processHandle.exited
       ]);
-      if (timedOut) {
+      if (terminationReason === "output-limit" || stdoutResult.exceeded || stderrResult.exceeded) {
+        return {
+          status: "failed",
+          executable,
+          exitCode,
+          stdout: "",
+          stderr: "CLI output exceeded the byte limit",
+          durationMs: Date.now() - startedAt,
+          treeTerminated,
+          errorCode: "output-limit",
+          workingDirectory
+        };
+      }
+      if (terminationReason === "timeout") {
         return {
           status: "timed-out",
           executable,
           exitCode,
-          stdout,
-          stderr,
+          stdout: stdoutResult.text,
+          stderr: stderrResult.text,
           durationMs: Date.now() - startedAt,
           treeTerminated,
-          errorCode: "timeout"
+          errorCode: "timeout",
+          workingDirectory
         };
       }
       return {
         status: exitCode === 0 ? "ok" : "failed",
         executable,
         exitCode,
-        stdout,
-        stderr,
+        stdout: stdoutResult.text,
+        stderr: stderrResult.text,
         durationMs: Date.now() - startedAt,
         treeTerminated: false,
-        errorCode: exitCode === 0 ? null : "non-zero-exit"
+        errorCode: exitCode === 0 ? null : "non-zero-exit",
+        workingDirectory
       };
     } finally {
       clearTimeout(timer);
     }
   } finally {
-    await rm(workingDirectory, { recursive: true, force: true });
+    await rm(workingDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100
+    });
   }
 }
 
@@ -16432,16 +16523,6 @@ var ChatCompletionSchema = exports_external.object({
   model: exports_external.string().min(1),
   choices: exports_external.array(exports_external.object({ message: exports_external.object({ content: exports_external.string() }) })).min(1)
 });
-var OpenAIResponseSchema = exports_external.object({
-  model: exports_external.string().min(1),
-  output: exports_external.array(exports_external.object({
-    content: exports_external.array(exports_external.object({ type: exports_external.string(), text: exports_external.string().optional() }))
-  }))
-});
-var GoogleResponseSchema = exports_external.object({
-  modelVersion: exports_external.string().min(1),
-  candidates: exports_external.array(exports_external.object({ content: exports_external.object({ parts: exports_external.array(exports_external.object({ text: exports_external.string() })) }) })).min(1)
-});
 var ClaudeResponseSchema = exports_external.object({
   result: exports_external.string(),
   modelUsage: exports_external.record(exports_external.string(), exports_external.unknown())
@@ -16488,27 +16569,34 @@ function serialiseUnknown(value) {
     return "[unserialisable provider response]";
   }
 }
-function parseAnswer(request, family, rawAnswer) {
+function parseAnswer(request, family, rawAnswer, retainDiagnostic = true) {
+  const diagnostic = retainDiagnostic ? rawAnswer : "[invalid structured subscription answer omitted]";
   let value;
   try {
     value = JSON.parse(stripOuterJsonFence(scanAndRedact(rawAnswer).redacted));
   } catch {
-    capture(request, family, "invalid-structured-answer", rawAnswer);
+    capture(request, family, "invalid-structured-answer", diagnostic);
     return;
   }
   const parsed = CouncilAnswerSchema.safeParse(value);
   if (!parsed.success) {
-    capture(request, family, "invalid-structured-answer", rawAnswer);
+    capture(request, family, "invalid-structured-answer", diagnostic);
     return;
   }
   return JSON.stringify(parsed.data);
 }
-function seatError(request, family, requestedModel, status, code, message, latencyMs, retryable = false) {
+function seatError(request, family, requestedModel, status, code, message, latencyMs, retryable = false, observedIdentity) {
+  const actualModel = observedIdentity === undefined ? undefined : safeExternalMessage(observedIdentity.actualModel, "").slice(0, 128) || undefined;
   return {
     status,
     seatId: request.seatId,
     provider: family,
     requestedModel,
+    ...actualModel === undefined || observedIdentity === undefined ? {} : {
+      actualModel,
+      modelIdentity: observedIdentity.modelIdentity,
+      ...observedIdentity.route === undefined ? {} : { route: observedIdentity.route }
+    },
     role: request.role,
     latencyMs,
     error: { code, message, retryable }
@@ -16539,7 +16627,12 @@ function healthFromResponse(response) {
       reason: ""
     };
   }
-  const status = response.status === "skipped" ? response.error.code === "unsafe-transport" ? "unsafe-transport" : "unconfigured" : "down";
+  const unsafeErrorCodes = new Set([
+    "unsafe-tool-isolation",
+    "unsafe-transport",
+    "repository-executable"
+  ]);
+  const status = unsafeErrorCodes.has(response.error.code) ? "unsafe-transport" : response.error.code === "identity-unverified" ? "identity-unverified" : response.status === "skipped" ? "unconfigured" : "down";
   return {
     status,
     provider: response.provider,
@@ -16549,29 +16642,14 @@ function healthFromResponse(response) {
     reason: response.error.message
   };
 }
-function httpPayload(kind, model, prompt) {
-  if (kind === "openai-responses") {
-    return JSON.stringify({
-      model,
-      input: structuredPrompt(prompt),
-      max_output_tokens: 32768,
-      reasoning: { effort: "high" }
-    });
-  }
+function httpPayload(model, prompt) {
   return JSON.stringify({
     model,
     messages: [{ role: "user", content: structuredPrompt(prompt) }],
     max_tokens: 32768
   });
 }
-function extractHttpAnswer(kind, body) {
-  if (kind === "openai-responses") {
-    const parsed2 = OpenAIResponseSchema.safeParse(body);
-    if (!parsed2.success)
-      return;
-    const rawAnswer = parsed2.data.output.flatMap((item) => item.content).filter((item) => item.type === "output_text").map((item) => item.text ?? "").join("");
-    return { actualModel: parsed2.data.model, rawAnswer };
-  }
+function extractHttpAnswer(body) {
   const parsed = ChatCompletionSchema.safeParse(body);
   if (!parsed.success)
     return;
@@ -16603,7 +16681,7 @@ function createHttpAdapter(config2, transport = nativeHttpTransport) {
         url: config2.endpoint,
         method: "POST",
         headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
-        body: httpPayload(config2.responseKind, model2, request.prompt)
+        body: httpPayload(model2, request.prompt)
       }, defaultRetryPolicy(request.context.timeoutMs));
       let model = configuredRoute.primary;
       let providerResult = await invokeModel(model);
@@ -16618,7 +16696,7 @@ function createHttpAdapter(config2, transport = nativeHttpTransport) {
       if (providerResult.status !== "ok") {
         return seatError(request, config2.family, configuredRoute.primary, providerResult.status === "timed-out" ? "timed-out" : "failed", providerResult.errorCode ?? "provider-failed", safeExternalMessage(providerResult.message, "provider request failed"), latencyMs, ["network", "rate-limit", "server"].includes(providerResult.errorCode ?? ""));
       }
-      const extracted = extractHttpAnswer(config2.responseKind, providerResult.body);
+      const extracted = extractHttpAnswer(providerResult.body);
       if (!extracted) {
         capture(request, config2.family, "invalid-provider-response", serialiseUnknown(providerResult.body));
         return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-provider-response", "provider response did not contain verified model metadata and text", latencyMs);
@@ -16640,70 +16718,480 @@ function createHttpAdapter(config2, transport = nativeHttpTransport) {
   };
   return adapter;
 }
-function createGoogleAdapter(transport = nativeHttpTransport) {
-  const family = "google";
+var JsonStreamEventSchema = exports_external.object({ type: exports_external.string().min(1) }).passthrough();
+var OmpContentBlockSchema = exports_external.discriminatedUnion("type", [
+  exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }).passthrough(),
+  exports_external.object({ type: exports_external.literal("thinking"), thinking: exports_external.string() }).passthrough()
+]);
+var OmpMessageSchema = exports_external.object({
+  role: exports_external.enum(["user", "assistant"]),
+  content: exports_external.array(OmpContentBlockSchema),
+  provider: exports_external.string().min(1).optional(),
+  model: exports_external.string().min(1).optional()
+});
+var OmpMessageEventSchema = exports_external.object({
+  type: exports_external.enum(["message_start", "message_end"]),
+  message: OmpMessageSchema
+});
+var OmpSessionEventSchema = exports_external.object({
+  type: exports_external.literal("session"),
+  version: exports_external.number().int().positive(),
+  id: exports_external.string().min(1)
+});
+var OmpMessageUpdateSchema = exports_external.object({
+  type: exports_external.literal("message_update"),
+  assistantMessageEvent: exports_external.object({
+    type: exports_external.enum(["thinking_start", "thinking_end", "text_start", "text_delta", "text_end"])
+  })
+});
+var OmpTurnEndSchema = exports_external.object({
+  type: exports_external.literal("turn_end"),
+  message: OmpMessageSchema
+});
+var OmpAgentEndSchema = exports_external.object({
+  type: exports_external.literal("agent_end"),
+  messages: exports_external.array(OmpMessageSchema).min(1)
+});
+var AgyEventEnvelopeSchema = exports_external.object({ event: exports_external.string().min(1) }).passthrough();
+var AgyInitEventSchema = exports_external.object({
+  event: exports_external.literal("init"),
+  init: exports_external.object({
+    model: exports_external.string().min(1),
+    cwd: exports_external.string().min(1),
+    tools: exports_external.array(exports_external.string().min(1))
+  })
+});
+var AgyStepEventSchema = exports_external.object({
+  event: exports_external.literal("step_update"),
+  step_update: exports_external.object({
+    step_index: exports_external.number().int().nonnegative(),
+    state: exports_external.string().min(1),
+    step_type: exports_external.string().min(1)
+  })
+});
+var AgyToolEventSchema = exports_external.object({
+  event: exports_external.literal("step_update"),
+  step_update: exports_external.object({
+    step_index: exports_external.number().int().nonnegative(),
+    state: exports_external.enum(["ACTIVE", "DONE"]),
+    step_type: exports_external.literal("tool"),
+    tool_name: exports_external.string().min(1),
+    tool_info: exports_external.object({
+      parameters: exports_external.object({ AbsolutePath: exports_external.string().min(1) }).passthrough()
+    })
+  })
+});
+var AgyResultEventSchema = exports_external.object({
+  event: exports_external.literal("result"),
+  result: exports_external.object({
+    status: exports_external.literal("SUCCESS"),
+    response: exports_external.string().min(1)
+  })
+});
+var agyAnswerSchema = JSON.stringify({
+  type: "object",
+  additionalProperties: false,
+  required: ["recommendation", "evidence", "assumptions", "risks", "uncertainty", "decisiveTest"],
+  properties: {
+    recommendation: { type: "string", minLength: 1 },
+    evidence: { type: "array", items: { type: "string", minLength: 1 } },
+    assumptions: { type: "array", items: { type: "string", minLength: 1 } },
+    risks: { type: "array", items: { type: "string", minLength: 1 } },
+    uncertainty: { type: "string", minLength: 1 },
+    decisiveTest: { type: "string", minLength: 1 }
+  }
+});
+function parseFailure(code, actualModel) {
+  return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
+}
+function containsUnsafeToolNode(value) {
+  if (Array.isArray(value))
+    return value.some(containsUnsafeToolNode);
+  if (!isRecord(value))
+    return false;
+  if (typeof value.type === "string" && /tool|browser|mcp|bash|read_file|write_file|edit_file/i.test(value.type) || typeof value.step_type === "string" && /tool|subagent|browser|mcp|bash|read_file|write_file|edit_file/i.test(value.step_type)) {
+    return true;
+  }
+  if (Object.keys(value).some((key) => /^(?:toolName|toolCallId|tool_name|tool_info|browser|mcp)$/i.test(key))) {
+    return true;
+  }
+  return Object.values(value).some(containsUnsafeToolNode);
+}
+function ompStreamFailure(value, actualModel) {
+  return parseFailure(containsUnsafeToolNode(value) ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
+}
+function extractOmpOutput(stdout) {
+  let state = "await-session";
+  let actualModel;
+  let output;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim())
+      continue;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    const envelope = JsonStreamEventSchema.safeParse(value);
+    if (!envelope.success)
+      return ompStreamFailure(value, actualModel);
+    switch (envelope.data.type) {
+      case "session": {
+        if (state !== "await-session" || !OmpSessionEventSchema.safeParse(value).success) {
+          return ompStreamFailure(value, actualModel);
+        }
+        state = "await-agent-start";
+        break;
+      }
+      case "agent_start":
+        if (state !== "await-agent-start")
+          return ompStreamFailure(value, actualModel);
+        state = "await-turn-start";
+        break;
+      case "turn_start":
+        if (state !== "await-turn-start")
+          return ompStreamFailure(value, actualModel);
+        state = "await-user-start";
+        break;
+      case "message_start":
+      case "message_end": {
+        const messageEvent = OmpMessageEventSchema.safeParse(value);
+        if (!messageEvent.success)
+          return ompStreamFailure(value, actualModel);
+        const { message, type } = messageEvent.data;
+        if (type === "message_start" && message.role === "user") {
+          if (state !== "await-user-start" || message.content.some((part) => part.type !== "text")) {
+            return ompStreamFailure(value, actualModel);
+          }
+          state = "await-user-end";
+          break;
+        }
+        if (type === "message_end" && message.role === "user") {
+          if (state !== "await-user-end" || message.content.some((part) => part.type !== "text")) {
+            return ompStreamFailure(value, actualModel);
+          }
+          state = "await-assistant-start";
+          break;
+        }
+        if (message.role !== "assistant")
+          return ompStreamFailure(value, actualModel);
+        if (message.provider !== "openai-codex" || message.model === undefined || actualModel !== undefined && actualModel !== message.model) {
+          return parseFailure("identity-unverified", message.model ?? actualModel);
+        }
+        actualModel = message.model;
+        if (type === "message_start") {
+          if (state !== "await-assistant-start")
+            return ompStreamFailure(value, actualModel);
+          state = "assistant-stream";
+          break;
+        }
+        if (state !== "assistant-stream")
+          return ompStreamFailure(value, actualModel);
+        const rawAnswer = message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+        if (!rawAnswer.trim())
+          return parseFailure("identity-unverified", actualModel);
+        output = { status: "ok", actualModel, rawAnswer };
+        state = "await-turn-end";
+        break;
+      }
+      case "message_update":
+        if (state !== "assistant-stream" || !OmpMessageUpdateSchema.safeParse(value).success) {
+          return ompStreamFailure(value, actualModel);
+        }
+        break;
+      case "turn_end": {
+        const turn = OmpTurnEndSchema.safeParse(value);
+        if (state !== "await-turn-end" || !turn.success || turn.data.message.role !== "assistant" || turn.data.message.provider !== "openai-codex" || turn.data.message.model !== actualModel) {
+          return ompStreamFailure(value, actualModel);
+        }
+        state = "await-agent-end";
+        break;
+      }
+      case "agent_end":
+        if (state !== "await-agent-end" || !OmpAgentEndSchema.safeParse(value).success) {
+          return ompStreamFailure(value, actualModel);
+        }
+        state = "closed";
+        break;
+      default:
+        return ompStreamFailure(value, actualModel);
+    }
+  }
+  return state === "closed" && output !== undefined ? output : parseFailure("identity-unverified", actualModel);
+}
+function canonicalPath(path) {
+  const canonical = normalize(resolve2(path));
+  return process.platform === "win32" ? canonical.toLocaleLowerCase() : canonical;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+function extractAgyOutput(stdout, workingDirectory) {
+  let state = "await-init";
+  let actualModel;
+  let activeToolIndex;
+  let rawAnswer;
+  const expectedWorkingDirectory = workingDirectory !== undefined && isAbsolute2(workingDirectory) ? canonicalPath(workingDirectory) : undefined;
+  const expectedPromptPath = expectedWorkingDirectory === undefined ? undefined : canonicalPath(join2(expectedWorkingDirectory, "council-prompt.txt"));
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim())
+      continue;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    const envelope = AgyEventEnvelopeSchema.safeParse(value);
+    if (!envelope.success)
+      return parseFailure("identity-unverified", actualModel);
+    if (state === "terminal")
+      return parseFailure("identity-unverified", actualModel);
+    if (envelope.data.event === "init") {
+      const init = AgyInitEventSchema.safeParse(value);
+      if (!init.success || state !== "await-init") {
+        return parseFailure("unsafe-tool-isolation", actualModel);
+      }
+      actualModel = init.data.init.model;
+      if (expectedWorkingDirectory === undefined || !isAbsolute2(init.data.init.cwd) || canonicalPath(init.data.init.cwd) !== expectedWorkingDirectory || !init.data.init.tools.includes("view_file")) {
+        return parseFailure("unsafe-tool-isolation", actualModel);
+      }
+      state = "before-read";
+      continue;
+    }
+    if (envelope.data.event === "step_update") {
+      const step = AgyStepEventSchema.safeParse(value);
+      if (!step.success) {
+        return parseFailure(containsUnsafeToolNode(value) ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
+      }
+      const update = step.data.step_update;
+      if (update.step_type === "tool") {
+        const tool = AgyToolEventSchema.safeParse(value);
+        if (!tool.success || expectedPromptPath === undefined) {
+          return parseFailure("unsafe-tool-isolation", actualModel);
+        }
+        const reportedPath = tool.data.step_update.tool_info.parameters.AbsolutePath;
+        if (tool.data.step_update.tool_name !== "view_file" || !isAbsolute2(reportedPath) || canonicalPath(reportedPath) !== expectedPromptPath) {
+          return parseFailure("unsafe-tool-isolation", actualModel);
+        }
+        if (tool.data.step_update.state === "ACTIVE" && state === "before-read" && activeToolIndex === undefined) {
+          activeToolIndex = tool.data.step_update.step_index;
+          state = "reading";
+          continue;
+        }
+        if (tool.data.step_update.state === "DONE" && state === "reading" && activeToolIndex === tool.data.step_update.step_index) {
+          state = "after-read";
+          continue;
+        }
+        return parseFailure("unsafe-tool-isolation", actualModel);
+      }
+      if (state === "before-read" && update.state === "DONE" && ["user_input", "unknown", "agent_response"].includes(update.step_type)) {
+        continue;
+      }
+      if (state === "after-read" && update.state === "DONE" && ["checkpoint", "agent_response"].includes(update.step_type)) {
+        continue;
+      }
+      if (state === "after-read" && update.state === "DONE" && update.step_type === "finish") {
+        state = "finished";
+        continue;
+      }
+      return parseFailure(containsUnsafeToolNode(value) || update.step_type === "subagent" ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
+    }
+    if (envelope.data.event === "result") {
+      const result = AgyResultEventSchema.safeParse(value);
+      if (!result.success || state !== "finished") {
+        return parseFailure("identity-unverified", actualModel);
+      }
+      rawAnswer = result.data.result.response;
+      state = "terminal";
+      continue;
+    }
+    return parseFailure(/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value) ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
+  }
+  return state === "terminal" && actualModel !== undefined && rawAnswer !== undefined ? { status: "ok", actualModel, rawAnswer } : state === "await-init" || state === "finished" ? parseFailure("identity-unverified", actualModel) : parseFailure("unsafe-tool-isolation", actualModel);
+}
+function observedRoute(route, actualModel) {
+  if (actualModel === route.primary)
+    return "primary";
+  return route.fallbacks.includes(actualModel) ? "same-provider-fallback" : undefined;
+}
+function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
+  const route = (context) => context.registry[config2.family];
   const adapter = {
-    family,
-    transport: "http",
+    family: config2.family,
+    transport: "subscription-cli",
     async availability(context) {
+      const configurationError = config2.configurationError?.();
+      const executable = resolveExecutable();
       return {
-        status: context.env.GEMINI_API_KEY ? "available" : "unconfigured",
-        provider: family,
-        model: context.registry.google.primary,
-        reason: context.env.GEMINI_API_KEY ? "" : "missing GEMINI_API_KEY"
+        status: configurationError ? "unconfigured" : executable && isAbsolute2(executable) ? "available" : executable ? "unsafe-transport" : "unconfigured",
+        provider: config2.family,
+        model: route(context).primary,
+        reason: configurationError ?? (executable && isAbsolute2(executable) ? "" : executable ? `${config2.executableName} executable is not absolute` : `${config2.executableName} executable not found`)
       };
     },
     async invoke(request) {
-      const startedAt = Date.now();
-      const route = request.context.registry.google;
-      const credential = request.context.env.GEMINI_API_KEY;
-      if (!credential) {
-        return seatError(request, family, route.primary, "skipped", "missing-credential", "missing GEMINI_API_KEY", 0);
+      const configuredRoute = route(request.context);
+      const configurationError = config2.configurationError?.();
+      if (configurationError) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-subscription-profile", configurationError, 0);
       }
-      const invokeModel = (model2) => transport.request({
-        url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model2)}:generateContent`,
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": credential },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: structuredPrompt(request.prompt) }] }],
-          generationConfig: { maxOutputTokens: 32768 }
-        })
-      }, defaultRetryPolicy(request.context.timeoutMs));
-      let model = route.primary;
-      let providerResult = await invokeModel(model);
-      let seatRoute = "primary";
-      const fallback = route.fallbacks[0];
-      if (providerResult.errorCode === "model-not-found" && fallback !== undefined) {
-        model = fallback;
-        seatRoute = "same-provider-fallback";
-        providerResult = await invokeModel(model);
+      const executable = resolveExecutable();
+      if (!executable) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-executable", `${config2.executableName} executable not found`, 0);
       }
-      const latencyMs = Date.now() - startedAt;
-      if (providerResult.status !== "ok") {
-        return seatError(request, family, route.primary, providerResult.status === "timed-out" ? "timed-out" : "failed", providerResult.errorCode ?? "provider-failed", safeExternalMessage(providerResult.message, "provider request failed"), latencyMs);
+      if (!isAbsolute2(executable)) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "unsafe-transport", `${config2.executableName} executable is not absolute`, 0);
       }
-      const parsed = GoogleResponseSchema.safeParse(providerResult.body);
-      if (!parsed.success) {
-        capture(request, family, "invalid-provider-response", serialiseUnknown(providerResult.body));
-        return seatError(request, family, route.primary, "failed", "invalid-provider-response", "provider response did not contain verified model metadata and text", latencyMs);
+      const result = await transport.run(config2.request(executable, configuredRoute, request.prompt, request.context.timeoutMs));
+      if (result.status !== "ok") {
+        capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
+        return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
       }
-      const rawAnswer = parsed.data.candidates[0]?.content.parts.map((part) => part.text).join("") ?? "";
-      const answer = parseAnswer(request, family, rawAnswer);
+      const output = config2.output(result.stdout, result.workingDirectory);
+      if (output.status === "failed") {
+        capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
+        return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" });
+      }
+      const seatRoute = observedRoute(configuredRoute, output.actualModel);
+      if (!seatRoute) {
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", `${config2.executableName} reported a model outside the approved route`, result.durationMs, false, { actualModel: output.actualModel, modelIdentity: "unverified" });
+      }
+      const answer = parseAnswer(request, config2.family, output.rawAnswer, false);
       if (!answer) {
-        return seatError(request, family, route.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", latencyMs);
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", result.durationMs, false, {
+          actualModel: output.actualModel,
+          modelIdentity: "verified",
+          route: seatRoute
+        });
       }
-      return seatSuccess(request, family, route.primary, parsed.data.modelVersion, seatRoute, answer, latencyMs);
+      return seatSuccess(request, config2.family, configuredRoute.primary, output.actualModel, seatRoute, answer, result.durationMs);
     },
     async probe(context) {
       return healthFromResponse(await adapter.invoke({
         context,
-        seatId: "health-google",
+        seatId: `health-${config2.family}`,
         role: "health",
         prompt: healthPrompt
       }));
     }
   };
   return adapter;
+}
+var ompCouncilProfile = "claude-council";
+var ompIsolationConfig = [
+  "advisor:",
+  "  enabled: false",
+  "prewalk:",
+  "  enabled: false",
+  "disabledProviders:",
+  "  - native",
+  "  - claude",
+  "  - codex",
+  "  - gemini",
+  "  - opencode",
+  "  - github",
+  "  - agents",
+  "  - agents-md"
+].join(`
+`);
+function ompCouncilProfileConfigurationError() {
+  const profileConfig = join2(homedir(), ".omp", "profiles", ompCouncilProfile, "agent", "config.yml");
+  return existsSync2(profileConfig) ? undefined : `OMP profile ${ompCouncilProfile} is not configured`;
+}
+function createOpenAiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("omp") ?? undefined, profileConfigurationError = ompCouncilProfileConfigurationError) {
+  return createSubscriptionCliAdapter({
+    family: "openai",
+    executableName: "omp",
+    configurationError: profileConfigurationError,
+    request: (executable, route, prompt, timeoutMs) => ({
+      executable,
+      args: [
+        "-p",
+        "--profile",
+        ompCouncilProfile,
+        "--mode",
+        "json",
+        "--model",
+        `openai-codex/${route.primary}`,
+        "--thinking",
+        "max",
+        "--no-tools",
+        "--no-lsp",
+        "--no-extensions",
+        "--no-skills",
+        "--no-rules",
+        "--no-session",
+        "--config",
+        (workingDirectory) => join2(workingDirectory, "omp-isolation.yml"),
+        "--no-prewalk",
+        "--no-title",
+        "--system-prompt",
+        "You are a stateless tool-free council seat. Return only the requested JSON.",
+        "@council-prompt.txt"
+      ],
+      stdin: "",
+      timeoutMs,
+      cwd: tmpdir(),
+      files: {
+        "council-prompt.txt": structuredPrompt(prompt),
+        "omp-isolation.yml": ompIsolationConfig
+      }
+    }),
+    output: extractOmpOutput
+  }, transport, resolveExecutable);
+}
+function resolveAgyExecutable() {
+  const onPath = Bun.which("agy");
+  if (onPath)
+    return onPath;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData || process.platform !== "win32")
+    return;
+  const candidate = join2(localAppData, "agy", "bin", "agy.exe");
+  return existsSync2(candidate) ? candidate : undefined;
+}
+function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveAgyExecutable) {
+  return createSubscriptionCliAdapter({
+    family: "google",
+    executableName: "agy",
+    request: (executable, route, prompt, timeoutMs) => ({
+      executable,
+      args: [
+        "--sandbox",
+        "--mode",
+        "plan",
+        "--effort",
+        "high",
+        "--output-format",
+        "stream-json",
+        "--json-schema",
+        agyAnswerSchema,
+        "--model",
+        route.primary,
+        "--print-timeout",
+        `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
+        "-p",
+        (workingDirectory) => `Read ${join2(workingDirectory, "council-prompt.txt")}, follow it exactly, and do not use any other tool.`
+      ],
+      stdin: "",
+      timeoutMs,
+      cwd: tmpdir(),
+      files: {
+        "council-prompt.txt": structuredPrompt(prompt),
+        ".gemini/antigravity-cli/settings.json": (workingDirectory) => JSON.stringify({
+          enableTelemetry: false,
+          trustedWorkspaces: [workingDirectory],
+          permissions: {
+            allow: [`read_file(${join2(workingDirectory, "council-prompt.txt")})`]
+          }
+        })
+      },
+      workingDirectoryEnv: ["HOME", "USERPROFILE"]
+    }),
+    output: extractAgyOutput
+  }, transport, resolveExecutable);
 }
 function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("claude") ?? undefined) {
   const family = "anthropic";
@@ -17410,6 +17898,9 @@ class CouncilRunner {
     if (adapter === undefined) {
       return failureResponse(assignment, requestedModel, "skipped", "adapter-unconfigured", "No configured adapter is available for this provider family.");
     }
+    if (adapter.transport !== this.context.registry[assignment.provider].transport) {
+      return failureResponse(assignment, requestedModel, "failed", "unsafe-transport", "The provider adapter transport does not match the governed route.");
+    }
     const request = {
       context: this.context,
       seatId: assignment.seatId,
@@ -17449,7 +17940,7 @@ var registry_default = {
   openai: {
     primary: "gpt-5.6-sol",
     fallbacks: [],
-    transport: "http"
+    transport: "subscription-cli"
   },
   xai: {
     primary: "grok-4.5",
@@ -17457,9 +17948,9 @@ var registry_default = {
     transport: "http"
   },
   google: {
-    primary: "gemini-3.1-pro-preview",
-    fallbacks: ["gemini-3.6-flash"],
-    transport: "http"
+    primary: "gemini-3.1-pro-high",
+    fallbacks: ["gemini-3.6-flash-high"],
+    transport: "subscription-cli"
   },
   deepseek: {
     primary: "deepseek-v4-pro",
@@ -17615,7 +18106,7 @@ async function probeAdapter(adapter, context) {
   }
   const identityUnverified = parsedHealth.data.status === "identity-unverified" || parsedHealth.data.status === "healthy" && parsedHealth.data.actualModel === null;
   const status = identityUnverified ? "identity-unverified" : parsedHealth.data.status;
-  const actualModel = identityUnverified ? null : parsedHealth.data.actualModel === null ? null : sanitiseModel(parsedHealth.data.actualModel);
+  const actualModel = parsedHealth.data.actualModel === null ? null : sanitiseModel(parsedHealth.data.actualModel);
   return ProviderProbeSchema.parse({
     provider,
     transport,
@@ -17741,7 +18232,7 @@ function errorCategory(status) {
       return "unsafe-transport";
   }
 }
-function observedRoute(probe, route) {
+function observedRoute2(probe, route) {
   if (probe.status === "identity-unverified")
     return "unverified";
   if (probe.status !== "healthy" || probe.actualModel === null)
@@ -17760,7 +18251,7 @@ function snapshot(probes, registry2, capturedAt = new Date().toISOString()) {
     return ProviderRouteHealthSchema.parse({
       provider: probe.provider,
       route,
-      observedRoute: observedRoute(probe, route),
+      observedRoute: observedRoute2(probe, route),
       requestedModel: sanitiseModel2(probe.requestedModel),
       actualModel: probe.actualModel === null ? null : sanitiseModel2(probe.actualModel),
       identity: identityState(probe),
@@ -17825,7 +18316,7 @@ var REMEDIATION_ACTIONS = {
   "review-route-drift": "Review and explicitly authorise the route or model change before updating the baseline."
 };
 function routeResolution(probe) {
-  const kind = probe.transport === "cli" ? "executable" : "endpoint";
+  const kind = probe.transport === "http" ? "endpoint" : "executable";
   const status = probe.availability === "unconfigured" || probe.status === "unconfigured" ? "unresolved" : probe.availability === "unsafe-transport" || probe.status === "unsafe-transport" ? "unsafe" : "resolved";
   return RouteResolutionSchema.parse({ kind, status });
 }
@@ -18252,14 +18743,13 @@ function deepseekAdapter(transport) {
     family: "deepseek",
     credential: "DEEPSEEK_API_KEY",
     endpoint: "https://api.deepseek.com/chat/completions",
-    responseKind: "chat",
     allowRegistryFallback: true
   }, transport);
 }
 
 // src/providers/google.ts
-function googleAdapter(transport) {
-  return createGoogleAdapter(transport);
+function googleAdapter(transport, resolveExecutable) {
+  return createGoogleSubscriptionAdapter(transport, resolveExecutable);
 }
 
 // src/providers/moonshot.ts
@@ -18268,20 +18758,13 @@ function moonshotAdapter(transport) {
     family: "moonshot",
     credential: "MOONSHOT_API_KEY",
     endpoint: "https://api.moonshot.ai/v1/chat/completions",
-    responseKind: "chat",
     allowRegistryFallback: false
   }, transport);
 }
 
 // src/providers/openai.ts
-function openaiAdapter(transport) {
-  return createHttpAdapter({
-    family: "openai",
-    credential: "OPENAI_API_KEY",
-    endpoint: "https://api.openai.com/v1/responses",
-    responseKind: "openai-responses",
-    allowRegistryFallback: false
-  }, transport);
+function openaiAdapter(transport, resolveExecutable, profileConfigurationError) {
+  return createOpenAiSubscriptionAdapter(transport, resolveExecutable, profileConfigurationError);
 }
 
 // src/providers/xai.ts
@@ -18290,7 +18773,6 @@ function xaiAdapter(transport) {
     family: "xai",
     credential: "XAI_API_KEY",
     endpoint: "https://api.x.ai/v1/chat/completions",
-    responseKind: "chat",
     allowRegistryFallback: false
   }, transport);
 }
@@ -18299,9 +18781,9 @@ function xaiAdapter(transport) {
 function createProviderRoster(options = {}) {
   return {
     anthropic: anthropicAdapter(options.cliTransport, options.resolveClaudeExecutable),
-    openai: openaiAdapter(options.httpTransport),
+    openai: openaiAdapter(options.cliTransport, options.resolveOpenAiExecutable),
     xai: xaiAdapter(options.httpTransport),
-    google: googleAdapter(options.httpTransport),
+    google: googleAdapter(options.cliTransport, options.resolveGoogleExecutable),
     deepseek: deepseekAdapter(options.httpTransport),
     moonshot: moonshotAdapter(options.httpTransport)
   };
@@ -18309,12 +18791,12 @@ function createProviderRoster(options = {}) {
 
 // src/records/migrate-general.ts
 import { chmod } from "fs/promises";
-import { isAbsolute as isAbsolute3, relative as relative2, resolve as resolve3, win32 } from "path";
+import { isAbsolute as isAbsolute3, relative as relative2, resolve as resolve4, win32 } from "path";
 
 // src/records/store.ts
 import { randomUUID } from "crypto";
-import { dirname, basename, join as join2, resolve as resolve2 } from "path";
-import { link, mkdir, open, readdir, rename, rm as rm2 } from "fs/promises";
+import { dirname, basename, join as join3, resolve as resolve3 } from "path";
+import { link, mkdir as mkdir2, open, readdir, rename, rm as rm2 } from "fs/promises";
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
 
 // src/roles/allocator.ts
@@ -19077,11 +19559,11 @@ async function removeTemporaryFile(path, originalError) {
 async function writeTextAtomically(destination, content, options = {}) {
   const replaceExisting = options.replace ?? true;
   const parent = dirname(destination);
-  await mkdir(parent, { recursive: true });
+  await mkdir2(parent, { recursive: true });
   if (!replaceExisting && await Bun.file(destination).exists()) {
     throw new Error(`Refusing to replace append-only record: ${destination}`);
   }
-  const temporary = join2(parent, `.${basename(destination)}.${randomUUID()}.tmp`);
+  const temporary = join3(parent, `.${basename(destination)}.${randomUUID()}.tmp`);
   const intendedHash = sha256Hex(content);
   try {
     await Bun.write(temporary, content);
@@ -19119,15 +19601,15 @@ async function writeTextAtomically(destination, content, options = {}) {
 }
 function scopeDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join2(root, "general");
+    return join3(root, "general");
   if (!projectId)
     throw new Error("Project records require a projectId");
-  return join2(root, "projects", projectId);
+  return join3(root, "projects", projectId);
 }
 async function jsonFiles(directory) {
   try {
     const entries = await readdir(directory, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && /\.json$/i.test(entry.name)).map((entry) => join2(directory, entry.name)).sort();
+    return entries.filter((entry) => entry.isFile() && /\.json$/i.test(entry.name)).map((entry) => join3(directory, entry.name)).sort();
   } catch (error51) {
     if (systemErrorCode(error51) === "ENOENT")
       return [];
@@ -19152,9 +19634,9 @@ function fileStem(path) {
   return name.slice(0, -".json".length);
 }
 async function validatePersistedScope(directory) {
-  const sessionPaths = await jsonFiles(join2(directory, "sessions"));
-  const resolutionPaths = await jsonFiles(join2(directory, "resolutions"));
-  const chairAcceptancePaths = await jsonFiles(join2(directory, "chair-acceptances"));
+  const sessionPaths = await jsonFiles(join3(directory, "sessions"));
+  const resolutionPaths = await jsonFiles(join3(directory, "resolutions"));
+  const chairAcceptancePaths = await jsonFiles(join3(directory, "chair-acceptances"));
   const sessions = [];
   const resolutions = [];
   const chairAcceptances = [];
@@ -19314,8 +19796,8 @@ async function removeCommittedFile(path, originalError) {
   }
 }
 async function withScopeWriteLock(directory, operation) {
-  await mkdir(directory, { recursive: true });
-  const lockPath = join2(directory, ".write.lock");
+  await mkdir2(directory, { recursive: true });
+  const lockPath = join3(directory, ".write.lock");
   const release = await import_proper_lockfile.lock(directory, {
     lockfilePath: lockPath,
     realpath: false,
@@ -19352,7 +19834,7 @@ class CouncilStore {
     this.root = root;
   }
   static open(root) {
-    return new CouncilStore(resolve2(NonEmptyStringSchema3.parse(root)));
+    return new CouncilStore(resolve3(NonEmptyStringSchema3.parse(root)));
   }
   async readAssignmentHistory(scope, expectedMotion, projectId) {
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(scope), projectId);
@@ -19384,9 +19866,9 @@ class CouncilStore {
           throw new Error(`Motion id ${record2.motionId} has a different execution protocol`);
         }
       }
-      const sessionsDirectory = join2(directory, "sessions");
-      const jsonPath = join2(sessionsDirectory, `${record2.runId}.json`);
-      const markdownPath = join2(sessionsDirectory, `${record2.runId}.md`);
+      const sessionsDirectory = join3(directory, "sessions");
+      const jsonPath = join3(sessionsDirectory, `${record2.runId}.json`);
+      const markdownPath = join3(sessionsDirectory, `${record2.runId}.md`);
       if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
         throw new Error(`Duplicate session id: ${record2.runId}`);
       }
@@ -19428,9 +19910,9 @@ class CouncilStore {
       if (state.chairAcceptances.some(({ runId }) => runId === record2.runId)) {
         throw new Error(`Session already has a chair acceptance: ${record2.runId}`);
       }
-      const acceptancesDirectory = join2(directory, "chair-acceptances");
-      const jsonPath = join2(acceptancesDirectory, `${record2.acceptanceId}.json`);
-      const markdownPath = join2(acceptancesDirectory, `${record2.acceptanceId}.md`);
+      const acceptancesDirectory = join3(directory, "chair-acceptances");
+      const jsonPath = join3(acceptancesDirectory, `${record2.acceptanceId}.json`);
+      const markdownPath = join3(acceptancesDirectory, `${record2.acceptanceId}.md`);
       if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
         throw new Error(`Duplicate chair acceptance id: ${record2.acceptanceId}`);
       }
@@ -19488,10 +19970,10 @@ class CouncilStore {
       if (state.resolutions.some((resolution) => resolution.resolutionId === record2.resolutionId)) {
         throw new Error(`Duplicate resolution id: ${record2.resolutionId}`);
       }
-      const resolutionsDirectory = join2(directory, "resolutions");
-      const jsonPath = join2(resolutionsDirectory, `${record2.resolutionId}.json`);
-      const markdownPath = join2(resolutionsDirectory, `${record2.resolutionId}.md`);
-      const ledgerPath = join2(directory, "ledger.md");
+      const resolutionsDirectory = join3(directory, "resolutions");
+      const jsonPath = join3(resolutionsDirectory, `${record2.resolutionId}.json`);
+      const markdownPath = join3(resolutionsDirectory, `${record2.resolutionId}.md`);
+      const ledgerPath = join3(directory, "ledger.md");
       if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
         throw new Error(`Duplicate resolution id: ${record2.resolutionId}`);
       }
@@ -19829,7 +20311,7 @@ function planGeneralMigration(input) {
   const archiveRelativePath = `archive/${date5}-general/ledger-${sourceSha256.slice(0, 12)}.md`;
   const body = MigrationPlanBodySchema.parse({
     schemaVersion: 1,
-    root: resolve3(parsed.root),
+    root: resolve4(parsed.root),
     sourceRelativePath: parsed.sourceRelativePath,
     sourceContent: parsed.sourceContent,
     sourceSha256,
@@ -19851,8 +20333,8 @@ function planGeneralMigration(input) {
   });
 }
 function absolutePathInsideRoot(root, relativePath) {
-  const absoluteRoot = resolve3(root);
-  const destination = resolve3(absoluteRoot, relativePath);
+  const absoluteRoot = resolve4(root);
+  const destination = resolve4(absoluteRoot, relativePath);
   const fromRoot = relative2(absoluteRoot, destination);
   if (fromRoot === "" || !fromRoot.startsWith("..") && !isAbsolute3(fromRoot))
     return destination;
@@ -20167,7 +20649,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   const policyPath = oneFlag(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath = isAbsolute4(policyPath) ? policyPath : resolve4(cwd, policyPath);
+  const absolutePath = isAbsolute4(policyPath) ? policyPath : resolve5(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath).json();
@@ -20527,10 +21009,10 @@ async function healthCommand(command, args, environment) {
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join3(resolve4(root), "general", "sessions");
+    return join4(resolve5(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join3(resolve4(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join4(resolve5(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
@@ -20551,7 +21033,7 @@ async function storedSessionCommand(command, args) {
         return output(0, { schemaVersion: SCHEMA_VERSION, sessions: [] });
       throw error51;
     }
-    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join3(sessionsDirectory, name)).json())));
+    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join4(sessionsDirectory, name)).json())));
     sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     return output(0, { schemaVersion: SCHEMA_VERSION, sessions });
   }
@@ -20561,7 +21043,7 @@ async function storedSessionCommand(command, args) {
   const runId = safeStorageId(runIdValue, "Run id");
   let session;
   try {
-    session = SessionRecordSchema.parse(await Bun.file(join3(sessionsDirectory, `${runId}.json`)).json());
+    session = SessionRecordSchema.parse(await Bun.file(join4(sessionsDirectory, `${runId}.json`)).json());
   } catch (error51) {
     const code = error51.code;
     if (code === "ENOENT")
@@ -20590,9 +21072,9 @@ async function migrationCommand(args, environment) {
       throw new Error("migrate-general plan requires --root and --output");
     }
     const sourceRelativePath = oneFlag(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join3(resolve4(root), sourceRelativePath)).text();
+    const sourceContent = await Bun.file(join4(resolve5(root), sourceRelativePath)).text();
     const rulesPath = oneFlag(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve4(rulesPath)).json());
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve5(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -20600,12 +21082,12 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve4(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve5(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve4(destination),
+      output: resolve5(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
@@ -20614,7 +21096,7 @@ async function migrationCommand(args, environment) {
     const planPath = oneFlag(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve4(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve5(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }

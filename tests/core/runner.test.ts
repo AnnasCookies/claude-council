@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import type { ProviderFamily, RoleCategory, SeatResponse } from '../../src/domain/schemas';
+import type {
+  ModelTransport,
+  ProviderFamily,
+  RoleCategory,
+  SeatResponse,
+} from '../../src/domain/schemas';
 import type { ModelRegistry } from '../../src/models/registry';
 import type {
   Availability,
@@ -39,13 +44,16 @@ const providerContext: ProviderContext = {
 type FakeReply = (request: ProviderRequest) => SeatResponse | Promise<SeatResponse>;
 
 class FakeAdapter implements ProviderAdapter {
-  readonly transport = 'http' as const;
+  readonly transport: ModelTransport;
   readonly calls: ProviderRequest[] = [];
 
   constructor(
     readonly family: ProviderFamily,
     private readonly replies: FakeReply[],
-  ) {}
+    transport: ModelTransport = registry[family].transport,
+  ) {
+    this.transport = transport;
+  }
 
   async availability(): Promise<Availability> {
     return {
@@ -239,6 +247,26 @@ describe('CouncilRunner', () => {
     await pendingRun;
 
     expect(callsBeforeFirstSeatResolved).toEqual([1, 1]);
+  });
+
+  test('fails a governed transport mismatch before invoking the adapter', async () => {
+    const openai = new FakeAdapter(
+      'openai',
+      [(request) => successfulResponse(request, 'openai')],
+      'cli',
+    );
+    const runner = new CouncilRunner({
+      adapters: { openai },
+      context: providerContext,
+    });
+
+    const result = await runner.run(runInput());
+    const response = result.rounds[0]?.responses.find(({ provider }) => provider === 'openai');
+
+    expect(openai.calls).toHaveLength(0);
+    expect(response?.status).toBe('failed');
+    if (response?.status === 'ok') throw new Error('transport mismatch unexpectedly succeeded');
+    expect(response?.error.code).toBe('unsafe-transport');
   });
 
   test('rejects a significant one-round run before invoking a provider', async () => {

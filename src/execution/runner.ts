@@ -494,6 +494,16 @@ export class CouncilRunner {
       );
     }
 
+    if (adapter.transport !== this.context.registry[assignment.provider].transport) {
+      return failureResponse(
+        assignment,
+        requestedModel,
+        'failed',
+        'unsafe-transport',
+        'The provider adapter transport does not match the governed route.',
+      );
+    }
+
     const request: ProviderRequest = {
       context: this.context,
       seatId: assignment.seatId,

@@ -13,14 +13,16 @@ export interface ProviderRosterOptions {
   httpTransport?: HttpTransport;
   cliTransport?: CliTransport;
   resolveClaudeExecutable?: () => string | undefined;
+  resolveOpenAiExecutable?: () => string | undefined;
+  resolveGoogleExecutable?: () => string | undefined;
 }
 
 export function createProviderRoster(options: ProviderRosterOptions = {}): ProviderRoster {
   return {
     anthropic: anthropicAdapter(options.cliTransport, options.resolveClaudeExecutable),
-    openai: openaiAdapter(options.httpTransport),
+    openai: openaiAdapter(options.cliTransport, options.resolveOpenAiExecutable),
     xai: xaiAdapter(options.httpTransport),
-    google: googleAdapter(options.httpTransport),
+    google: googleAdapter(options.cliTransport, options.resolveGoogleExecutable),
     deepseek: deepseekAdapter(options.httpTransport),
     moonshot: moonshotAdapter(options.httpTransport),
   };

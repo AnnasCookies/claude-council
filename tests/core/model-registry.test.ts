@@ -26,8 +26,10 @@ describe('model registry', () => {
     expect(registry.anthropic.primary).toBe('claude-opus-5');
     expect(registry.openai.primary).toBe('gpt-5.6-sol');
     expect(registry.xai.primary).toBe('grok-4.5');
-    expect(registry.google.primary).toBe('gemini-3.1-pro-preview');
-    expect(registry.google.fallbacks).toEqual(['gemini-3.6-flash']);
+    expect(registry.google.primary).toBe('gemini-3.1-pro-high');
+    expect(registry.google.fallbacks).toEqual(['gemini-3.6-flash-high']);
+    expect(registry.openai.transport).toBe('subscription-cli');
+    expect(registry.google.transport).toBe('subscription-cli');
     expect(registry.deepseek.primary).toBe('deepseek-v4-pro');
     expect(registry.deepseek.fallbacks).toEqual(['deepseek-v4-flash']);
     expect(registry.moonshot.primary).toBe('kimi-k3');
@@ -36,15 +38,15 @@ describe('model registry', () => {
   test('merges and reparses recognised provider overrides', async () => {
     await withRegistryOverride(
       {
-        google: { primary: 'gemini-3.6-flash', fallbacks: [] },
+        google: { primary: 'gemini-3.6-flash-high', fallbacks: [] },
       },
       async (path) => {
         const registry = await loadModelRegistry(path);
 
         expect(registry.google).toEqual({
-          primary: 'gemini-3.6-flash',
+          primary: 'gemini-3.6-flash-high',
           fallbacks: [],
-          transport: 'http',
+          transport: 'subscription-cli',
         });
         expect(registry.anthropic.primary).toBe('claude-opus-5');
       },

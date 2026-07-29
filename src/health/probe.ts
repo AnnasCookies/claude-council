@@ -182,11 +182,8 @@ async function probeAdapter(
   const status: HealthStatus = identityUnverified
     ? 'identity-unverified'
     : parsedHealth.data.status;
-  const actualModel = identityUnverified
-    ? null
-    : parsedHealth.data.actualModel === null
-      ? null
-      : sanitiseModel(parsedHealth.data.actualModel);
+  const actualModel =
+    parsedHealth.data.actualModel === null ? null : sanitiseModel(parsedHealth.data.actualModel);
 
   return ProviderProbeSchema.parse({
     provider,

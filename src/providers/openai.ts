@@ -1,14 +1,13 @@
-import { createHttpAdapter, type HttpTransport, type ProviderAdapter } from '../execution/provider';
+import {
+  createOpenAiSubscriptionAdapter,
+  type CliTransport,
+  type ProviderAdapter,
+} from '../execution/provider';
 
-export function openaiAdapter(transport?: HttpTransport): ProviderAdapter {
-  return createHttpAdapter(
-    {
-      family: 'openai',
-      credential: 'OPENAI_API_KEY',
-      endpoint: 'https://api.openai.com/v1/responses',
-      responseKind: 'openai-responses',
-      allowRegistryFallback: false,
-    },
-    transport,
-  );
+export function openaiAdapter(
+  transport?: CliTransport,
+  resolveExecutable?: () => string | undefined,
+  profileConfigurationError?: () => string | undefined,
+): ProviderAdapter {
+  return createOpenAiSubscriptionAdapter(transport, resolveExecutable, profileConfigurationError);
 }

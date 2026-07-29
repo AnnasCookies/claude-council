@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import type { SeatResponse } from '../../src/domain/schemas';
+import type { ModelTransport, SeatResponse } from '../../src/domain/schemas';
 import type {
   Availability,
   HealthResult,
@@ -14,7 +14,7 @@ import { loadModelRegistry, type ModelRegistry } from '../../src/models/registry
 const CAPTURED_AT = '2026-07-28T00:00:00.000Z';
 
 class FakeAdapter implements ProviderAdapter {
-  readonly transport: 'http' | 'cli';
+  readonly transport: ModelTransport;
   availabilityCalls = 0;
   probeCalls = 0;
 
@@ -22,7 +22,7 @@ class FakeAdapter implements ProviderAdapter {
     readonly family: HealthResult['provider'],
     private readonly available: Availability,
     private readonly health: HealthResult,
-    transport: 'http' | 'cli' = 'http',
+    transport: ModelTransport = 'http',
   ) {
     this.transport = transport;
   }
@@ -112,6 +112,7 @@ describe('provider health probes', () => {
         latencyMs: 1,
         reason: '',
       },
+      'subscription-cli',
     );
     const unsafe = new FakeAdapter(
       'anthropic',
@@ -249,6 +250,7 @@ describe('health baselines', () => {
               latencyMs: 10,
               reason: '',
             },
+            'subscription-cli',
           ),
         ],
         changedContext,

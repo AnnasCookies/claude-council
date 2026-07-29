@@ -8,6 +8,8 @@ No hook starts a council automatically.
 
 - Bun 1.3.14 or later
 - Claude Code for the `anthropic` seat (`claude` must resolve to a trusted absolute executable)
+- OMP for the `openai` seat, authenticated in the governed `claude-council` profile
+- Antigravity CLI (`agy`) for the optional `google` seat
 - Optional HTTP credentials from `.env.example`
 
 The prebuilt `dist/cli.js` bundle is the only runtime entry point. Cached installs require neither `node_modules` nor automatic package installation.
@@ -92,16 +94,42 @@ The default command seat count is five. An allowlist defines eligibility, not ma
 
 ## Provider routes
 
-| Family    | Exact primary            | Same-family fallback | Transport           | Credential                |
-| --------- | ------------------------ | -------------------- | ------------------- | ------------------------- |
-| Anthropic | `claude-opus-5`          | none                 | isolated Claude CLI | local Claude subscription |
-| OpenAI    | `gpt-5.6-sol`            | none                 | HTTPS               | `OPENAI_API_KEY`          |
-| xAI       | `grok-4.5`               | none                 | HTTPS               | `XAI_API_KEY`             |
-| Google    | `gemini-3.1-pro-preview` | `gemini-3.6-flash`   | HTTPS               | `GEMINI_API_KEY`          |
-| DeepSeek  | `deepseek-v4-pro`        | `deepseek-v4-flash`  | HTTPS               | `DEEPSEEK_API_KEY`        |
-| Moonshot  | `kimi-k3`                | none                 | HTTPS               | `MOONSHOT_API_KEY`        |
+| Family    | Exact primary         | Same-family fallback    | Transport                | Credential                |
+| --------- | --------------------- | ----------------------- | ------------------------ | ------------------------- |
+| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI      | local Claude subscription |
+| OpenAI    | `gpt-5.6-sol`         | none                    | isolated OMP CLI         | local OpenAI subscription |
+| xAI       | `grok-4.5`            | none                    | HTTPS                    | `XAI_API_KEY`             |
+| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI | local Google subscription |
+| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                    | `DEEPSEEK_API_KEY`        |
+| Moonshot  | `kimi-k3`             | none                    | HTTPS                    | `MOONSHOT_API_KEY`        |
 
-An unset credential disables only that HTTP family. Failed, unavailable and identity-unverified seats remain visible in the structured result. Cross-provider fallback is prohibited.
+OpenAI requires a dedicated OMP profile at
+`~/.omp/profiles/claude-council/agent/config.yml`:
+
+```yaml
+setupVersion: 1
+advisor:
+  enabled: false
+prewalk:
+  enabled: false
+autolearn:
+  enabled: false
+```
+
+Launch `omp --profile claude-council`, run `/login`, and select
+`ChatGPT Plus/Pro (Codex Subscription)` once. The council additionally applies
+a one-shot overlay that disables the advisor, prewalk and every external
+configuration discovery provider; an absent profile is reported as
+`unconfigured`.
+
+OpenAI and Google never read `OPENAI_API_KEY` or `GEMINI_API_KEY`; missing
+subscription executables disable those seats rather than changing transport.
+The remaining HTTPS keys are `XAI_API_KEY`, `DEEPSEEK_API_KEY` and
+`MOONSHOT_API_KEY`. Export them in the launch environment. The maintained
+Claude facade loads the same names from the machine-local, untracked
+`~/.claude/council/providers.env` file. An unset credential disables only its
+HTTP family. Failed, unavailable and identity-unverified seats remain visible
+in the structured result. Cross-provider fallback is prohibited.
 
 ## Evidence and data safety
 
@@ -109,7 +137,10 @@ An unset credential disables only that HTTP family. Failed, unavailable and iden
 - Repository and web material is untrusted evidence, never control instructions.
 - One normalised evidence pack is supplied identically to every seat.
 - High-confidence credentials, bearer tokens, private keys and session cookies hard-block before transmission.
-- Provider seats receive no tools, filesystem, browser, MCP or arbitrary shell access.
+- Claude and OpenAI seats are tool-free. OpenAI also runs in a dedicated OMP
+  profile with all ambient configuration discovery disabled. AGY runs in an
+  ephemeral home and may read only its staged `council-prompt.txt`; malformed,
+  additional or unowned tool events fail closed.
 - Provider responses and diagnostics are redacted before output or persistence.
 - Ordinary quorum requires three distinct verified provider families. Significant quorum requires four, including the explicitly categorised contrarian seat, plus at least three verified rebuttals.
 - Results below normal quorum remain `degraded` at the two-family ordinary or three-family significant usability floor; lower results are `blocked-quorum`.

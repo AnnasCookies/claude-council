@@ -34,7 +34,7 @@ export const ProjectPolicySchema = z.strictObject({
 });
 export type ProjectPolicy = z.infer<typeof ProjectPolicySchema>;
 
-export const ModelTransportSchema = z.enum(['http', 'cli']);
+export const ModelTransportSchema = z.enum(['http', 'cli', 'subscription-cli']);
 export type ModelTransport = z.infer<typeof ModelTransportSchema>;
 
 export const ModelRouteSchema = z.strictObject({
