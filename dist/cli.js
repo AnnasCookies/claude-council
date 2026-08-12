@@ -16794,14 +16794,6 @@ var AgyInitEventSchema = exports_external.object({
     tools: exports_external.array(exports_external.string().min(1))
   })
 });
-var AgyStepEventSchema = exports_external.object({
-  event: exports_external.literal("step_update"),
-  step_update: exports_external.object({
-    step_index: exports_external.number().int().nonnegative(),
-    state: exports_external.string().min(1),
-    step_type: exports_external.string().min(1)
-  })
-});
 var AgyToolEventSchema = exports_external.object({
   event: exports_external.literal("step_update"),
   step_update: exports_external.object({
@@ -16818,7 +16810,7 @@ var AgyResultEventSchema = exports_external.object({
   event: exports_external.literal("result"),
   result: exports_external.object({
     status: exports_external.literal("SUCCESS"),
-    response: exports_external.string().min(1)
+    structured_output: exports_external.record(exports_external.string(), exports_external.unknown())
   })
 });
 var councilAnswerJsonSchema = JSON.stringify({
@@ -16933,11 +16925,11 @@ function canonicalPath(path) {
 function isRecord(value) {
   return typeof value === "object" && value !== null;
 }
-function extractAgyOutput(stdout, workingDirectory) {
-  let state = "await-init";
+function extractAgyOutput(stdout, workingDirectory, _stderr, _prompt, requestedModel) {
   let actualModel;
-  let activeToolIndex;
   let rawAnswer;
+  let sawPromptRead = false;
+  let sawTerminalResult = false;
   const expectedWorkingDirectory = workingDirectory !== undefined && isAbsolute2(workingDirectory) ? canonicalPath(workingDirectory) : undefined;
   const expectedPromptPath = expectedWorkingDirectory === undefined ? undefined : canonicalPath(join2(expectedWorkingDirectory, "council-prompt.txt"));
   for (const line of stdout.split(/\r?\n/)) {
@@ -16950,14 +16942,13 @@ function extractAgyOutput(stdout, workingDirectory) {
       return parseFailure("identity-unverified", actualModel);
     }
     const envelope = AgyEventEnvelopeSchema.safeParse(value);
-    if (!envelope.success)
+    if (!envelope.success || sawTerminalResult) {
       return parseFailure("identity-unverified", actualModel);
-    if (state === "terminal")
-      return parseFailure("identity-unverified", actualModel);
+    }
     if (envelope.data.event === "init") {
       const init = AgyInitEventSchema.safeParse(value);
-      if (state !== "await-init")
-        return parseFailure("unsafe-tool-isolation", actualModel);
+      if (actualModel !== undefined)
+        return parseFailure("identity-unverified", actualModel);
       if (!init.success) {
         const reportedModel = isRecord(value) && isRecord(value.init) && typeof value.init.model === "string" && value.init.model.trim() ? value.init.model : undefined;
         return parseFailure(reportedModel === undefined ? "identity-unverified" : "unsafe-tool-isolation", reportedModel);
@@ -16966,16 +16957,11 @@ function extractAgyOutput(stdout, workingDirectory) {
       if (expectedWorkingDirectory === undefined || !isAbsolute2(init.data.init.cwd) || canonicalPath(init.data.init.cwd) !== expectedWorkingDirectory || !init.data.init.tools.includes("view_file")) {
         return parseFailure("unsafe-tool-isolation", actualModel);
       }
-      state = "before-read";
       continue;
     }
     if (envelope.data.event === "step_update") {
-      const step = AgyStepEventSchema.safeParse(value);
-      if (!step.success) {
-        return parseFailure(containsUnsafeToolNode(value) ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
-      }
-      const update = step.data.step_update;
-      if (update.step_type === "tool") {
+      const stepUpdate = isRecord(value) && isRecord(value.step_update) ? value.step_update : undefined;
+      if (stepUpdate?.step_type === "tool") {
         const tool = AgyToolEventSchema.safeParse(value);
         if (!tool.success || expectedPromptPath === undefined) {
           return parseFailure("unsafe-tool-isolation", actualModel);
@@ -16984,46 +16970,50 @@ function extractAgyOutput(stdout, workingDirectory) {
         if (tool.data.step_update.tool_name !== "view_file" || !isAbsolute2(reportedPath) || canonicalPath(reportedPath) !== expectedPromptPath) {
           return parseFailure("unsafe-tool-isolation", actualModel);
         }
-        if (tool.data.step_update.state === "ACTIVE" && state === "before-read" && activeToolIndex === undefined) {
-          activeToolIndex = tool.data.step_update.step_index;
-          state = "reading";
-          continue;
-        }
-        if (tool.data.step_update.state === "DONE" && state === "reading" && activeToolIndex === tool.data.step_update.step_index) {
-          state = "after-read";
-          continue;
-        }
+        if (tool.data.step_update.state === "DONE")
+          sawPromptRead = true;
+        continue;
+      }
+      if (containsUnsafeToolNode(value)) {
         return parseFailure("unsafe-tool-isolation", actualModel);
       }
-      if (state === "before-read" && update.state === "DONE" && ["user_input", "unknown", "agent_response"].includes(update.step_type)) {
-        continue;
-      }
-      if (state === "after-read" && update.state === "DONE" && !containsUnsafeToolNode(value) && ["checkpoint", "unknown", "agent_response"].includes(update.step_type)) {
-        continue;
-      }
-      if (state === "after-read" && update.state === "DONE" && update.step_type === "finish") {
-        state = "finished";
-        continue;
-      }
-      return parseFailure(containsUnsafeToolNode(value) || update.step_type === "subagent" ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
+      continue;
     }
     if (envelope.data.event === "result") {
       const result = AgyResultEventSchema.safeParse(value);
-      if (!result.success || state !== "finished") {
+      if (!result.success)
         return parseFailure("identity-unverified", actualModel);
-      }
-      rawAnswer = result.data.result.response;
-      state = "terminal";
+      rawAnswer = JSON.stringify(result.data.result.structured_output);
+      sawTerminalResult = true;
       continue;
     }
-    return parseFailure(/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value) ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
+    if (/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)) {
+      return parseFailure("unsafe-tool-isolation", actualModel);
+    }
   }
-  return state === "terminal" && actualModel !== undefined && rawAnswer !== undefined ? { status: "ok", actualModel, rawAnswer } : state === "await-init" || state === "finished" ? parseFailure("identity-unverified", actualModel) : parseFailure("unsafe-tool-isolation", actualModel);
+  if (actualModel === undefined || rawAnswer === undefined) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  if (actualModel !== requestedModel) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  if (!sawPromptRead)
+    return parseFailure("unsafe-tool-isolation", actualModel);
+  return { status: "ok", actualModel, rawAnswer };
 }
 function observedRoute(route, actualModel) {
   if (actualModel === route.primary)
     return "primary";
   return route.fallbacks.includes(actualModel) ? "same-provider-fallback" : undefined;
+}
+function quotaExhaustion(stderr) {
+  if (!stderr)
+    return;
+  const line = stderr.split(/\r?\n/).map((value) => value.trim()).find((value) => /usage limit|quota|out of credit|insufficient_quota|rate limit exceeded/i.test(value));
+  if (line === undefined)
+    return;
+  const resetsAt = /try again at ([^.]+)/i.exec(line)?.[1]?.trim();
+  return resetsAt ? `Subscription quota exhausted; the provider reports it resets at ${resetsAt}.` : `Subscription quota exhausted: ${line.slice(0, 200)}`;
 }
 function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
   const route = (context) => context.registry[config2.family];
@@ -17055,10 +17045,15 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
       }
       const result = await transport.run(config2.request(executable, configuredRoute, request.prompt, request.context.timeoutMs));
       if (result.status !== "ok") {
+        const quota = quotaExhaustion(result.stderr);
+        if (quota !== undefined) {
+          capture(request, config2.family, "provider-failure", quota);
+          return seatError(request, config2.family, configuredRoute.primary, "failed", "quota-exhausted", quota, result.durationMs);
+        }
         capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
       }
-      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt));
+      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt), configuredRoute.primary);
       if (output.status === "failed") {
         capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" });
@@ -17678,10 +17673,34 @@ var CouncilRunInputSchema = exports_external.strictObject({
   }
 });
 var RoundPhaseSchema = exports_external.enum(["analysis", "rebuttal", "refinement"]);
+var TRANSIENT_SEAT_ERROR_CODES = {
+  "spawn-failed": true,
+  timeout: true,
+  network: true,
+  "rate-limit": true,
+  server: true
+};
+var SEAT_RETRY_BACKOFF_MS = 100;
+function isTransientSeatFailure(response) {
+  if (response.status === "ok" || response.status === "skipped")
+    return false;
+  return TRANSIENT_SEAT_ERROR_CODES[response.error.code] === true;
+}
+var SeatRetryEvidenceSchema = exports_external.strictObject({
+  seatId: NonBlankIdentifierSchema,
+  provider: ProviderFamilySchema,
+  role: NonBlankIdentifierSchema,
+  attempt: exports_external.literal(2),
+  reason: exports_external.strictObject({
+    status: exports_external.enum(["failed", "timed-out", "cancelled"]),
+    error: SeatErrorSchema
+  })
+});
 var RoundExecutionSchema = exports_external.strictObject({
   round: exports_external.number().int().min(1).max(3),
   phase: RoundPhaseSchema,
-  responses: exports_external.array(SeatResponseSchema).min(1)
+  responses: exports_external.array(SeatResponseSchema).min(1),
+  retries: exports_external.array(SeatRetryEvidenceSchema)
 });
 var RebuttalObligationSchema = exports_external.strictObject({
   minimumSuccessfulResponses: exports_external.number().int().nonnegative(),
@@ -17793,6 +17812,32 @@ var CouncilRunResultSchema = exports_external.strictObject({
           code: "custom",
           path: ["rounds", roundIndex, "responses", seatIndex],
           message: "Persisted response does not match its assigned seat"
+        });
+      }
+    }
+    const retriedSeatIds = new Set;
+    for (const [retryIndex, retry] of round.retries.entries()) {
+      const assignment = result.assignments.find(({ seatId }) => seatId === retry.seatId);
+      if (assignment === undefined || retry.provider !== assignment.provider || retry.role !== assignment.lensName) {
+        context.addIssue({
+          code: "custom",
+          path: ["rounds", roundIndex, "retries", retryIndex],
+          message: "Persisted retry evidence does not match its assigned seat"
+        });
+      }
+      if (retriedSeatIds.has(retry.seatId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["rounds", roundIndex, "retries", retryIndex],
+          message: "A seat may be retried at most once per round"
+        });
+      }
+      retriedSeatIds.add(retry.seatId);
+      if (TRANSIENT_SEAT_ERROR_CODES[retry.reason.error.code] !== true) {
+        context.addIssue({
+          code: "custom",
+          path: ["rounds", roundIndex, "retries", retryIndex, "reason", "error", "code"],
+          message: "Retry evidence must name a governed transient error code"
         });
       }
     }
@@ -17910,13 +17955,17 @@ class CouncilRunner {
     const parsedInput = CouncilRunInputSchema.parse(input);
     const assignments = [...parsedInput.assignments].sort(compareAssignments);
     const rounds = [];
+    const runDeadline = Date.now() + this.context.timeoutMs;
     for (let round = 1;round <= parsedInput.rounds; round += 1) {
       const phase = phaseForRound(round);
-      const responses = await Promise.all(assignments.map((assignment) => this.invokeSeat(assignment, roundPrompt(parsedInput.motion, assignment, round, phase, rounds, parsedInput.refinementTrigger))));
+      const roundsRemaining = parsedInput.rounds - round + 1;
+      const roundDeadline = Math.min(runDeadline, Date.now() + Math.floor(Math.max(0, runDeadline - Date.now()) / roundsRemaining));
+      const seatResults = await Promise.all(assignments.map((assignment) => this.invokeSeat(assignment, roundPrompt(parsedInput.motion, assignment, round, phase, rounds, parsedInput.refinementTrigger), roundDeadline)));
       rounds.push(RoundExecutionSchema.parse({
         round,
         phase,
-        responses
+        responses: seatResults.map(({ response }) => response),
+        retries: seatResults.flatMap(({ retry }) => retry === undefined ? [] : [retry])
       }));
     }
     const analysisRound = rounds[0];
@@ -17938,17 +17987,62 @@ class CouncilRunner {
       outcome: evaluateOutcome(parsedInput.quorumPolicy, quorum, rebuttalObligation)
     });
   }
-  async invokeSeat(assignment, prompt) {
+  async invokeSeat(assignment, prompt, deadline) {
     const requestedModel = this.context.registry[assignment.provider].primary;
     const adapter = this.adapters[assignment.provider];
     if (adapter === undefined) {
-      return failureResponse(assignment, requestedModel, "skipped", "adapter-unconfigured", "No configured adapter is available for this provider family.");
+      return {
+        response: failureResponse(assignment, requestedModel, "skipped", "adapter-unconfigured", "No configured adapter is available for this provider family.")
+      };
     }
     if (adapter.transport !== this.context.registry[assignment.provider].transport) {
-      return failureResponse(assignment, requestedModel, "failed", "unsafe-transport", "The provider adapter transport does not match the governed route.");
+      return {
+        response: failureResponse(assignment, requestedModel, "failed", "unsafe-transport", "The provider adapter transport does not match the governed route.")
+      };
+    }
+    const firstResponse = await this.invokeSeatAttempt(adapter, assignment, prompt, requestedModel, deadline);
+    if (!isTransientSeatFailure(firstResponse))
+      return { response: firstResponse };
+    const remainingBeforeBackoff = deadline - Date.now();
+    if (remainingBeforeBackoff <= SEAT_RETRY_BACKOFF_MS) {
+      return { response: firstResponse };
+    }
+    const { promise: backoff, resolve: finishBackoff } = Promise.withResolvers();
+    setTimeout(finishBackoff, SEAT_RETRY_BACKOFF_MS);
+    await backoff;
+    if (deadline - Date.now() <= 0)
+      return { response: firstResponse };
+    const retry = SeatRetryEvidenceSchema.parse({
+      seatId: assignment.seatId,
+      provider: assignment.provider,
+      role: assignment.lensName,
+      attempt: 2,
+      reason: {
+        status: firstResponse.status,
+        error: firstResponse.error
+      }
+    });
+    this.context.captureDiagnostic?.({
+      family: assignment.provider,
+      seatId: assignment.seatId,
+      code: "provider-failure",
+      rawText: scanAndRedact(`Retry attempt 2 after ${firstResponse.status} ${firstResponse.error.code}: ${firstResponse.error.message}`).redacted
+    });
+    return {
+      response: await this.invokeSeatAttempt(adapter, assignment, prompt, requestedModel, deadline),
+      retry
+    };
+  }
+  async invokeSeatAttempt(adapter, assignment, prompt, requestedModel, deadline) {
+    const remainingMs = Math.floor(deadline - Date.now());
+    if (remainingMs <= 0) {
+      return failureResponse(assignment, requestedModel, "timed-out", "timeout", "The council run deadline was reached before this seat could be invoked.");
     }
     const request = {
-      context: this.context,
+      context: {
+        ...this.context,
+        timeoutMs: remainingMs
+      },
       seatId: assignment.seatId,
       role: assignment.lensName,
       prompt

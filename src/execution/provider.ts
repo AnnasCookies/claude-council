@@ -430,6 +430,7 @@ interface SubscriptionCliAdapterConfig {
     workingDirectory: string | undefined,
     stderr: string,
     prompt: string,
+    requestedModel: string,
   ): SubscriptionCliParseResult;
   configurationError?: () => string | undefined;
 }
@@ -487,14 +488,6 @@ const AgyInitEventSchema = z.object({
     tools: z.array(z.string().min(1)),
   }),
 });
-const AgyStepEventSchema = z.object({
-  event: z.literal('step_update'),
-  step_update: z.object({
-    step_index: z.number().int().nonnegative(),
-    state: z.string().min(1),
-    step_type: z.string().min(1),
-  }),
-});
 const AgyToolEventSchema = z.object({
   event: z.literal('step_update'),
   step_update: z.object({
@@ -511,7 +504,7 @@ const AgyResultEventSchema = z.object({
   event: z.literal('result'),
   result: z.object({
     status: z.literal('SUCCESS'),
-    response: z.string().min(1),
+    structured_output: z.record(z.string(), z.unknown()),
   }),
 });
 
@@ -798,12 +791,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function extractAgyOutput(stdout: string, workingDirectory?: string): SubscriptionCliParseResult {
-  let state: 'await-init' | 'before-read' | 'reading' | 'after-read' | 'finished' | 'terminal' =
-    'await-init';
+function extractAgyOutput(
+  stdout: string,
+  workingDirectory: string | undefined,
+  _stderr: string,
+  _prompt: string,
+  requestedModel: string,
+): SubscriptionCliParseResult {
   let actualModel: string | undefined;
-  let activeToolIndex: number | undefined;
   let rawAnswer: string | undefined;
+  let sawPromptRead = false;
+  let sawTerminalResult = false;
   const expectedWorkingDirectory =
     workingDirectory !== undefined && isAbsolute(workingDirectory)
       ? canonicalPath(workingDirectory)
@@ -822,12 +820,13 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
       return parseFailure('identity-unverified', actualModel);
     }
     const envelope = AgyEventEnvelopeSchema.safeParse(value);
-    if (!envelope.success) return parseFailure('identity-unverified', actualModel);
-    if (state === 'terminal') return parseFailure('identity-unverified', actualModel);
+    if (!envelope.success || sawTerminalResult) {
+      return parseFailure('identity-unverified', actualModel);
+    }
 
     if (envelope.data.event === 'init') {
       const init = AgyInitEventSchema.safeParse(value);
-      if (state !== 'await-init') return parseFailure('unsafe-tool-isolation', actualModel);
+      if (actualModel !== undefined) return parseFailure('identity-unverified', actualModel);
       if (!init.success) {
         const reportedModel =
           isRecord(value) &&
@@ -850,22 +849,13 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
       ) {
         return parseFailure('unsafe-tool-isolation', actualModel);
       }
-      // AGY reports its compiled catalogue here; the ephemeral permission file is
-      // the capability boundary. Every observed non-view_file tool still fails below.
-      state = 'before-read';
       continue;
     }
 
     if (envelope.data.event === 'step_update') {
-      const step = AgyStepEventSchema.safeParse(value);
-      if (!step.success) {
-        return parseFailure(
-          containsUnsafeToolNode(value) ? 'unsafe-tool-isolation' : 'identity-unverified',
-          actualModel,
-        );
-      }
-      const update = step.data.step_update;
-      if (update.step_type === 'tool') {
+      const stepUpdate =
+        isRecord(value) && isRecord(value.step_update) ? value.step_update : undefined;
+      if (stepUpdate?.step_type === 'tool') {
         const tool = AgyToolEventSchema.safeParse(value);
         if (!tool.success || expectedPromptPath === undefined) {
           return parseFailure('unsafe-tool-isolation', actualModel);
@@ -878,76 +868,36 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
         ) {
           return parseFailure('unsafe-tool-isolation', actualModel);
         }
-        if (
-          tool.data.step_update.state === 'ACTIVE' &&
-          state === 'before-read' &&
-          activeToolIndex === undefined
-        ) {
-          activeToolIndex = tool.data.step_update.step_index;
-          state = 'reading';
-          continue;
-        }
-        if (
-          tool.data.step_update.state === 'DONE' &&
-          state === 'reading' &&
-          activeToolIndex === tool.data.step_update.step_index
-        ) {
-          state = 'after-read';
-          continue;
-        }
+        if (tool.data.step_update.state === 'DONE') sawPromptRead = true;
+        continue;
+      }
+      if (containsUnsafeToolNode(value)) {
         return parseFailure('unsafe-tool-isolation', actualModel);
       }
-
-      if (
-        state === 'before-read' &&
-        update.state === 'DONE' &&
-        ['user_input', 'unknown', 'agent_response'].includes(update.step_type)
-      ) {
-        continue;
-      }
-      if (
-        state === 'after-read' &&
-        update.state === 'DONE' &&
-        !containsUnsafeToolNode(value) &&
-        ['checkpoint', 'unknown', 'agent_response'].includes(update.step_type)
-      ) {
-        continue;
-      }
-      if (state === 'after-read' && update.state === 'DONE' && update.step_type === 'finish') {
-        state = 'finished';
-        continue;
-      }
-      return parseFailure(
-        containsUnsafeToolNode(value) || update.step_type === 'subagent'
-          ? 'unsafe-tool-isolation'
-          : 'identity-unverified',
-        actualModel,
-      );
+      continue;
     }
 
     if (envelope.data.event === 'result') {
       const result = AgyResultEventSchema.safeParse(value);
-      if (!result.success || state !== 'finished') {
-        return parseFailure('identity-unverified', actualModel);
-      }
-      rawAnswer = result.data.result.response;
-      state = 'terminal';
+      if (!result.success) return parseFailure('identity-unverified', actualModel);
+      rawAnswer = JSON.stringify(result.data.result.structured_output);
+      sawTerminalResult = true;
       continue;
     }
 
-    return parseFailure(
-      /tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)
-        ? 'unsafe-tool-isolation'
-        : 'identity-unverified',
-      actualModel,
-    );
+    if (/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)) {
+      return parseFailure('unsafe-tool-isolation', actualModel);
+    }
   }
 
-  return state === 'terminal' && actualModel !== undefined && rawAnswer !== undefined
-    ? { status: 'ok', actualModel, rawAnswer }
-    : state === 'await-init' || state === 'finished'
-      ? parseFailure('identity-unverified', actualModel)
-      : parseFailure('unsafe-tool-isolation', actualModel);
+  if (actualModel === undefined || rawAnswer === undefined) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  if (actualModel !== requestedModel) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  if (!sawPromptRead) return parseFailure('unsafe-tool-isolation', actualModel);
+  return { status: 'ok', actualModel, rawAnswer };
 }
 
 function observedRoute(
@@ -956,6 +906,30 @@ function observedRoute(
 ): 'primary' | 'same-provider-fallback' | undefined {
   if (actualModel === route.primary) return 'primary';
   return route.fallbacks.includes(actualModel) ? 'same-provider-fallback' : undefined;
+}
+
+/**
+ * Detect a subscription-credit exhaustion message in a seat CLI's stderr and return a concise,
+ * secret-free summary including any reset time the CLI reported. Returns undefined when the
+ * failure is not a quota exhaustion.
+ *
+ * Observed verbatim from codex-cli 0.147.0:
+ *   "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to
+ *    purchase more credits or try again at Aug 18th, 2026 9:21 AM."
+ */
+function quotaExhaustion(stderr: string | undefined): string | undefined {
+  if (!stderr) return undefined;
+  const line = stderr
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .find((value) =>
+      /usage limit|quota|out of credit|insufficient_quota|rate limit exceeded/i.test(value),
+    );
+  if (line === undefined) return undefined;
+  const resetsAt = /try again at ([^.]+)/i.exec(line)?.[1]?.trim();
+  return resetsAt
+    ? `Subscription quota exhausted; the provider reports it resets at ${resetsAt}.`
+    : `Subscription quota exhausted: ${line.slice(0, 200)}`;
 }
 
 function createSubscriptionCliAdapter(
@@ -1031,6 +1005,23 @@ function createSubscriptionCliAdapter(
         config.request(executable, configuredRoute, request.prompt, request.context.timeoutMs),
       );
       if (result.status !== 'ok') {
+        // A seat CLI that has run out of subscription credit exits non-zero with a usage-limit
+        // message. That is neither a code fault nor a transient blip: retrying burns more calls
+        // against an exhausted quota and the operator cannot act on "subscription CLI failed".
+        // Surface it verbatim, with the reset time the CLI reports, so the cause is obvious.
+        const quota = quotaExhaustion(result.stderr);
+        if (quota !== undefined) {
+          capture(request, config.family, 'provider-failure', quota);
+          return seatError(
+            request,
+            config.family,
+            configuredRoute.primary,
+            'failed',
+            'quota-exhausted',
+            quota,
+            result.durationMs,
+          );
+        }
         capture(
           request,
           config.family,
@@ -1053,6 +1044,7 @@ function createSubscriptionCliAdapter(
         result.workingDirectory,
         result.stderr,
         structuredPrompt(request.prompt),
+        configuredRoute.primary,
       );
       if (output.status === 'failed') {
         capture(

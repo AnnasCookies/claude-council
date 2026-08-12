@@ -11,6 +11,7 @@ import {
   QuorumPolicySchema,
   RefinementTriggerSchema,
   RoleCategorySchema,
+  SeatErrorSchema,
   SeatResponseSchema,
   type ProviderFamily,
   type QuorumPolicy,
@@ -122,10 +123,43 @@ export type CouncilRunInput = z.infer<typeof CouncilRunInputSchema>;
 export const RoundPhaseSchema = z.enum(['analysis', 'rebuttal', 'refinement']);
 export type RoundPhase = z.infer<typeof RoundPhaseSchema>;
 
+// Only failures that are genuinely transport-level are retried. `non-zero-exit` is deliberately
+// NOT here: the seat CLIs exit non-zero for authentication, configuration and unknown-model
+// errors too, so retrying it would burn the run budget on a fault that will never clear, and
+// could mask a real misconfiguration. Add it only once the provider classifies stderr into a
+// proven transient code.
+const TRANSIENT_SEAT_ERROR_CODES: Readonly<Record<string, true>> = {
+  'spawn-failed': true,
+  timeout: true,
+  network: true,
+  'rate-limit': true,
+  server: true,
+};
+const SEAT_RETRY_BACKOFF_MS = 100;
+
+type TransientSeatFailure = Extract<SeatResponse, { status: 'failed' | 'timed-out' | 'cancelled' }>;
+function isTransientSeatFailure(response: SeatResponse): response is TransientSeatFailure {
+  if (response.status === 'ok' || response.status === 'skipped') return false;
+  return TRANSIENT_SEAT_ERROR_CODES[response.error.code] === true;
+}
+
+export const SeatRetryEvidenceSchema = z.strictObject({
+  seatId: NonBlankIdentifierSchema,
+  provider: ProviderFamilySchema,
+  role: NonBlankIdentifierSchema,
+  attempt: z.literal(2),
+  reason: z.strictObject({
+    status: z.enum(['failed', 'timed-out', 'cancelled']),
+    error: SeatErrorSchema,
+  }),
+});
+export type SeatRetryEvidence = z.infer<typeof SeatRetryEvidenceSchema>;
+
 export const RoundExecutionSchema = z.strictObject({
   round: z.number().int().min(1).max(3),
   phase: RoundPhaseSchema,
   responses: z.array(SeatResponseSchema).min(1),
+  retries: z.array(SeatRetryEvidenceSchema),
 });
 export type RoundExecution = z.infer<typeof RoundExecutionSchema>;
 
@@ -268,6 +302,37 @@ export const CouncilRunResultSchema = z
           });
         }
       }
+
+      const retriedSeatIds = new Set<string>();
+      for (const [retryIndex, retry] of round.retries.entries()) {
+        const assignment = result.assignments.find(({ seatId }) => seatId === retry.seatId);
+        if (
+          assignment === undefined ||
+          retry.provider !== assignment.provider ||
+          retry.role !== assignment.lensName
+        ) {
+          context.addIssue({
+            code: 'custom',
+            path: ['rounds', roundIndex, 'retries', retryIndex],
+            message: 'Persisted retry evidence does not match its assigned seat',
+          });
+        }
+        if (retriedSeatIds.has(retry.seatId)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['rounds', roundIndex, 'retries', retryIndex],
+            message: 'A seat may be retried at most once per round',
+          });
+        }
+        retriedSeatIds.add(retry.seatId);
+        if (TRANSIENT_SEAT_ERROR_CODES[retry.reason.error.code] !== true) {
+          context.addIssue({
+            code: 'custom',
+            path: ['rounds', roundIndex, 'retries', retryIndex, 'reason', 'error', 'code'],
+            message: 'Retry evidence must name a governed transient error code',
+          });
+        }
+      }
     }
 
     const analysisRound = result.rounds.find(({ phase }) => phase === 'analysis');
@@ -324,10 +389,15 @@ export interface CouncilRunnerConfig {
   context: ProviderContext;
 }
 
+interface SeatInvocationResult {
+  response: SeatResponse;
+  retry?: SeatRetryEvidence;
+}
+
 const failureResponse = (
   assignment: CouncilSeatAssignment,
   requestedModel: string,
-  status: 'failed' | 'skipped',
+  status: 'failed' | 'skipped' | 'timed-out',
   code: string,
   message: string,
 ): SeatResponse => ({
@@ -428,10 +498,20 @@ export class CouncilRunner {
     const parsedInput = CouncilRunInputSchema.parse(input);
     const assignments = [...parsedInput.assignments].sort(compareAssignments);
     const rounds: RoundExecution[] = [];
+    // Budget the run deadline PER ROUND. A single run-wide deadline lets round 1 (analysis)
+    // consume the whole allowance and starve round 2 (rebuttal), which then fails the rebuttal
+    // obligation and wastes the entire council. Each round gets an equal share of the remaining
+    // time, so a slow analysis round cannot silently cancel the rebuttal.
+    const runDeadline = Date.now() + this.context.timeoutMs;
 
     for (let round = 1; round <= parsedInput.rounds; round += 1) {
       const phase = phaseForRound(round);
-      const responses = await Promise.all(
+      const roundsRemaining = parsedInput.rounds - round + 1;
+      const roundDeadline = Math.min(
+        runDeadline,
+        Date.now() + Math.floor(Math.max(0, runDeadline - Date.now()) / roundsRemaining),
+      );
+      const seatResults = await Promise.all(
         assignments.map((assignment) =>
           this.invokeSeat(
             assignment,
@@ -443,6 +523,7 @@ export class CouncilRunner {
               rounds,
               parsedInput.refinementTrigger,
             ),
+            roundDeadline,
           ),
         ),
       );
@@ -450,7 +531,8 @@ export class CouncilRunner {
         RoundExecutionSchema.parse({
           round,
           phase,
-          responses,
+          responses: seatResults.map(({ response }) => response),
+          retries: seatResults.flatMap(({ retry }) => (retry === undefined ? [] : [retry])),
         }),
       );
     }
@@ -482,31 +564,100 @@ export class CouncilRunner {
   private async invokeSeat(
     assignment: CouncilSeatAssignment,
     prompt: string,
-  ): Promise<SeatResponse> {
+    deadline: number,
+  ): Promise<SeatInvocationResult> {
     const requestedModel = this.context.registry[assignment.provider].primary;
     const adapter = this.adapters[assignment.provider];
     if (adapter === undefined) {
-      return failureResponse(
-        assignment,
-        requestedModel,
-        'skipped',
-        'adapter-unconfigured',
-        'No configured adapter is available for this provider family.',
-      );
+      return {
+        response: failureResponse(
+          assignment,
+          requestedModel,
+          'skipped',
+          'adapter-unconfigured',
+          'No configured adapter is available for this provider family.',
+        ),
+      };
     }
 
     if (adapter.transport !== this.context.registry[assignment.provider].transport) {
+      return {
+        response: failureResponse(
+          assignment,
+          requestedModel,
+          'failed',
+          'unsafe-transport',
+          'The provider adapter transport does not match the governed route.',
+        ),
+      };
+    }
+
+    const firstResponse = await this.invokeSeatAttempt(
+      adapter,
+      assignment,
+      prompt,
+      requestedModel,
+      deadline,
+    );
+    if (!isTransientSeatFailure(firstResponse)) return { response: firstResponse };
+
+    const remainingBeforeBackoff = deadline - Date.now();
+    if (remainingBeforeBackoff <= SEAT_RETRY_BACKOFF_MS) {
+      return { response: firstResponse };
+    }
+    const { promise: backoff, resolve: finishBackoff } = Promise.withResolvers<void>();
+    setTimeout(finishBackoff, SEAT_RETRY_BACKOFF_MS);
+    await backoff;
+    if (deadline - Date.now() <= 0) return { response: firstResponse };
+
+    const retry = SeatRetryEvidenceSchema.parse({
+      seatId: assignment.seatId,
+      provider: assignment.provider,
+      role: assignment.lensName,
+      attempt: 2,
+      reason: {
+        status: firstResponse.status,
+        error: firstResponse.error,
+      },
+    });
+    this.context.captureDiagnostic?.({
+      family: assignment.provider,
+      seatId: assignment.seatId,
+      code: 'provider-failure',
+      rawText: scanAndRedact(
+        `Retry attempt 2 after ${firstResponse.status} ${firstResponse.error.code}: ${firstResponse.error.message}`,
+      ).redacted,
+    });
+
+    return {
+      response: await this.invokeSeatAttempt(adapter, assignment, prompt, requestedModel, deadline),
+      retry,
+    };
+  }
+
+  private async invokeSeatAttempt(
+    adapter: ProviderAdapter,
+    assignment: CouncilSeatAssignment,
+    prompt: string,
+    requestedModel: string,
+    deadline: number,
+  ): Promise<SeatResponse> {
+    const remainingMs = Math.floor(deadline - Date.now());
+    if (remainingMs <= 0) {
       return failureResponse(
         assignment,
         requestedModel,
-        'failed',
-        'unsafe-transport',
-        'The provider adapter transport does not match the governed route.',
+        'timed-out',
+        'timeout',
+        'The council run deadline was reached before this seat could be invoked.',
       );
     }
 
     const request: ProviderRequest = {
-      context: this.context,
+      context: {
+        ...this.context,
+        timeoutMs: remainingMs,
+      },
       seatId: assignment.seatId,
       role: assignment.lensName,
       prompt,

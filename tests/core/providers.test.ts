@@ -185,9 +185,15 @@ const agyOutput = (model: string, content = answer, options: AgyOutputOptions = 
     options.includePromptPath === false
       ? {}
       : { AbsolutePath: options.promptPath ?? join(ownedDirectory, 'council-prompt.txt') };
+  let structuredOutput: unknown;
+  try {
+    structuredOutput = JSON.parse(content);
+  } catch {
+    structuredOutput = { invalid: content };
+  }
   const result = {
     event: 'result',
-    result: { status: 'SUCCESS', response: content },
+    result: { status: 'SUCCESS', response: content, structured_output: structuredOutput },
   };
   const events = [
     {
@@ -251,10 +257,8 @@ const agyOutput = (model: string, content = answer, options: AgyOutputOptions = 
   return events.map((event) => JSON.stringify(event)).join('\n');
 };
 
-async function capturedAgyOutput(): Promise<string> {
-  const fixture = await Bun.file(
-    join(import.meta.dir, 'fixtures', 'agy-stream-json-success.jsonl'),
-  ).text();
+async function capturedAgyOutput(fixtureName = 'agy-stream-json-success.jsonl'): Promise<string> {
+  const fixture = await Bun.file(join(import.meta.dir, 'fixtures', fixtureName)).text();
   const escapedWorkingDirectory = JSON.stringify(ownedDirectory).slice(1, -1);
   const escapedPromptPath = JSON.stringify(join(ownedDirectory, 'council-prompt.txt')).slice(1, -1);
   return fixture
@@ -858,6 +862,17 @@ describe('Subscription CLI provider adapters', () => {
     expect(response.modelIdentity).toBe('verified');
   });
 
+  test('Google verifies captured long-motion AGY stream-json output', async () => {
+    const response = await googleAdapter(
+      new FakeCli(okCli(await capturedAgyOutput('agy-stream-json-long-motion.jsonl'))),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe('gemini-3.1-pro-high');
+    expect(response.modelIdentity).toBe('verified');
+  });
+
   test('Google rejects captured AGY output when the init model identity is absent', async () => {
     const [initLine, ...remainingLines] = (await capturedAgyOutput()).trimEnd().split(/\r?\n/);
     if (!initLine) throw new Error('captured AGY fixture has no init event');
@@ -884,66 +899,79 @@ describe('Subscription CLI provider adapters', () => {
     });
   });
 
-  test('Google preserves approved fallback and observed model drift in health', async () => {
-    const fallback = await googleAdapter(
-      new FakeCli(okCli(agyOutput('gemini-3.6-flash-high'))),
-      () => process.execPath,
-    ).invoke(request(context({})));
-    expect(fallback.status).toBe('ok');
-    expect(fallback.actualModel).toBe('gemini-3.6-flash-high');
-    expect(fallback.route).toBe('same-provider-fallback');
+  test('Google rejects a model identity that differs from the requested route', async () => {
+    const actualModel = 'gemini-3.6-flash-high';
+    const output = agyOutput(actualModel);
+    const response = await googleAdapter(new FakeCli(okCli(output)), () => process.execPath).invoke(
+      request(context({})),
+    );
 
-    const unexpected = await googleAdapter(
-      new FakeCli(okCli(agyOutput('gemini-unapproved'))),
-      () => process.execPath,
-    ).invoke(request(context({})));
-    expect(unexpected.status).toBe('failed');
-    if (unexpected.status === 'ok') throw new Error('unapproved AGY run succeeded');
-    expect(unexpected.error.code).toBe('identity-unverified');
-    expect(unexpected.actualModel).toBe('gemini-unapproved');
-    expect(unexpected.modelIdentity).toBe('unverified');
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('rerouted AGY run succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.actualModel).toBe(actualModel);
+    expect(response.modelIdentity).toBe('unverified');
 
-    const health = await googleAdapter(
-      new FakeCli(okCli(agyOutput('gemini-unapproved'))),
-      () => process.execPath,
-    ).probe(context({}));
+    const health = await googleAdapter(new FakeCli(okCli(output)), () => process.execPath).probe(
+      context({}),
+    );
     expect(health.status).toBe('identity-unverified');
-    expect(health.actualModel).toBe('gemini-unapproved');
+    expect(health.actualModel).toBe(actualModel);
 
     const report = await doctor(
-      [googleAdapter(new FakeCli(okCli(agyOutput('gemini-unapproved'))), () => process.execPath)],
+      [googleAdapter(new FakeCli(okCli(output)), () => process.execPath)],
       context({}),
       '2026-07-29T00:00:00.000Z',
     );
-    expect(report.diagnostics[0]?.actualModel).toBe('gemini-unapproved');
+    expect(report.diagnostics[0]?.actualModel).toBe(actualModel);
     expect(report.diagnostics[0]?.remediationCodes).toContain('review-route-drift');
   });
 
-  test('Google retains verified fallback identity when the answer schema is invalid', async () => {
+  test('Google retains verified identity when the answer schema is invalid', async () => {
     const response = await googleAdapter(
-      new FakeCli(okCli(agyOutput('gemini-3.6-flash-high', 'not-json'))),
+      new FakeCli(okCli(agyOutput('gemini-3.1-pro-high', 'not-json'))),
       () => process.execPath,
     ).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('invalid answer unexpectedly succeeded');
     expect(response.error.code).toBe('invalid-structured-answer');
-    expect(response.actualModel).toBe('gemini-3.6-flash-high');
+    expect(response.actualModel).toBe('gemini-3.1-pro-high');
     expect(response.modelIdentity).toBe('verified');
-    expect(response.route).toBe('same-provider-fallback');
+    expect(response.route).toBe('primary');
 
     const report = await doctor(
       [
         googleAdapter(
-          new FakeCli(okCli(agyOutput('gemini-3.6-flash-high', 'not-json'))),
+          new FakeCli(okCli(agyOutput('gemini-3.1-pro-high', 'not-json'))),
           () => process.execPath,
         ),
       ],
       context({}),
       '2026-07-29T00:00:00.000Z',
     );
-    expect(report.diagnostics[0]?.actualModel).toBe('gemini-3.6-flash-high');
-    expect(report.diagnostics[0]?.remediationCodes).toContain('review-route-drift');
+    expect(report.diagnostics[0]?.actualModel).toBe('gemini-3.1-pro-high');
+  });
+
+  test('Google ignores unrecognised intermediate events', async () => {
+    const output = agyOutput('gemini-3.1-pro-high', answer, {
+      additionalEvents: [
+        {
+          event: 'step_update',
+          step_update: { step_index: 7, state: 'DONE', step_type: 'network' },
+        },
+        {
+          event: 'usage_update',
+          usage_update: { input_tokens: 3_007 },
+        },
+      ],
+    });
+    const response = await googleAdapter(new FakeCli(okCli(output)), () => process.execPath).invoke(
+      request(context({})),
+    );
+
+    expect(response.status).toBe('ok');
+    expect(response.modelIdentity).toBe('verified');
   });
 
   test('Google rejects malformed, unowned and duplicate tool streams', async () => {
@@ -959,10 +987,6 @@ describe('Subscription CLI provider adapters', () => {
     const subagent = {
       event: 'step_update',
       step_update: { state: 'DONE', step_type: 'subagent' },
-    };
-    const unknownStep = {
-      event: 'step_update',
-      step_update: { step_index: 7, state: 'DONE', step_type: 'network' },
     };
     const disguisedTool = {
       event: 'step_update',
@@ -1008,10 +1032,6 @@ describe('Subscription CLI provider adapters', () => {
       [
         agyOutput('gemini-3.1-pro-high', answer, { additionalEvents: [subagent] }),
         'unsafe-tool-isolation',
-      ],
-      [
-        agyOutput('gemini-3.1-pro-high', answer, { additionalEvents: [unknownStep] }),
-        'identity-unverified',
       ],
       [
         agyOutput('gemini-3.1-pro-high', answer, { additionalEvents: [disguisedTool] }),
