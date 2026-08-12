@@ -6,6 +6,14 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
 ## Unreleased
 
+### Added
+
+- `council --min-families 3` permits a deliberate reduced quorum without
+  weakening the contrarian requirement. The manifest, console result and
+  persisted session all warn that three families are weaker than the standing
+  four-family default; three-seat lens precedence is domain, risk and
+  contrarian.
+
 ## 2026.7.11
 
 ### Added

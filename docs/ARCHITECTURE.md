@@ -55,14 +55,14 @@ Evidence collection itself is read-only. It does not run repository code, shell 
 
 `src/providers/index.ts` constructs one adapter per governed provider family:
 
-| Family    | Transport              | Identity rule                                          |
-| --------- | ---------------------- | ------------------------------------------------------ |
-| Anthropic | isolated local CLI     | trusted absolute executable; tool-free, stateless argv |
-| OpenAI    | HTTPS Responses API    | actual model must be present in the response           |
-| xAI       | HTTPS chat completions | actual model must be present in the response           |
-| Google    | HTTPS generateContent  | actual model version must be present in the response   |
-| DeepSeek  | HTTPS chat completions | actual model must be present in the response           |
-| Moonshot  | HTTPS chat completions | actual model must be present in the response           |
+| Family    | Transport                         | Identity rule                                                                                                                  |
+| --------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Anthropic | isolated local CLI                | trusted absolute executable; tool-free, stateless argv                                                                         |
+| OpenAI    | isolated local CLI (`codex exec`) | trusted absolute executable; identity and reasoning effort bound from the renderer header, and a downgraded effort is rejected |
+| xAI       | HTTPS chat completions            | actual model must be present in the response                                                                                   |
+| Google    | isolated local CLI (`agy`)        | actual model version must be present in the stream-json `init` event                                                           |
+| DeepSeek  | HTTPS chat completions            | actual model must be present in the response                                                                                   |
+| Moonshot  | HTTPS chat completions            | actual model must be present in the response                                                                                   |
 
 HTTP retries are bounded and limited to retryable network, 429 and server failures. CLI execution has a hard deadline and terminates the process group on POSIX or the complete process tree on Windows. Provider arguments are explicit argv plus stdin; no shell wrapper constructs the request.
 
@@ -72,11 +72,11 @@ Structured provider answers contain recommendation, evidence, assumptions, risks
 
 ## Lenses, rounds and quorum
 
-`src/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
+`src/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. Its standing coverage requires domain, maintainer, risk and contrarian categories, plus systems for architecture, infrastructure and performance motions. An explicitly reduced three-seat council deterministically retains domain, risk and contrarian; maintainer and conditional systems coverage yield. Four-or-more-seat selection is unchanged. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
 
 `CouncilRunner` executes all seats in a round concurrently and preserves canonical family/seat ordering in the result. Round one is blind analysis; round two is rebuttal; round three is optional refinement. Prior responses are carried as explicitly untrusted data.
 
-Quorum counts successful distinct provider families across the run. Ordinary resolution needs three families. Significant resolution needs four families and a successful contrarian lens. Failed quorum disables synthesis; the facade cannot convert it into consensus.
+Quorum counts successful distinct provider families across the run. Ordinary resolution needs three families. Significant resolution defaults to four families and a successful contrarian lens. `council --min-families 3` is an explicit weaker mode: the contrarian remains mandatory, and the reduced floor plus warning is carried by the manifest, console result and persisted session record. Failed quorum disables synthesis; the facade cannot convert it into consensus.
 
 ## Records and migration
 

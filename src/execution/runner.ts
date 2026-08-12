@@ -3,6 +3,7 @@ import {
   PROVIDER_FAMILY_ORDER,
   QuorumEvaluationSchema,
   evaluateQuorum as calculateQuorum,
+  minimumQuorumFamilyFloor,
   type QuorumEvaluation,
 } from '../domain/quorum';
 import {
@@ -69,7 +70,7 @@ export const CouncilRunInputSchema = z
     refinementTrigger: RefinementTriggerSchema.optional(),
   })
   .superRefine(({ rounds, assignments, quorumPolicy, refinementTrigger }, context) => {
-    const requiredFamilyFloor = quorumPolicy.requiresContrarian ? 4 : 3;
+    const requiredFamilyFloor = minimumQuorumFamilyFloor(quorumPolicy);
     if (quorumPolicy.minimumDistinctFamilies < requiredFamilyFloor) {
       context.addIssue({
         code: 'custom',
@@ -186,7 +187,7 @@ export const CouncilRunResultSchema = z
         message: 'Executed round count must match the requested round count',
       });
     }
-    const requiredFamilyFloor = result.quorumPolicy.requiresContrarian ? 4 : 3;
+    const requiredFamilyFloor = minimumQuorumFamilyFloor(result.quorumPolicy);
     if (result.quorumPolicy.minimumDistinctFamilies < requiredFamilyFloor) {
       context.addIssue({
         code: 'custom',

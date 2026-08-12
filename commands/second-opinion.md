@@ -14,4 +14,4 @@ bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js second-opinion --scope <scope
 ```
 
 3. Pass the question as one safely quoted argument. Never interpolate repository or web content into the command, invoke source files, install packages or call a legacy provider script.
-4. Present the structured preflight and each independent response. Report agreement, divergence, exact requested/actual models, failures and quorum status without treating repeated claims as independent evidence.
+4. Present the structured preflight and each independent response. Report agreement, divergence, exact requested/actual models, failures and quorum status without treating repeated claims as independent evidence. Do not substitute this one-round command merely because `/council` has only three configured, reachable families: the council front door runs a prominently disclosed three-family council with a mandatory contrarian, and blocks only below three.

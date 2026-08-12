@@ -425,7 +425,12 @@ interface SubscriptionCliAdapterConfig {
   family: Extract<ProviderFamily, 'openai' | 'google'>;
   executableName: string;
   request(executable: string, route: ModelRoute, prompt: string, timeoutMs: number): CliRequest;
-  output(stdout: string, workingDirectory?: string): SubscriptionCliParseResult;
+  output(
+    stdout: string,
+    workingDirectory: string | undefined,
+    stderr: string,
+    prompt: string,
+  ): SubscriptionCliParseResult;
   configurationError?: () => string | undefined;
 }
 
@@ -462,6 +467,15 @@ const OmpTurnEndSchema = z.object({
 const OmpAgentEndSchema = z.object({
   type: z.literal('agent_end'),
   messages: z.array(OmpMessageSchema).min(1),
+});
+const codexReasoningEffort = 'xhigh';
+const CodexIdentitySchema = z.object({
+  workdir: z.string().min(1),
+  model: z.string().min(1),
+  provider: z.literal('openai'),
+  approval: z.literal('never'),
+  sandbox: z.literal('read-only'),
+  'reasoning effort': z.literal(codexReasoningEffort),
 });
 
 const AgyEventEnvelopeSchema = z.object({ event: z.string().min(1) }).passthrough();
@@ -501,7 +515,7 @@ const AgyResultEventSchema = z.object({
   }),
 });
 
-const agyAnswerSchema = JSON.stringify({
+const councilAnswerJsonSchema = JSON.stringify({
   type: 'object',
   additionalProperties: false,
   required: ['recommendation', 'evidence', 'assumptions', 'risks', 'uncertainty', 'decisiveTest'],
@@ -522,6 +536,103 @@ function parseFailure(
   return actualModel === undefined
     ? { status: 'failed', code }
     : { status: 'failed', code, actualModel };
+}
+
+function extractCodexOutput(
+  stdout: string,
+  workingDirectory: string | undefined,
+  stderr: string,
+  expectedPrompt: string,
+): SubscriptionCliParseResult {
+  const normalised = stderr.replace(/\r\n/g, '\n');
+  const userPrefix = `\nuser\n${expectedPrompt.replace(/\r\n/g, '\n')}\n`;
+  const promptStart = normalised.indexOf(userPrefix);
+  if (promptStart < 0 || normalised.lastIndexOf(userPrefix) !== promptStart) {
+    return parseFailure('identity-unverified');
+  }
+  const rendererPreamble = normalised.slice(0, promptStart);
+  const headers = [
+    ...rendererPreamble.matchAll(
+      /(?:^|\n)OpenAI Codex v[^\n]+\n--------\n([\s\S]*?)\n--------(?=\n|$)/g,
+    ),
+  ];
+  const header = headers[0];
+  if (
+    headers.length !== 1 ||
+    header === undefined ||
+    workingDirectory === undefined ||
+    !isAbsolute(workingDirectory)
+  ) {
+    return parseFailure('identity-unverified');
+  }
+
+  const fields: Record<string, string> = {};
+  for (const line of header[1]?.split('\n') ?? []) {
+    const separator = line.indexOf(':');
+    if (separator <= 0) return parseFailure('identity-unverified');
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!key || !value || fields[key] !== undefined) {
+      return parseFailure('identity-unverified', fields.model);
+    }
+    fields[key] = value;
+  }
+
+  const identity = CodexIdentitySchema.safeParse(fields);
+  const actualModel = identity.success ? identity.data.model : fields.model;
+  if (
+    !identity.success ||
+    !isAbsolute(identity.data.workdir) ||
+    canonicalPath(identity.data.workdir) !== canonicalPath(workingDirectory)
+  ) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  const responseTranscript = normalised.slice(promptStart + userPrefix.length);
+  const answerMarker = 'codex\n';
+  const tokenSuffix = responseTranscript.match(/\ntokens used\n([\d,]+)\n?$/);
+  if (tokenSuffix?.index === undefined) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  const renderedMessages = responseTranscript.slice(0, tokenSuffix.index);
+  if (/(?:^|\n)model rerouted: [^\n]+ -> [^\n]+(?:\n|$)/i.test(renderedMessages)) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  if (
+    /(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(
+      renderedMessages,
+    )
+  ) {
+    return parseFailure('unsafe-tool-isolation', actualModel);
+  }
+  if (!renderedMessages.startsWith(answerMarker)) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  const answers = renderedMessages
+    .slice(answerMarker.length)
+    .split(`\n${answerMarker}`)
+    .map((value) => value.trim());
+
+  for (const renderedAnswer of answers) {
+    let value: unknown;
+    try {
+      value = JSON.parse(renderedAnswer);
+    } catch {
+      return parseFailure('identity-unverified', actualModel);
+    }
+    if (!CouncilAnswerSchema.safeParse(value).success) {
+      return parseFailure('identity-unverified', actualModel);
+    }
+  }
+
+  const rawAnswer = stdout.trim();
+  const normalisedAnswer = stdout.replace(/\r\n/g, '\n').trim();
+  if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  return { status: 'ok', actualModel: identity.data.model, rawAnswer };
 }
 
 function containsUnsafeToolNode(value: unknown): boolean {
@@ -716,8 +827,19 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
 
     if (envelope.data.event === 'init') {
       const init = AgyInitEventSchema.safeParse(value);
-      if (!init.success || state !== 'await-init') {
-        return parseFailure('unsafe-tool-isolation', actualModel);
+      if (state !== 'await-init') return parseFailure('unsafe-tool-isolation', actualModel);
+      if (!init.success) {
+        const reportedModel =
+          isRecord(value) &&
+          isRecord(value.init) &&
+          typeof value.init.model === 'string' &&
+          value.init.model.trim()
+            ? value.init.model
+            : undefined;
+        return parseFailure(
+          reportedModel === undefined ? 'identity-unverified' : 'unsafe-tool-isolation',
+          reportedModel,
+        );
       }
       actualModel = init.data.init.model;
       if (
@@ -786,7 +908,8 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
       if (
         state === 'after-read' &&
         update.state === 'DONE' &&
-        ['checkpoint', 'agent_response'].includes(update.step_type)
+        !containsUnsafeToolNode(value) &&
+        ['checkpoint', 'unknown', 'agent_response'].includes(update.step_type)
       ) {
         continue;
       }
@@ -925,7 +1048,12 @@ function createSubscriptionCliAdapter(
         );
       }
 
-      const output = config.output(result.stdout, result.workingDirectory);
+      const output = config.output(
+        result.stdout,
+        result.workingDirectory,
+        result.stderr,
+        structuredPrompt(request.prompt),
+      );
       if (output.status === 'failed') {
         capture(
           request,
@@ -1036,6 +1164,100 @@ function ompCouncilProfileConfigurationError(): string | undefined {
     : `OMP profile ${ompCouncilProfile} is not configured`;
 }
 
+/**
+ * Direct Codex subscription transport. `read-only` is Codex's most restrictive usable sandbox;
+ * ambient configuration and every stable external tool surface are disabled independently.
+ */
+export function createOpenAiCodexAdapter(
+  transport: CliTransport = nativeCliTransport,
+  resolveExecutable: () => string | undefined = () => Bun.which('codex') ?? undefined,
+): ProviderAdapter {
+  return createSubscriptionCliAdapter(
+    {
+      family: 'openai',
+      executableName: 'codex',
+      request: (executable, route, prompt, timeoutMs) => {
+        const councilPrompt = structuredPrompt(prompt);
+        return {
+          executable,
+          args: [
+            'exec',
+            '--skip-git-repo-check',
+            '--strict-config',
+            '--model',
+            route.primary,
+            '--output-schema',
+            (workingDirectory) => join(workingDirectory, 'council-answer-schema.json'),
+            '--sandbox',
+            'read-only',
+            '--ephemeral',
+            '--ignore-user-config',
+            '--ignore-rules',
+            '-c',
+            // `--ignore-user-config` discards the user's own reasoning-effort setting, so the
+            // seat MUST set it explicitly or Codex runs at `reasoning effort: none`. Verified
+            // against codex-cli 0.147.0: stderr reports `reasoning effort: xhigh`.
+            `model_reasoning_effort="${codexReasoningEffort}"`,
+            '-c',
+            'web_search="disabled"',
+            '--disable',
+            'shell_tool',
+            '--disable',
+            'unified_exec',
+            '--disable',
+            'browser_use',
+            '--disable',
+            'browser_use_external',
+            '--disable',
+            'browser_use_full_cdp_access',
+            '--disable',
+            'computer_use',
+            '--disable',
+            'view_image',
+            '--disable',
+            'image_generation',
+            '--disable',
+            'apps',
+            '--disable',
+            'plugins',
+            '--disable',
+            'remote_plugin',
+            '--disable',
+            'multi_agent',
+            '--disable',
+            'hooks',
+            '--disable',
+            'skill_search',
+            '--disable',
+            'skill_mcp_dependency_install',
+            '--disable',
+            'workspace_dependencies',
+            '--color',
+            'never',
+            '-',
+          ],
+          // Codex has no prompt-file flag: asking it to read this path would execute a tool.
+          // Stage the bytes for isolation parity, then supply those same bytes through stdin.
+          stdin: councilPrompt,
+          timeoutMs,
+          cwd: tmpdir(),
+          files: {
+            'council-prompt.txt': councilPrompt,
+            'council-answer-schema.json': councilAnswerJsonSchema,
+          },
+        };
+      },
+      output: extractCodexOutput,
+    },
+    transport,
+    resolveExecutable,
+  );
+}
+
+/**
+ * Legacy OMP transport, retained for callers with an authenticated `claude-council` OMP profile.
+ * It is no longer the default because that isolated profile has its own expiring credential store.
+ */
 export function createOpenAiSubscriptionAdapter(
   transport: CliTransport = nativeCliTransport,
   resolveExecutable: () => string | undefined = () => Bun.which('omp') ?? undefined,
@@ -1115,7 +1337,7 @@ export function createGoogleSubscriptionAdapter(
           '--output-format',
           'stream-json',
           '--json-schema',
-          agyAnswerSchema,
+          councilAnswerJsonSchema,
           '--model',
           route.primary,
           '--print-timeout',

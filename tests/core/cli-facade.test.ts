@@ -8,6 +8,8 @@ import {
   type ProviderFamily,
 } from '../../src/domain/schemas';
 import type {
+  Availability,
+  HealthResult,
   ProviderAdapter,
   ProviderContext,
   ProviderRequest,
@@ -17,10 +19,22 @@ import { runCliFacade, type CliFacadeEnvironment } from '../../src/cli';
 import { assignLenses, selectLenses } from '../../src/roles/allocator';
 
 const NOW = '2026-07-28T12:00:00.000Z';
+const REDUCED_QUORUM_WARNING =
+  'REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.';
+const AUTO_REDUCED_QUORUM_WARNING =
+  'REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: xai — missing key (missing XAI_API_KEY); deepseek — identity-unverified (provider response did not expose actual model identity).';
+
+interface FixtureProviderState {
+  readonly availability?: Availability['status'];
+  readonly availabilityReason?: string;
+  readonly health?: HealthResult['status'];
+  readonly healthReason?: string;
+}
 
 interface FixtureBehaviour {
   readonly recommendation?: string;
   readonly failInvocation?: (provider: ProviderFamily, request: ProviderRequest) => boolean;
+  readonly providerStates?: Partial<Record<ProviderFamily, FixtureProviderState>>;
 }
 
 async function fixtureEnvironment(
@@ -37,12 +51,13 @@ async function fixtureEnvironment(
         family: provider,
         transport: registry[provider].transport,
         async availability(_context: ProviderContext) {
-          calls += 1;
+          const state = behaviour.providerStates?.[provider];
+          const status = state?.availability ?? 'available';
           return {
-            status: 'available' as const,
+            status,
             provider,
             model: registry[provider].primary,
-            reason: '',
+            reason: state?.availabilityReason ?? (status === 'available' ? '' : 'unconfigured'),
           };
         },
         async invoke(request: ProviderRequest) {
@@ -84,8 +99,19 @@ async function fixtureEnvironment(
           };
         },
         async probe() {
-          calls += 1;
-          throw new Error('dry-run must not probe providers');
+          if (!live) throw new Error('dry-run must not probe providers');
+          const state = behaviour.providerStates?.[provider];
+          const status = state?.health ?? 'healthy';
+          return {
+            status,
+            provider,
+            requestedModel: registry[provider].primary,
+            actualModel: status === 'healthy' ? registry[provider].primary : null,
+            latencyMs: 1,
+            reason:
+              state?.healthReason ??
+              (status === 'healthy' ? '' : 'Deterministic unhealthy provider fixture.'),
+          };
         },
       } satisfies ProviderAdapter,
     ]),
@@ -366,6 +392,269 @@ describe('public CLI facade', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test('ordinary council front door keeps the standing floor with five reachable families', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const result = await runCliFacade(
+      [
+        'council',
+        '--scope',
+        'general',
+        '--classification',
+        'public',
+        '--motion',
+        'Review a bounded general council choice',
+      ],
+      fixture.environment,
+    );
+    const payload = JSON.parse(result.stdout);
+
+    expect(result.exitCode).toBe(0);
+    expect(payload.status).toBe('completed');
+    expect(payload.manifest.quorumPolicy).toEqual({
+      minimumDistinctFamilies: 4,
+      requiresContrarian: true,
+    });
+    expect(payload.warning).toBeUndefined();
+    expect(payload.preflight.requestedProviders).toEqual([
+      'anthropic',
+      'openai',
+      'xai',
+      'google',
+      'deepseek',
+    ]);
+    expect(payload.preflight.selectedProviders).toEqual(payload.preflight.requestedProviders);
+    expect(payload.preflight.unavailableProviders).toEqual([]);
+    expect(
+      new Set(payload.manifest.lenses.map(({ category }: { category: string }) => category)),
+    ).toEqual(new Set(['domain', 'maintainer', 'risk', 'contrarian']));
+    expect(fixture.providerCalls()).toBe(10);
+  });
+
+  test('ordinary council front door auto-reduces to three reachable families with durable reasons', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-cli-auto-reduced-quorum-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true, {
+        providerStates: {
+          xai: {
+            availability: 'unconfigured',
+            availabilityReason: 'missing XAI_API_KEY',
+          },
+          deepseek: {
+            health: 'identity-unverified',
+            healthReason: 'provider response did not expose actual model identity',
+          },
+        },
+      });
+      const result = await runCliFacade(
+        [
+          'council',
+          '--scope',
+          'general',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-auto-reduced-quorum',
+          '--motion-id',
+          'motion-auto-reduced-quorum',
+          '--motion',
+          'Review a bounded general council choice',
+        ],
+        fixture.environment,
+      );
+      const payload = JSON.parse(result.stdout);
+      const session = JSON.parse(
+        await Bun.file(join(root, 'general', 'sessions', 'run-auto-reduced-quorum.json')).text(),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(payload.status).toBe('completed');
+      expect(payload.warning).toBe(AUTO_REDUCED_QUORUM_WARNING);
+      expect(payload.preflight.requestedProviders).toEqual([
+        'anthropic',
+        'openai',
+        'xai',
+        'google',
+        'deepseek',
+      ]);
+      expect(payload.preflight.selectedProviders).toEqual(['anthropic', 'openai', 'google']);
+      expect(payload.preflight.unavailableProviders).toEqual([
+        { provider: 'xai', reason: 'missing key', detail: 'missing XAI_API_KEY' },
+        {
+          provider: 'deepseek',
+          reason: 'identity-unverified',
+          detail: 'provider response did not expose actual model identity',
+        },
+      ]);
+      expect(Object.keys(payload.manifest.routes)).toEqual(['anthropic', 'openai', 'google']);
+      expect(payload.manifest.quorumPolicy).toEqual({
+        minimumDistinctFamilies: 3,
+        requiresContrarian: true,
+        reducedQuorum: {
+          standingDefaultMinimumDistinctFamilies: 4,
+          weakerThanStandingDefault: true,
+          warning: AUTO_REDUCED_QUORUM_WARNING,
+        },
+      });
+      expect(
+        payload.execution.assignments.some(
+          ({ lensCategory }: { lensCategory: string }) => lensCategory === 'contrarian',
+        ),
+      ).toBe(true);
+      expect(payload.execution.quorum.successfulFamilies).toEqual([
+        'anthropic',
+        'openai',
+        'google',
+      ]);
+      expect(session.destinations.map(({ provider }: { provider: string }) => provider)).toEqual([
+        'anthropic',
+        'openai',
+        'google',
+      ]);
+      expect(session.protocol.quorumPolicy).toEqual(payload.manifest.quorumPolicy);
+      expect(session.summary).toContain(AUTO_REDUCED_QUORUM_WARNING);
+      expect(fixture.providerCalls()).toBe(6);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('runs an explicitly reduced three-family council with a contrarian and durable warning', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-cli-reduced-quorum-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const result = await runCliFacade(
+        [
+          'council',
+          '--scope',
+          'general',
+          '--classification',
+          'public',
+          '--providers',
+          'anthropic,openai,google',
+          '--min-families',
+          '3',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-reduced-quorum',
+          '--motion-id',
+          'motion-reduced-quorum',
+          '--motion',
+          'Review a bounded general council choice',
+        ],
+        fixture.environment,
+      );
+      const payload = JSON.parse(result.stdout);
+      const session = JSON.parse(
+        await Bun.file(join(root, 'general', 'sessions', 'run-reduced-quorum.json')).text(),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(payload.status).toBe('completed');
+      expect(payload.warning).toBe(REDUCED_QUORUM_WARNING);
+      expect(payload.manifest.quorumPolicy).toEqual({
+        minimumDistinctFamilies: 3,
+        requiresContrarian: true,
+        reducedQuorum: {
+          standingDefaultMinimumDistinctFamilies: 4,
+          weakerThanStandingDefault: true,
+          warning: REDUCED_QUORUM_WARNING,
+        },
+      });
+      expect(
+        payload.execution.assignments.some(
+          ({ lensCategory }: { lensCategory: string }) => lensCategory === 'contrarian',
+        ),
+      ).toBe(true);
+      expect(payload.execution.quorum.successfulFamilies).toEqual([
+        'anthropic',
+        'openai',
+        'google',
+      ]);
+      expect(session.protocol.quorumPolicy).toEqual(payload.manifest.quorumPolicy);
+      expect(session.summary).toContain(REDUCED_QUORUM_WARNING);
+      expect(fixture.providerCalls()).toBe(6);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('ordinary council front door fails closed below three reachable families', async () => {
+    const fixture = await fixtureEnvironment(undefined, true, {
+      providerStates: {
+        xai: {
+          availability: 'unconfigured',
+          availabilityReason: 'missing XAI_API_KEY',
+        },
+        google: {
+          health: 'down',
+          healthReason: 'health check timed out',
+        },
+        deepseek: {
+          health: 'identity-unverified',
+          healthReason: 'provider response did not expose actual model identity',
+        },
+      },
+    });
+    const result = await runCliFacade(
+      [
+        'council',
+        '--scope',
+        'general',
+        '--classification',
+        'public',
+        '--motion',
+        'Review a bounded general council choice',
+      ],
+      fixture.environment,
+    );
+    const payload = JSON.parse(result.stderr);
+
+    expect(result.exitCode).toBe(4);
+    expect(payload.status).toBe('blocked-quorum');
+    expect(payload.message).toBe(
+      'Council requires at least 3 configured, reachable provider families; found 2.',
+    );
+    expect(payload.preflight.selectedProviders).toEqual(['anthropic', 'openai']);
+    expect(payload.preflight.unavailableProviders).toEqual([
+      { provider: 'xai', reason: 'missing key', detail: 'missing XAI_API_KEY' },
+      { provider: 'google', reason: 'unhealthy', detail: 'health check timed out' },
+      {
+        provider: 'deepseek',
+        reason: 'identity-unverified',
+        detail: 'provider response did not expose actual model identity',
+      },
+    ]);
+    expect(fixture.providerCalls()).toBe(0);
+  });
+
+  test('rejects a reduced council floor below three families', async () => {
+    const fixture = await fixtureEnvironment();
+    const result = await runCliFacade(
+      [
+        'council',
+        '--dry-run',
+        '--scope',
+        'general',
+        '--classification',
+        'public',
+        '--min-families',
+        '2',
+        '--motion',
+        'Review a bounded general council choice',
+      ],
+      fixture.environment,
+    );
+
+    expect(result.exitCode).toBe(2);
+    expect(JSON.parse(result.stderr).message).toBe(
+      'Option --min-families must be an integer from 3 to 6',
+    );
+    expect(fixture.providerCalls()).toBe(0);
   });
 
   test('enforces the CLI round matrix and scans the refinement question', async () => {

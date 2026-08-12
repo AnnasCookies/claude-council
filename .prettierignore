@@ -6,3 +6,7 @@ tests/.tmp/
 tests/tmp/
 *.lcov
 *.tap
+
+# Captured provider payloads are compared byte-exactly by the seat parsers.
+# Reformatting them silently breaks the transcript binding — never format these.
+tests/core/fixtures/

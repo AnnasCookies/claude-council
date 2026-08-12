@@ -6,6 +6,7 @@ import type { CliRequest, CliResult } from '../../src/execution/cli';
 import type { HttpRequest, HttpResult, RetryPolicy } from '../../src/execution/http';
 import { doctor } from '../../src/health/doctor';
 import {
+  createOpenAiSubscriptionAdapter,
   type CliTransport,
   type HttpTransport,
   type ProviderContext,
@@ -28,6 +29,10 @@ const answer = JSON.stringify({
   uncertainty: 'Low.',
   decisiveTest: 'Run the isolated acceptance path.',
 });
+const stagedCouncilPrompt =
+  'Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.\n\nEvaluate the supplied evidence pack.';
+const capturedCodexPrompt =
+  'Before the final assessment, send a separate progress update as a JSON object matching the required schema; then send the final JSON assessment. The evidence pack is intentionally absent.';
 
 class FakeHttp implements HttpTransport {
   readonly calls: { request: HttpRequest; policy: RetryPolicy }[] = [];
@@ -73,6 +78,35 @@ const okCli = (stdout: string, workingDirectory = ownedDirectory): CliResult => 
   errorCode: null,
   workingDirectory,
 });
+
+function codexCli(
+  model: string | undefined,
+  content = answer,
+  activity: readonly string[] = [],
+): CliResult {
+  const identity = [
+    'OpenAI Codex v0.147.0',
+    '--------',
+    `workdir: ${ownedDirectory}`,
+    ...(model === undefined ? [] : [`model: ${model}`]),
+    'provider: openai',
+    'approval: never',
+    'sandbox: read-only',
+    'reasoning effort: xhigh',
+    'reasoning summaries: none',
+    'session id: 019ff6ae-69a5-7b51-871d-4a22249d0587',
+    '--------',
+    'user',
+    stagedCouncilPrompt,
+    ...activity,
+    'codex',
+    content,
+    'tokens used',
+    '42',
+    '',
+  ].join('\n');
+  return { ...okCli(content), stderr: identity };
+}
 
 interface OmpOutputOptions {
   beforeTerminal?: readonly unknown[];
@@ -217,6 +251,32 @@ const agyOutput = (model: string, content = answer, options: AgyOutputOptions = 
   return events.map((event) => JSON.stringify(event)).join('\n');
 };
 
+async function capturedAgyOutput(): Promise<string> {
+  const fixture = await Bun.file(
+    join(import.meta.dir, 'fixtures', 'agy-stream-json-success.jsonl'),
+  ).text();
+  const escapedWorkingDirectory = JSON.stringify(ownedDirectory).slice(1, -1);
+  const escapedPromptPath = JSON.stringify(join(ownedDirectory, 'council-prompt.txt')).slice(1, -1);
+  return fixture
+    .replaceAll('__WORKING_DIRECTORY__\\\\council-prompt.txt', escapedPromptPath)
+    .replaceAll('__WORKING_DIRECTORY__', escapedWorkingDirectory);
+}
+
+async function capturedCodexCli(): Promise<CliResult> {
+  const [stderr, stdout] = await Promise.all([
+    Bun.file(
+      join(import.meta.dir, 'fixtures', 'codex-human-output-multi-message.stderr.txt'),
+    ).text(),
+    Bun.file(
+      join(import.meta.dir, 'fixtures', 'codex-human-output-multi-message.stdout.json'),
+    ).text(),
+  ]);
+  return {
+    ...okCli(stdout.trim()),
+    stderr: stderr.replace('C:\\tmp\\codexaudit', ownedDirectory),
+  };
+}
+
 const modelMissing = (): HttpResult => ({
   status: 'failed',
   attempts: 1,
@@ -338,9 +398,307 @@ describe('HTTP provider adapters', () => {
 });
 
 describe('Subscription CLI provider adapters', () => {
-  test('OpenAI uses the exact subscription model without tools, ambient context or prompt arguments', async () => {
-    const transport = new FakeCli(okCli(ompOutput('gpt-5.6-sol')));
+  test('OpenAI builds a direct Codex invocation with the isolated prompt and answer schema', async () => {
+    const transport = new FakeCli(codexCli('gpt-5.6-sol'));
+    await openaiAdapter(transport, () => process.execPath).invoke(request(context({})));
+
+    const call = transport.calls[0];
+    const args = call?.args.map((argument) =>
+      typeof argument === 'function' ? argument(ownedDirectory) : argument,
+    );
+    expect(args).toEqual([
+      'exec',
+      '--skip-git-repo-check',
+      '--strict-config',
+      '--model',
+      'gpt-5.6-sol',
+      '--output-schema',
+      join(ownedDirectory, 'council-answer-schema.json'),
+      '--sandbox',
+      'read-only',
+      '--ephemeral',
+      '--ignore-user-config',
+      '--ignore-rules',
+      '-c',
+      // The seat must set reasoning effort explicitly: --ignore-user-config would otherwise
+      // leave Codex at `reasoning effort: none`.
+      'model_reasoning_effort="xhigh"',
+      '-c',
+      'web_search="disabled"',
+      '--disable',
+      'shell_tool',
+      '--disable',
+      'unified_exec',
+      '--disable',
+      'browser_use',
+      '--disable',
+      'browser_use_external',
+      '--disable',
+      'browser_use_full_cdp_access',
+      '--disable',
+      'computer_use',
+      '--disable',
+      'view_image',
+      '--disable',
+      'image_generation',
+      '--disable',
+      'apps',
+      '--disable',
+      'plugins',
+      '--disable',
+      'remote_plugin',
+      '--disable',
+      'multi_agent',
+      '--disable',
+      'hooks',
+      '--disable',
+      'skill_search',
+      '--disable',
+      'skill_mcp_dependency_install',
+      '--disable',
+      'workspace_dependencies',
+      '--color',
+      'never',
+      '-',
+    ]);
+    expect(args?.join(' ')).not.toContain('Evaluate the supplied evidence pack.');
+    const promptFile = call?.files?.['council-prompt.txt'];
+    if (typeof promptFile !== 'string') throw new Error('staged council prompt missing');
+    expect(promptFile).toContain('Evaluate the supplied evidence pack.');
+    expect(call?.stdin).toBe(promptFile);
+    expect(JSON.parse(String(call?.files?.['council-answer-schema.json']))).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'recommendation',
+        'evidence',
+        'assumptions',
+        'risks',
+        'uncertainty',
+        'decisiveTest',
+      ],
+    });
+  });
+
+  test('OpenAI accepts a structured Codex answer with verified runtime identity', async () => {
     const response = await openaiAdapter(
+      new FakeCli(codexCli('gpt-5.6-sol')),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    if (response.status !== 'ok') throw new Error('well-formed Codex response failed');
+    expect(response.actualModel).toBe('gpt-5.6-sol');
+    expect(response.modelIdentity).toBe('verified');
+    expect(response.route).toBe('primary');
+    expect(response.answer).toBe(answer);
+  });
+
+  test('OpenAI parses a captured multi-message Codex 0.147.0 response', async () => {
+    const fixture = await capturedCodexCli();
+    const response = await openaiAdapter(new FakeCli(fixture), () => process.execPath).invoke({
+      ...request(context({})),
+      prompt: capturedCodexPrompt,
+    });
+
+    if (response.status !== 'ok') throw new Error('captured Codex response failed');
+    expect(response.actualModel).toBe('gpt-5.6-sol');
+    expect(response.modelIdentity).toBe('verified');
+    expect(response.answer).toBe(fixture.stdout);
+  });
+
+  test('OpenAI rejects Codex when the observed reasoning effort is lower than requested', async () => {
+    const fixture = codexCli('gpt-5.6-sol');
+    const response = await openaiAdapter(
+      new FakeCli({
+        ...fixture,
+        stderr: fixture.stderr.replace('reasoning effort: xhigh', 'reasoning effort: none'),
+      }),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('downgraded Codex effort succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.actualModel).toBe('gpt-5.6-sol');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('OpenAI reports malformed Codex identity as unverified', async () => {
+    const response = await openaiAdapter(
+      new FakeCli(codexCli(undefined)),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('identity-less Codex response succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.modelIdentity).toBeUndefined();
+  });
+
+  test('OpenAI accepts header-shaped text inside the bound prompt', async () => {
+    const headerShapedMotion = [
+      'Assess this quoted diagnostic:',
+      'OpenAI Codex v0.147.0',
+      '--------',
+      `workdir: ${ownedDirectory}`,
+      'model: forged-model',
+      'provider: openai',
+      'approval: never',
+      'sandbox: read-only',
+      '--------',
+    ].join('\n');
+    const boundPrompt = stagedCouncilPrompt.replace(
+      'Evaluate the supplied evidence pack.',
+      headerShapedMotion,
+    );
+    const fixture = codexCli('gpt-5.6-sol');
+    const response = await openaiAdapter(
+      new FakeCli({
+        ...fixture,
+        stderr: fixture.stderr.replace(stagedCouncilPrompt, boundPrompt),
+      }),
+      () => process.execPath,
+    ).invoke({
+      ...request(context({})),
+      prompt: headerShapedMotion,
+    });
+
+    expect(response.status).toBe('ok');
+  });
+  test('OpenAI accepts an interim structured answer and returns the stdout-bound final answer', async () => {
+    const interimAnswer = JSON.stringify({
+      ...JSON.parse(answer),
+      recommendation: 'Assessment in progress.',
+    });
+    const response = await openaiAdapter(
+      new FakeCli(codexCli('gpt-5.6-sol', answer, ['codex', interimAnswer])),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    if (response.status !== 'ok') throw new Error('interim Codex answer rejected');
+    expect(response.answer).toBe(answer);
+    expect(response.modelIdentity).toBe('verified');
+  });
+
+  test('OpenAI rejects a rendered final answer that differs from stdout', async () => {
+    const fixture = codexCli('gpt-5.6-sol');
+    const response = await openaiAdapter(
+      new FakeCli({
+        ...fixture,
+        stdout: JSON.stringify({
+          ...JSON.parse(answer),
+          recommendation: 'Different stdout answer.',
+        }),
+      }),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('unbound Codex stdout succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+  });
+
+  test('OpenAI accepts a warning before the unique renderer identity header', async () => {
+    const fixture = codexCli('gpt-5.6-sol');
+    const response = await openaiAdapter(
+      new FakeCli({
+        ...fixture,
+        stderr: `WARNING: unable to create optional PATH aliases\n${fixture.stderr}`,
+      }),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('ok');
+  });
+
+  test('OpenAI rejects a Codex tool trace even when it precedes the first answer', async () => {
+    const response = await openaiAdapter(
+      new FakeCli(
+        codexCli('gpt-5.6-sol', answer, [
+          'exec',
+          'powershell -Command Get-Location',
+          'succeeded in 10ms:',
+        ]),
+      ),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('tool-bearing Codex response succeeded');
+    expect(response.error.code).toBe('unsafe-tool-isolation');
+    expect(response.actualModel).toBe('gpt-5.6-sol');
+  });
+  test('OpenAI normalises Windows prompt line endings before verifying the transcript', async () => {
+    const windowsMotion = 'Evaluate\r\nthe supplied evidence pack.';
+    const windowsPrompt = stagedCouncilPrompt.replace(
+      'Evaluate the supplied evidence pack.',
+      windowsMotion,
+    );
+    const response = await openaiAdapter(
+      new FakeCli({
+        ...codexCli('gpt-5.6-sol'),
+        stderr: codexCli('gpt-5.6-sol').stderr.replace(stagedCouncilPrompt, windowsPrompt),
+      }),
+      () => process.execPath,
+    ).invoke({
+      ...request(context({})),
+      prompt: windowsMotion,
+    });
+
+    expect(response.status).toBe('ok');
+  });
+
+  test('OpenAI accepts a pretty multiline answer with Windows output line endings', async () => {
+    const prettyAnswer = JSON.stringify(JSON.parse(answer), null, 2);
+    const response = await openaiAdapter(
+      new FakeCli({
+        ...codexCli('gpt-5.6-sol', prettyAnswer),
+        stdout: prettyAnswer.replace(/\n/g, '\r\n'),
+      }),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('ok');
+  });
+
+  test('OpenAI rejects unrecognised text between the prompt and final answer', async () => {
+    const response = await openaiAdapter(
+      new FakeCli(codexCli('gpt-5.6-sol', answer, ['read_file: council-prompt.txt'])),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('unrecognised Codex activity succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+  });
+
+  test('OpenAI rejects rendered Codex non-shell tools and model reroutes', async () => {
+    for (const activity of [
+      ['web search: https://example.com'],
+      ['mcp: server/tool started'],
+      ['apply patch', 'patch: completed'],
+      ['collab: spawn_agent'],
+      ['hook: SessionStart'],
+      ['model rerouted: gpt-5.6-sol -> gpt-5.6-mini'],
+    ]) {
+      const response = await openaiAdapter(
+        new FakeCli(codexCli('gpt-5.6-sol', answer, activity)),
+        () => process.execPath,
+      ).invoke(request(context({})));
+
+      expect(response.status).toBe('failed');
+      if (response.status === 'ok') throw new Error('unsafe Codex transcript succeeded');
+      expect(response.error.code).toBe(
+        activity[0]?.startsWith('model rerouted:')
+          ? 'identity-unverified'
+          : 'unsafe-tool-isolation',
+      );
+    }
+  });
+
+  test('legacy OMP OpenAI transport uses an isolated profile and tool-free arguments', async () => {
+    const transport = new FakeCli(okCli(ompOutput('gpt-5.6-sol')));
+    const response = await createOpenAiSubscriptionAdapter(
       transport,
       () => process.execPath,
       () => undefined,
@@ -390,7 +748,7 @@ describe('Subscription CLI provider adapters', () => {
     expect(call?.cwd).not.toContain('C:/private/project-root');
   });
 
-  test('OpenAI ignores prompt-bearing aggregate events when structured output is missing', async () => {
+  test('legacy OMP transport ignores prompt-bearing aggregates without structured output', async () => {
     const diagnostics: ProviderDiagnostic[] = [];
     const secretPrompt = 'private motion must not be retained';
     const transport = new FakeCli(
@@ -402,7 +760,7 @@ describe('Subscription CLI provider adapters', () => {
       ),
     );
 
-    const response = await openaiAdapter(
+    const response = await createOpenAiSubscriptionAdapter(
       transport,
       () => process.execPath,
       () => undefined,
@@ -413,7 +771,7 @@ describe('Subscription CLI provider adapters', () => {
     expect(JSON.stringify(diagnostics)).not.toContain(secretPrompt);
   });
 
-  test('OpenAI rejects malformed, duplicate and tool-bearing streams', async () => {
+  test('legacy OMP transport rejects malformed, duplicate and tool-bearing streams', async () => {
     const cases = [
       [`${ompOutput('gpt-5.6-sol')}\n{"type":`, 'identity-unverified'],
       [`${ompOutput('gpt-unapproved')}\n${ompOutput('gpt-5.6-sol')}`, 'identity-unverified'],
@@ -437,7 +795,7 @@ describe('Subscription CLI provider adapters', () => {
     ] as const;
 
     for (const [output, errorCode] of cases) {
-      const response = await openaiAdapter(
+      const response = await createOpenAiSubscriptionAdapter(
         new FakeCli(okCli(output)),
         () => process.execPath,
         () => undefined,
@@ -486,6 +844,43 @@ describe('Subscription CLI provider adapters', () => {
       permissions: {
         allow: [`read_file(${join(workingDirectory, 'council-prompt.txt')})`],
       },
+    });
+  });
+
+  test('Google verifies the model identity in captured AGY stream-json output', async () => {
+    const response = await googleAdapter(
+      new FakeCli(okCli(await capturedAgyOutput())),
+      () => process.execPath,
+    ).invoke(request(context({})));
+
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe('gemini-3.1-pro-high');
+    expect(response.modelIdentity).toBe('verified');
+  });
+
+  test('Google rejects captured AGY output when the init model identity is absent', async () => {
+    const [initLine, ...remainingLines] = (await capturedAgyOutput()).trimEnd().split(/\r?\n/);
+    if (!initLine) throw new Error('captured AGY fixture has no init event');
+    const initEvent = JSON.parse(initLine) as { init: { model?: string } };
+    delete initEvent.init.model;
+    const withoutIdentity = [JSON.stringify(initEvent), ...remainingLines].join('\n');
+    const adapter = googleAdapter(new FakeCli(okCli(withoutIdentity)), () => process.execPath);
+    const response = await adapter.invoke(request(context({})));
+    const report = await doctor([adapter], context({}), '2026-08-12T00:00:00.000Z');
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') {
+      throw new Error('identity-free AGY stream unexpectedly succeeded');
+    }
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.actualModel).toBeUndefined();
+    expect(response.modelIdentity).toBeUndefined();
+    expect(report.diagnostics[0]).toMatchObject({
+      provider: 'google',
+      actualModel: null,
+      identity: 'unverified',
+      status: 'identity-unverified',
+      errorCategory: 'identity-unverified',
     });
   });
 
@@ -569,6 +964,16 @@ describe('Subscription CLI provider adapters', () => {
       event: 'step_update',
       step_update: { step_index: 7, state: 'DONE', step_type: 'network' },
     };
+    const disguisedTool = {
+      event: 'step_update',
+      step_update: {
+        step_index: 7,
+        state: 'DONE',
+        step_type: 'unknown',
+        tool_name: 'browser_get_dom',
+        tool_info: {},
+      },
+    };
     const cases = [
       [
         agyOutput('gemini-3.1-pro-high', answer, { includePromptPath: false }),
@@ -608,6 +1013,10 @@ describe('Subscription CLI provider adapters', () => {
         agyOutput('gemini-3.1-pro-high', answer, { additionalEvents: [unknownStep] }),
         'identity-unverified',
       ],
+      [
+        agyOutput('gemini-3.1-pro-high', answer, { additionalEvents: [disguisedTool] }),
+        'unsafe-tool-isolation',
+      ],
       [agyOutput('gemini-3.1-pro-high', answer, { duplicateResult: true }), 'identity-unverified'],
     ] as const;
 
@@ -641,9 +1050,9 @@ describe('Subscription CLI provider adapters', () => {
     expect(report.diagnostics[0]?.remediationCodes).toContain('secure-transport');
   });
 
-  test('OpenAI reports an absent governed profile as unconfigured without invocation', async () => {
+  test('legacy OMP transport reports an absent governed profile without invocation', async () => {
     const transport = new FakeCli(okCli(ompOutput('gpt-5.6-sol')));
-    const adapter = openaiAdapter(
+    const adapter = createOpenAiSubscriptionAdapter(
       transport,
       () => process.execPath,
       () => 'OMP profile claude-council is not configured',
@@ -666,21 +1075,13 @@ describe('Subscription CLI provider adapters', () => {
       exitCode: null,
       errorCode: 'repository-executable',
     };
-    const health = await openaiAdapter(
-      new FakeCli(rejectedCli),
-      () => process.execPath,
-      () => undefined,
-    ).probe(context({}));
+    const health = await openaiAdapter(new FakeCli(rejectedCli), () => process.execPath).probe(
+      context({}),
+    );
     expect(health.status).toBe('unsafe-transport');
 
     const report = await doctor(
-      [
-        openaiAdapter(
-          new FakeCli(rejectedCli),
-          () => process.execPath,
-          () => undefined,
-        ),
-      ],
+      [openaiAdapter(new FakeCli(rejectedCli), () => process.execPath)],
       context({}),
       '2026-07-29T00:00:00.000Z',
     );
@@ -690,11 +1091,7 @@ describe('Subscription CLI provider adapters', () => {
 
   test('missing subscription executables skip instead of falling back to API keys', async () => {
     const adapters = [
-      openaiAdapter(
-        new FakeCli(okCli('')),
-        () => undefined,
-        () => undefined,
-      ),
+      openaiAdapter(new FakeCli(okCli('')), () => undefined),
       googleAdapter(new FakeCli(okCli('')), () => undefined),
     ];
     for (const adapter of adapters) {

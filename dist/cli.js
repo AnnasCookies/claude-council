@@ -15895,10 +15895,34 @@ var RoleLensSchema = exports_external.strictObject({
   prompt: NonEmptyStringSchema,
   applicability: RoleApplicabilitySchema
 });
+var ReducedQuorumNoticeSchema = exports_external.strictObject({
+  standingDefaultMinimumDistinctFamilies: exports_external.literal(4),
+  weakerThanStandingDefault: exports_external.literal(true),
+  warning: NonEmptyStringSchema
+});
 var QuorumPolicySchema = exports_external.strictObject({
   minimumDistinctFamilies: exports_external.number().int().min(1).max(ProviderFamilySchema.options.length),
   requiresContrarian: exports_external.boolean(),
-  chairProvider: ProviderFamilySchema.optional()
+  chairProvider: ProviderFamilySchema.optional(),
+  reducedQuorum: ReducedQuorumNoticeSchema.optional()
+}).superRefine((policy, context) => {
+  const notice = policy.reducedQuorum;
+  if (notice === undefined)
+    return;
+  if (!policy.requiresContrarian || policy.minimumDistinctFamilies < 3 || policy.minimumDistinctFamilies >= notice.standingDefaultMinimumDistinctFamilies) {
+    context.addIssue({
+      code: "custom",
+      path: ["reducedQuorum"],
+      message: "Reduced quorum is valid only for a three-family significant council"
+    });
+  }
+  if (!notice.warning.includes(String(policy.minimumDistinctFamilies)) || !notice.warning.includes(String(notice.standingDefaultMinimumDistinctFamilies)) || !/standing default/i.test(notice.warning) || !/weaker/i.test(notice.warning)) {
+    context.addIssue({
+      code: "custom",
+      path: ["reducedQuorum", "warning"],
+      message: "Reduced-quorum warning must state both family floors and that it is weaker"
+    });
+  }
 });
 var RunManifestSchema = exports_external.strictObject({
   motionId: NonEmptyStringSchema,
@@ -16752,6 +16776,15 @@ var OmpAgentEndSchema = exports_external.object({
   type: exports_external.literal("agent_end"),
   messages: exports_external.array(OmpMessageSchema).min(1)
 });
+var codexReasoningEffort = "xhigh";
+var CodexIdentitySchema = exports_external.object({
+  workdir: exports_external.string().min(1),
+  model: exports_external.string().min(1),
+  provider: exports_external.literal("openai"),
+  approval: exports_external.literal("never"),
+  sandbox: exports_external.literal("read-only"),
+  "reasoning effort": exports_external.literal(codexReasoningEffort)
+});
 var AgyEventEnvelopeSchema = exports_external.object({ event: exports_external.string().min(1) }).passthrough();
 var AgyInitEventSchema = exports_external.object({
   event: exports_external.literal("init"),
@@ -16788,7 +16821,7 @@ var AgyResultEventSchema = exports_external.object({
     response: exports_external.string().min(1)
   })
 });
-var agyAnswerSchema = JSON.stringify({
+var councilAnswerJsonSchema = JSON.stringify({
   type: "object",
   additionalProperties: false,
   required: ["recommendation", "evidence", "assumptions", "risks", "uncertainty", "decisiveTest"],
@@ -16804,6 +16837,82 @@ var agyAnswerSchema = JSON.stringify({
 function parseFailure(code, actualModel) {
   return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
 }
+function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt) {
+  const normalised = stderr.replace(/\r\n/g, `
+`);
+  const userPrefix = `
+user
+${expectedPrompt.replace(/\r\n/g, `
+`)}
+`;
+  const promptStart = normalised.indexOf(userPrefix);
+  if (promptStart < 0 || normalised.lastIndexOf(userPrefix) !== promptStart) {
+    return parseFailure("identity-unverified");
+  }
+  const rendererPreamble = normalised.slice(0, promptStart);
+  const headers = [
+    ...rendererPreamble.matchAll(/(?:^|\n)OpenAI Codex v[^\n]+\n--------\n([\s\S]*?)\n--------(?=\n|$)/g)
+  ];
+  const header = headers[0];
+  if (headers.length !== 1 || header === undefined || workingDirectory === undefined || !isAbsolute2(workingDirectory)) {
+    return parseFailure("identity-unverified");
+  }
+  const fields = {};
+  for (const line of header[1]?.split(`
+`) ?? []) {
+    const separator = line.indexOf(":");
+    if (separator <= 0)
+      return parseFailure("identity-unverified");
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!key || !value || fields[key] !== undefined) {
+      return parseFailure("identity-unverified", fields.model);
+    }
+    fields[key] = value;
+  }
+  const identity = CodexIdentitySchema.safeParse(fields);
+  const actualModel = identity.success ? identity.data.model : fields.model;
+  if (!identity.success || !isAbsolute2(identity.data.workdir) || canonicalPath(identity.data.workdir) !== canonicalPath(workingDirectory)) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const responseTranscript = normalised.slice(promptStart + userPrefix.length);
+  const answerMarker = `codex
+`;
+  const tokenSuffix = responseTranscript.match(/\ntokens used\n([\d,]+)\n?$/);
+  if (tokenSuffix?.index === undefined) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const renderedMessages = responseTranscript.slice(0, tokenSuffix.index);
+  if (/(?:^|\n)model rerouted: [^\n]+ -> [^\n]+(?:\n|$)/i.test(renderedMessages)) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  if (/(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(renderedMessages)) {
+    return parseFailure("unsafe-tool-isolation", actualModel);
+  }
+  if (!renderedMessages.startsWith(answerMarker)) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const answers = renderedMessages.slice(answerMarker.length).split(`
+${answerMarker}`).map((value) => value.trim());
+  for (const renderedAnswer of answers) {
+    let value;
+    try {
+      value = JSON.parse(renderedAnswer);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (!CouncilAnswerSchema.safeParse(value).success) {
+      return parseFailure("identity-unverified", actualModel);
+    }
+  }
+  const rawAnswer = stdout.trim();
+  const normalisedAnswer = stdout.replace(/\r\n/g, `
+`).trim();
+  if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  return { status: "ok", actualModel: identity.data.model, rawAnswer };
+}
 function containsUnsafeToolNode(value) {
   if (Array.isArray(value))
     return value.some(containsUnsafeToolNode);
@@ -16816,109 +16925,6 @@ function containsUnsafeToolNode(value) {
     return true;
   }
   return Object.values(value).some(containsUnsafeToolNode);
-}
-function ompStreamFailure(value, actualModel) {
-  return parseFailure(containsUnsafeToolNode(value) ? "unsafe-tool-isolation" : "identity-unverified", actualModel);
-}
-function extractOmpOutput(stdout) {
-  let state = "await-session";
-  let actualModel;
-  let output;
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim())
-      continue;
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch {
-      return parseFailure("identity-unverified", actualModel);
-    }
-    const envelope = JsonStreamEventSchema.safeParse(value);
-    if (!envelope.success)
-      return ompStreamFailure(value, actualModel);
-    switch (envelope.data.type) {
-      case "session": {
-        if (state !== "await-session" || !OmpSessionEventSchema.safeParse(value).success) {
-          return ompStreamFailure(value, actualModel);
-        }
-        state = "await-agent-start";
-        break;
-      }
-      case "agent_start":
-        if (state !== "await-agent-start")
-          return ompStreamFailure(value, actualModel);
-        state = "await-turn-start";
-        break;
-      case "turn_start":
-        if (state !== "await-turn-start")
-          return ompStreamFailure(value, actualModel);
-        state = "await-user-start";
-        break;
-      case "message_start":
-      case "message_end": {
-        const messageEvent = OmpMessageEventSchema.safeParse(value);
-        if (!messageEvent.success)
-          return ompStreamFailure(value, actualModel);
-        const { message, type } = messageEvent.data;
-        if (type === "message_start" && message.role === "user") {
-          if (state !== "await-user-start" || message.content.some((part) => part.type !== "text")) {
-            return ompStreamFailure(value, actualModel);
-          }
-          state = "await-user-end";
-          break;
-        }
-        if (type === "message_end" && message.role === "user") {
-          if (state !== "await-user-end" || message.content.some((part) => part.type !== "text")) {
-            return ompStreamFailure(value, actualModel);
-          }
-          state = "await-assistant-start";
-          break;
-        }
-        if (message.role !== "assistant")
-          return ompStreamFailure(value, actualModel);
-        if (message.provider !== "openai-codex" || message.model === undefined || actualModel !== undefined && actualModel !== message.model) {
-          return parseFailure("identity-unverified", message.model ?? actualModel);
-        }
-        actualModel = message.model;
-        if (type === "message_start") {
-          if (state !== "await-assistant-start")
-            return ompStreamFailure(value, actualModel);
-          state = "assistant-stream";
-          break;
-        }
-        if (state !== "assistant-stream")
-          return ompStreamFailure(value, actualModel);
-        const rawAnswer = message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
-        if (!rawAnswer.trim())
-          return parseFailure("identity-unverified", actualModel);
-        output = { status: "ok", actualModel, rawAnswer };
-        state = "await-turn-end";
-        break;
-      }
-      case "message_update":
-        if (state !== "assistant-stream" || !OmpMessageUpdateSchema.safeParse(value).success) {
-          return ompStreamFailure(value, actualModel);
-        }
-        break;
-      case "turn_end": {
-        const turn = OmpTurnEndSchema.safeParse(value);
-        if (state !== "await-turn-end" || !turn.success || turn.data.message.role !== "assistant" || turn.data.message.provider !== "openai-codex" || turn.data.message.model !== actualModel) {
-          return ompStreamFailure(value, actualModel);
-        }
-        state = "await-agent-end";
-        break;
-      }
-      case "agent_end":
-        if (state !== "await-agent-end" || !OmpAgentEndSchema.safeParse(value).success) {
-          return ompStreamFailure(value, actualModel);
-        }
-        state = "closed";
-        break;
-      default:
-        return ompStreamFailure(value, actualModel);
-    }
-  }
-  return state === "closed" && output !== undefined ? output : parseFailure("identity-unverified", actualModel);
 }
 function canonicalPath(path) {
   const canonical = normalize(resolve2(path));
@@ -16950,8 +16956,11 @@ function extractAgyOutput(stdout, workingDirectory) {
       return parseFailure("identity-unverified", actualModel);
     if (envelope.data.event === "init") {
       const init = AgyInitEventSchema.safeParse(value);
-      if (!init.success || state !== "await-init") {
+      if (state !== "await-init")
         return parseFailure("unsafe-tool-isolation", actualModel);
+      if (!init.success) {
+        const reportedModel = isRecord(value) && isRecord(value.init) && typeof value.init.model === "string" && value.init.model.trim() ? value.init.model : undefined;
+        return parseFailure(reportedModel === undefined ? "identity-unverified" : "unsafe-tool-isolation", reportedModel);
       }
       actualModel = init.data.init.model;
       if (expectedWorkingDirectory === undefined || !isAbsolute2(init.data.init.cwd) || canonicalPath(init.data.init.cwd) !== expectedWorkingDirectory || !init.data.init.tools.includes("view_file")) {
@@ -16989,7 +16998,7 @@ function extractAgyOutput(stdout, workingDirectory) {
       if (state === "before-read" && update.state === "DONE" && ["user_input", "unknown", "agent_response"].includes(update.step_type)) {
         continue;
       }
-      if (state === "after-read" && update.state === "DONE" && ["checkpoint", "agent_response"].includes(update.step_type)) {
+      if (state === "after-read" && update.state === "DONE" && !containsUnsafeToolNode(value) && ["checkpoint", "unknown", "agent_response"].includes(update.step_type)) {
         continue;
       }
       if (state === "after-read" && update.state === "DONE" && update.step_type === "finish") {
@@ -17049,7 +17058,7 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
         capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
       }
-      const output = config2.output(result.stdout, result.workingDirectory);
+      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt));
       if (output.status === "failed") {
         capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" });
@@ -17079,7 +17088,6 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
   };
   return adapter;
 }
-var ompCouncilProfile = "claude-council";
 var ompIsolationConfig = [
   "advisor:",
   "  enabled: false",
@@ -17096,50 +17104,77 @@ var ompIsolationConfig = [
   "  - agents-md"
 ].join(`
 `);
-function ompCouncilProfileConfigurationError() {
-  const profileConfig = join2(homedir(), ".omp", "profiles", ompCouncilProfile, "agent", "config.yml");
-  return existsSync2(profileConfig) ? undefined : `OMP profile ${ompCouncilProfile} is not configured`;
-}
-function createOpenAiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("omp") ?? undefined, profileConfigurationError = ompCouncilProfileConfigurationError) {
+function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("codex") ?? undefined) {
   return createSubscriptionCliAdapter({
     family: "openai",
-    executableName: "omp",
-    configurationError: profileConfigurationError,
-    request: (executable, route, prompt, timeoutMs) => ({
-      executable,
-      args: [
-        "-p",
-        "--profile",
-        ompCouncilProfile,
-        "--mode",
-        "json",
-        "--model",
-        `openai-codex/${route.primary}`,
-        "--thinking",
-        "max",
-        "--no-tools",
-        "--no-lsp",
-        "--no-extensions",
-        "--no-skills",
-        "--no-rules",
-        "--no-session",
-        "--config",
-        (workingDirectory) => join2(workingDirectory, "omp-isolation.yml"),
-        "--no-prewalk",
-        "--no-title",
-        "--system-prompt",
-        "You are a stateless tool-free council seat. Return only the requested JSON.",
-        "@council-prompt.txt"
-      ],
-      stdin: "",
-      timeoutMs,
-      cwd: tmpdir(),
-      files: {
-        "council-prompt.txt": structuredPrompt(prompt),
-        "omp-isolation.yml": ompIsolationConfig
-      }
-    }),
-    output: extractOmpOutput
+    executableName: "codex",
+    request: (executable, route, prompt, timeoutMs) => {
+      const councilPrompt = structuredPrompt(prompt);
+      return {
+        executable,
+        args: [
+          "exec",
+          "--skip-git-repo-check",
+          "--strict-config",
+          "--model",
+          route.primary,
+          "--output-schema",
+          (workingDirectory) => join2(workingDirectory, "council-answer-schema.json"),
+          "--sandbox",
+          "read-only",
+          "--ephemeral",
+          "--ignore-user-config",
+          "--ignore-rules",
+          "-c",
+          `model_reasoning_effort="${codexReasoningEffort}"`,
+          "-c",
+          'web_search="disabled"',
+          "--disable",
+          "shell_tool",
+          "--disable",
+          "unified_exec",
+          "--disable",
+          "browser_use",
+          "--disable",
+          "browser_use_external",
+          "--disable",
+          "browser_use_full_cdp_access",
+          "--disable",
+          "computer_use",
+          "--disable",
+          "view_image",
+          "--disable",
+          "image_generation",
+          "--disable",
+          "apps",
+          "--disable",
+          "plugins",
+          "--disable",
+          "remote_plugin",
+          "--disable",
+          "multi_agent",
+          "--disable",
+          "hooks",
+          "--disable",
+          "skill_search",
+          "--disable",
+          "skill_mcp_dependency_install",
+          "--disable",
+          "workspace_dependencies",
+          "--color",
+          "never",
+          "-"
+        ],
+        stdin: councilPrompt,
+        timeoutMs,
+        cwd: tmpdir(),
+        files: {
+          "council-prompt.txt": councilPrompt,
+          "council-answer-schema.json": councilAnswerJsonSchema
+        }
+      };
+    },
+    output: extractCodexOutput
   }, transport, resolveExecutable);
 }
 function resolveAgyExecutable() {
@@ -17167,7 +17202,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
         "--output-format",
         "stream-json",
         "--json-schema",
-        agyAnswerSchema,
+        councilAnswerJsonSchema,
         "--model",
         route.primary,
         "--print-timeout",
@@ -17287,6 +17322,9 @@ var familyOrder = {
   deepseek: 4,
   moonshot: 5
 };
+function minimumQuorumFamilyFloor(policy) {
+  return policy.requiresContrarian && policy.reducedQuorum === undefined ? 4 : 3;
+}
 var QuorumFailureReasonSchema = exports_external.enum([
   "insufficient-provider-families",
   "missing-successful-contrarian"
@@ -17311,13 +17349,21 @@ var QuorumEvaluationSchema = exports_external.strictObject({
   successfulFamilies: SuccessfulFamiliesSchema,
   requiresContrarian: exports_external.boolean(),
   contrarianSatisfied: exports_external.boolean(),
+  reducedQuorum: ReducedQuorumNoticeSchema.optional(),
   failureReasons: exports_external.array(QuorumFailureReasonSchema).max(2)
 }).superRefine((evaluation, context) => {
-  if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4) {
+  if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4 && evaluation.reducedQuorum === undefined) {
     context.addIssue({
       code: "custom",
       path: ["minimumDistinctFamilies"],
       message: "Significant motions require at least four distinct provider families"
+    });
+  }
+  if (evaluation.reducedQuorum !== undefined && (!evaluation.requiresContrarian || evaluation.minimumDistinctFamilies < 3 || evaluation.minimumDistinctFamilies >= evaluation.reducedQuorum.standingDefaultMinimumDistinctFamilies)) {
+    context.addIssue({
+      code: "custom",
+      path: ["reducedQuorum"],
+      message: "Reduced quorum must be an explicit significant-council floor below four"
     });
   }
   const insufficientFamilies = evaluation.successfulFamilies.length < evaluation.minimumDistinctFamilies;
@@ -17353,8 +17399,7 @@ function evaluateQuorum(policy, responses, contrarianSeatIds) {
       });
     }
   }).parse(contrarianSeatIds);
-  const protocolFloor = parsedPolicy.requiresContrarian ? 4 : 3;
-  const minimumDistinctFamilies = Math.max(protocolFloor, parsedPolicy.minimumDistinctFamilies);
+  const minimumDistinctFamilies = Math.max(minimumQuorumFamilyFloor(parsedPolicy), parsedPolicy.minimumDistinctFamilies);
   const successfulResponses = parsedResponses.filter((response) => response.status === "ok" && response.modelIdentity === "verified");
   const successfulFamilySet = new Set(successfulResponses.map(({ provider }) => provider));
   const successfulFamilies = PROVIDER_FAMILY_ORDER.filter((family) => successfulFamilySet.has(family));
@@ -17373,6 +17418,7 @@ function evaluateQuorum(policy, responses, contrarianSeatIds) {
     successfulFamilies,
     requiresContrarian: parsedPolicy.requiresContrarian,
     contrarianSatisfied,
+    ...parsedPolicy.reducedQuorum === undefined ? {} : { reducedQuorum: parsedPolicy.reducedQuorum },
     failureReasons
   });
 }
@@ -17587,7 +17633,7 @@ var CouncilRunInputSchema = exports_external.strictObject({
   quorumPolicy: QuorumPolicySchema,
   refinementTrigger: RefinementTriggerSchema.optional()
 }).superRefine(({ rounds, assignments, quorumPolicy, refinementTrigger }, context) => {
-  const requiredFamilyFloor = quorumPolicy.requiresContrarian ? 4 : 3;
+  const requiredFamilyFloor = minimumQuorumFamilyFloor(quorumPolicy);
   if (quorumPolicy.minimumDistinctFamilies < requiredFamilyFloor) {
     context.addIssue({
       code: "custom",
@@ -17679,7 +17725,7 @@ var CouncilRunResultSchema = exports_external.strictObject({
       message: "Executed round count must match the requested round count"
     });
   }
-  const requiredFamilyFloor = result.quorumPolicy.requiresContrarian ? 4 : 3;
+  const requiredFamilyFloor = minimumQuorumFamilyFloor(result.quorumPolicy);
   if (result.quorumPolicy.minimumDistinctFamilies < requiredFamilyFloor) {
     context.addIssue({
       code: "custom",
@@ -18763,8 +18809,8 @@ function moonshotAdapter(transport) {
 }
 
 // src/providers/openai.ts
-function openaiAdapter(transport, resolveExecutable, profileConfigurationError) {
-  return createOpenAiSubscriptionAdapter(transport, resolveExecutable, profileConfigurationError);
+function openaiAdapter(transport, resolveExecutable) {
+  return createOpenAiCodexAdapter(transport, resolveExecutable);
 }
 
 // src/providers/xai.ts
@@ -19140,15 +19186,17 @@ function scoreApplicability(lens, motionDomains, impact, contested) {
     score += 10;
   return score;
 }
-function selectLenses(motion, seats) {
+function selectLenses(motion, seats, options = {}) {
   const parsedMotion = MotionMetadataSchema.parse(motion);
   const parsedSeatCount = exports_external.number().int().min(1).max(roleCatalogue.length).parse(seats);
   const motionDomains = new Set(parsedMotion.domains.map((domain2) => domain2.toLowerCase()));
-  const requiredCategories = ["domain", "maintainer", "risk"];
-  if (parsedMotion.domains.some((domain2) => ["architecture", "infrastructure", "performance"].includes(domain2.toLowerCase()))) {
+  const reducedThreeSeatCoverage = parsedSeatCount === 3 && options.allowReducedThreeSeatCoverage === true;
+  const requiredCategories = reducedThreeSeatCoverage ? ["domain", "risk", "contrarian"] : ["domain", "maintainer", "risk"];
+  if (!reducedThreeSeatCoverage && parsedMotion.domains.some((domain2) => ["architecture", "infrastructure", "performance"].includes(domain2.toLowerCase()))) {
     requiredCategories.push("systems");
   }
-  requiredCategories.push("contrarian");
+  if (!reducedThreeSeatCoverage)
+    requiredCategories.push("contrarian");
   if (parsedSeatCount < requiredCategories.length) {
     throw new RangeError(`${parsedSeatCount} seats cannot cover ${requiredCategories.length} required role categories`);
   }
@@ -20527,6 +20575,9 @@ async function applyGeneralMigration(input) {
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 300000;
 var DEFAULT_SEAT_COUNT = 5;
+var DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
+var REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
+var REDUCED_QUORUM_WARNING = "REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.";
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set(["dry-run", "json", "contested", "help"]);
 var COMMON_RUN_FLAGS = new Set([
@@ -20549,6 +20600,7 @@ var COMMON_RUN_FLAGS = new Set([
   "scope",
   "timeout-ms"
 ]);
+var COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, "min-families"]);
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -20623,6 +20675,18 @@ function safeError(error51) {
   const redacted = scanAndRedact(message).redacted.replace(/\s+/g, " ").trim();
   return (redacted || "Council command failed").slice(0, 500);
 }
+function unavailableProvider(probe) {
+  const reason = probe.status === "identity-unverified" ? "identity-unverified" : probe.status === "down" ? "unhealthy" : probe.status === "unsafe-transport" ? "unsafe-transport" : /^missing\s+\S+/i.test(probe.reason) ? "missing key" : "unconfigured";
+  return {
+    provider: probe.provider,
+    reason,
+    detail: probe.reason || reason
+  };
+}
+function autoReducedQuorumWarning(unavailable) {
+  const unavailableSummary = unavailable.map(({ provider, reason, detail }) => `${provider} \u2014 ${reason} (${detail})`).join("; ");
+  return `REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: ${unavailableSummary}.`;
+}
 function selectProviderFamilies(value, registry2, policy) {
   const eligible = [...policy?.allowedProviders ?? ProviderFamilySchema.options];
   const requested = value === undefined ? eligible.slice(0, DEFAULT_SEAT_COUNT) : value.split(",").map((provider) => provider.trim()).filter((provider) => provider.length > 0);
@@ -20666,7 +20730,7 @@ function commandDefaults(command) {
   return { impact: "medium", contested: false, rounds: 1 };
 }
 async function parseRunOptions(command, args, environment, registry2) {
-  const parsed = parseArguments(args, COMMON_RUN_FLAGS);
+  const parsed = parseArguments(args, command === "council" ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
   if (parsed.positionals.length > 0)
     throw new Error("Run commands accept options only");
   const now = (environment.now ?? (() => new Date().toISOString()))();
@@ -20680,6 +20744,7 @@ async function parseRunOptions(command, args, environment, registry2) {
   const impact = MotionImpactSchema.parse(oneFlag(parsed, "impact") ?? defaults.impact);
   const contested = hasFlag(parsed, "contested") || defaults.contested;
   const rounds = integerFlag(parsed, "rounds", defaults.rounds, 1, 3);
+  const minimumFamilies = command === "council" && parsed.flags.has("min-families") ? integerFlag(parsed, "min-families", DEFAULT_COUNCIL_MINIMUM_FAMILIES, REDUCED_COUNCIL_MINIMUM_FAMILIES, ProviderFamilySchema.options.length) : undefined;
   const significant = command === "council" || impact === "high" || contested;
   if (!significant && rounds !== 1) {
     throw new Error("Ordinary motions require exactly one blind round");
@@ -20733,6 +20798,7 @@ async function parseRunOptions(command, args, environment, registry2) {
     contested,
     domains: uniqueDomains,
     rounds,
+    ...minimumFamilies === undefined ? {} : { minimumFamilies },
     ...refinementTrigger === undefined ? {} : { refinementTrigger },
     timeoutMs: integerFlag(parsed, "timeout-ms", DEFAULT_TIMEOUT_MS, 1, 3600000),
     ...(oneFlag(parsed, "records-root") ?? environment.recordsRoot) === undefined ? {} : { recordsRoot: oneFlag(parsed, "records-root") ?? environment.recordsRoot }
@@ -20740,13 +20806,22 @@ async function parseRunOptions(command, args, environment, registry2) {
 }
 function quorumPolicy(options) {
   const significant = options.command === "council" || options.impact === "high" || options.contested;
+  const minimumDistinctFamilies = options.command === "council" ? options.minimumFamilies ?? DEFAULT_COUNCIL_MINIMUM_FAMILIES : significant ? 4 : 3;
   return {
-    minimumDistinctFamilies: significant ? 4 : 3,
-    requiresContrarian: significant
+    minimumDistinctFamilies,
+    requiresContrarian: significant,
+    ...options.command === "council" && minimumDistinctFamilies < DEFAULT_COUNCIL_MINIMUM_FAMILIES ? {
+      reducedQuorum: {
+        standingDefaultMinimumDistinctFamilies: DEFAULT_COUNCIL_MINIMUM_FAMILIES,
+        weakerThanStandingDefault: true,
+        warning: options.reducedQuorumWarning ?? REDUCED_QUORUM_WARNING
+      }
+    } : {}
   };
 }
 function buildManifestAndAssignments(options, registry2, history) {
-  const lenses = selectLenses({ domains: [...options.domains], impact: options.impact, contested: options.contested }, options.providerFamilies.length);
+  const policy = quorumPolicy(options);
+  const lenses = selectLenses({ domains: [...options.domains], impact: options.impact, contested: options.contested }, options.providerFamilies.length, { allowReducedThreeSeatCoverage: policy.reducedQuorum !== undefined });
   const seatIds = options.providerFamilies.map((provider) => `${provider}-seat`);
   const roleAssignments = assignLenses(options.runId, options.motionId, seatIds, lenses, history);
   const lensByName = new Map(lenses.map((lens) => [lens.name, lens]));
@@ -20773,7 +20848,7 @@ function buildManifestAndAssignments(options, registry2, history) {
     lenses,
     rounds: options.rounds,
     ...options.refinementTrigger === undefined ? {} : { refinementTrigger: options.refinementTrigger },
-    quorumPolicy: quorumPolicy(options),
+    quorumPolicy: policy,
     evidenceReferences: []
   });
   return { manifest, assignments, roleAssignments };
@@ -20833,6 +20908,9 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
   }
   const store = CouncilStore.open(options.recordsRoot);
   const status = result.outcome;
+  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
+  const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
+  const sessionSummary = reducedQuorumWarning === undefined ? outcomeSummary : `${reducedQuorumWarning} ${outcomeSummary}`;
   const sessionBase = {
     runId: options.runId,
     motionId: options.motionId,
@@ -20855,7 +20933,7 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
       quorumPolicy: result.quorumPolicy
     },
     assignments: roleAssignments,
-    summary: status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`
+    summary: sessionSummary
   };
   const session = options.scope === "general" ? { ...sessionBase, scope: "general" } : {
     ...sessionBase,
@@ -20888,10 +20966,48 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
     return { session: true, resolution: false, resolutionBlockReason };
   }
 }
+async function resolveCouncilProviders(options, adapters, context) {
+  const candidateAdapters = options.providerFamilies.flatMap((provider) => {
+    const adapter = adapters[provider];
+    return adapter === undefined ? [] : [adapter];
+  });
+  const probes = await probeRoster(candidateAdapters, context);
+  const providerFamilies = [];
+  const unavailableProviders = [];
+  let probeIndex = 0;
+  for (const provider of options.providerFamilies) {
+    const adapter = adapters[provider];
+    if (adapter === undefined) {
+      unavailableProviders.push({
+        provider,
+        reason: "unhealthy",
+        detail: "provider adapter is unavailable"
+      });
+      continue;
+    }
+    const probe = probes[probeIndex];
+    probeIndex += 1;
+    if (probe === undefined || probe.provider !== provider) {
+      unavailableProviders.push({
+        provider,
+        reason: "unhealthy",
+        detail: "provider health result did not match the requested family"
+      });
+      continue;
+    }
+    if (probe.status === "healthy") {
+      providerFamilies.push(provider);
+    } else {
+      unavailableProviders.push(unavailableProvider(probe));
+    }
+  }
+  return { providerFamilies, unavailableProviders };
+}
 async function runCouncilCommand(command, args, environment) {
   const registry2 = environment.registry ?? await loadModelRegistry();
   const options = await parseRunOptions(command, args, environment, registry2);
-  const destinations = options.providerFamilies.map((provider) => ({
+  const requestedProviderFamilies = options.providerFamilies;
+  const destinations = requestedProviderFamilies.map((provider) => ({
     provider,
     model: registry2[provider].primary
   }));
@@ -20911,31 +21027,36 @@ async function runCouncilCommand(command, args, environment) {
       command,
       status: "blocked-policy",
       preflight: {
-        selectedProviders: options.providerFamilies,
+        requestedProviders: requestedProviderFamilies,
+        selectedProviders: requestedProviderFamilies,
+        unavailableProviders: [],
         eligibleProviders: options.eligibleProviderFamilies,
-        omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !options.providerFamilies.includes(provider)),
+        omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
         decision: policyDecision
       }
     });
   }
-  const assignmentHistory = await loadAssignmentHistory(options, environment);
-  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(options, registry2, assignmentHistory);
-  const preflight = {
-    classification: policyDecision.effectiveClassification,
-    destinations: policyDecision.dispositions,
-    selectedProviders: options.providerFamilies,
-    eligibleProviders: options.eligibleProviderFamilies,
-    omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !options.providerFamilies.includes(provider)),
-    redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
-  };
   if (options.dryRun) {
+    const assignmentHistory2 = await loadAssignmentHistory(options, environment);
+    const { manifest: manifest2 } = buildManifestAndAssignments(options, registry2, assignmentHistory2);
+    const reducedQuorumWarning2 = manifest2.quorumPolicy.reducedQuorum?.warning;
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       command,
       status: "dry-run",
       runId: options.runId,
-      manifest,
-      preflight
+      ...reducedQuorumWarning2 === undefined ? {} : { warning: reducedQuorumWarning2 },
+      manifest: manifest2,
+      preflight: {
+        classification: policyDecision.effectiveClassification,
+        destinations: policyDecision.dispositions,
+        requestedProviders: requestedProviderFamilies,
+        selectedProviders: requestedProviderFamilies,
+        unavailableProviders: [],
+        eligibleProviders: options.eligibleProviderFamilies,
+        omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
+        redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
+      }
     });
   }
   const adapters = environment.adapters ?? createProviderRoster();
@@ -20949,24 +21070,71 @@ async function runCouncilCommand(command, args, environment) {
       diagnostics.push(diagnostic);
     }
   };
+  let executionOptions = options;
+  let unavailableProviders = [];
+  if (command === "council") {
+    const readiness = await resolveCouncilProviders(options, adapters, context);
+    unavailableProviders = readiness.unavailableProviders;
+    const minimumFamilies = options.minimumFamilies ?? (readiness.providerFamilies.length >= DEFAULT_COUNCIL_MINIMUM_FAMILIES ? DEFAULT_COUNCIL_MINIMUM_FAMILIES : REDUCED_COUNCIL_MINIMUM_FAMILIES);
+    const preflight2 = {
+      classification: policyDecision.effectiveClassification,
+      destinations: policyDecision.dispositions,
+      requestedProviders: requestedProviderFamilies,
+      selectedProviders: readiness.providerFamilies,
+      unavailableProviders,
+      eligibleProviders: options.eligibleProviderFamilies,
+      omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
+      redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
+    };
+    if (readiness.providerFamilies.length < minimumFamilies) {
+      return output(4, undefined, {
+        schemaVersion: SCHEMA_VERSION,
+        command,
+        status: "blocked-quorum",
+        runId: options.runId,
+        message: `Council requires at least ${minimumFamilies} configured, reachable provider families; found ${readiness.providerFamilies.length}.`,
+        preflight: preflight2
+      });
+    }
+    executionOptions = {
+      ...options,
+      providerFamilies: readiness.providerFamilies,
+      minimumFamilies,
+      ...minimumFamilies === REDUCED_COUNCIL_MINIMUM_FAMILIES && readiness.providerFamilies.length === REDUCED_COUNCIL_MINIMUM_FAMILIES && unavailableProviders.length > 0 ? { reducedQuorumWarning: autoReducedQuorumWarning(unavailableProviders) } : {}
+    };
+  }
+  const assignmentHistory = await loadAssignmentHistory(executionOptions, environment);
+  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(executionOptions, registry2, assignmentHistory);
+  const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
+  const preflight = {
+    classification: policyDecision.effectiveClassification,
+    destinations: policyDecision.dispositions,
+    requestedProviders: requestedProviderFamilies,
+    selectedProviders: executionOptions.providerFamilies,
+    unavailableProviders,
+    eligibleProviders: options.eligibleProviderFamilies,
+    omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
+    redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
+  };
   const runner = new CouncilRunner({ adapters, context });
   const execution = await runner.run({
-    runId: options.runId,
-    motion: options.motion,
-    rounds: options.rounds,
+    runId: executionOptions.runId,
+    motion: executionOptions.motion,
+    rounds: executionOptions.rounds,
     assignments,
     quorumPolicy: manifest.quorumPolicy,
-    ...options.refinementTrigger === undefined ? {} : { refinementTrigger: options.refinementTrigger }
+    ...executionOptions.refinementTrigger === undefined ? {} : { refinementTrigger: executionOptions.refinementTrigger }
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const records = await persistRun(options, policyDecision, manifest, execution, roleAssignments, now);
+  const records = await persistRun(executionOptions, policyDecision, manifest, execution, roleAssignments, now);
   const resolutionPersistenceFailed = records?.resolutionBlockReason === "resolution-append-failed";
   const status = resolutionPersistenceFailed ? "record-failure" : execution.outcome;
   return output(resolutionPersistenceFailed ? 5 : status === "completed" ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     status,
-    runId: options.runId,
+    runId: executionOptions.runId,
+    ...reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning },
     manifest,
     preflight,
     execution: publicExecution(execution),
@@ -21118,7 +21286,10 @@ function help() {
       "self-check"
     ],
     invocation: "All execution is explicit; no automatic hook starts a council.",
-    defaultSeatCount: DEFAULT_SEAT_COUNT
+    defaultSeatCount: DEFAULT_SEAT_COUNT,
+    councilOptions: {
+      "--min-families <n>": "Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker."
+    }
   });
 }
 async function runCliFacade(argv, environment = {}) {

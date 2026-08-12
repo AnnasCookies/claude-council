@@ -113,6 +113,25 @@ describe('role catalogue and selection', () => {
     expect(categories.has('contrarian')).toBe(true);
   });
 
+  test('uses domain, risk and contrarian precedence for explicit three-seat coverage', () => {
+    const reducedCoverage = { allowReducedThreeSeatCoverage: true };
+    const product = selectLenses(
+      { domains: ['product'], impact: 'high', contested: true },
+      3,
+      reducedCoverage,
+    );
+    const architecture = selectLenses(
+      { domains: ['architecture'], impact: 'high', contested: true },
+      3,
+      reducedCoverage,
+    );
+
+    expect(product.map(({ category }) => category)).toEqual(['domain', 'risk', 'contrarian']);
+    expect(product.map(({ name }) => name)).toEqual(['designer', 'security', 'critic']);
+    expect(architecture.map(({ category }) => category)).toEqual(['domain', 'risk', 'contrarian']);
+    expect(architecture.map(({ name }) => name)).toEqual(['architect', 'security', 'critic']);
+  });
+
   test('rejects invalid metadata, impossible category coverage and invalid seat counts', () => {
     expect(() => selectLenses({ domains: [' '], impact: 'low', contested: false }, 1)).toThrow();
     expect(() => selectLenses(ARCHITECTURE_MOTION, 0)).toThrow();
