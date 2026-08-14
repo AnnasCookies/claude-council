@@ -1,13 +1,9 @@
-import { createHttpAdapter, type HttpTransport, type ProviderAdapter } from '../execution/provider';
+import {
+  createXaiAdapter,
+  type ProviderAdapter,
+  type XaiAdapterOptions,
+} from '../execution/provider';
 
-export function xaiAdapter(transport?: HttpTransport): ProviderAdapter {
-  return createHttpAdapter(
-    {
-      family: 'xai',
-      credential: 'XAI_API_KEY',
-      endpoint: 'https://api.x.ai/v1/chat/completions',
-      allowRegistryFallback: false,
-    },
-    transport,
-  );
+export function xaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapter {
+  return createXaiAdapter(options);
 }

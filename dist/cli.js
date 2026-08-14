@@ -1491,12 +1491,12 @@ var require_adapter = __commonJS((exports, module) => {
     return newFs;
   }
   function toPromise(method) {
-    return (...args) => new Promise((resolve3, reject) => {
+    return (...args) => new Promise((resolve4, reject) => {
       args.push((err, result) => {
         if (err) {
           reject(err);
         } else {
-          resolve3(result);
+          resolve4(result);
         }
       });
       method(...args);
@@ -1566,9 +1566,9 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 });
 
 // src/cli.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash5 } from "crypto";
 import { readdir as readdir2 } from "fs/promises";
-import { isAbsolute as isAbsolute4, join as join4, resolve as resolve5 } from "path";
+import { isAbsolute as isAbsolute5, join as join5, resolve as resolve6 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -15846,6 +15846,40 @@ function date4(params) {
 
 // node_modules/zod/v4/classic/external.js
 config(en_default());
+// package.json
+var package_default = {
+  name: "claude-council",
+  version: "2026.8.15",
+  type: "module",
+  engines: {
+    bun: ">=1.3.14"
+  },
+  bin: {
+    "claude-council": "./dist/cli.js"
+  },
+  scripts: {
+    build: "bun build src/cli.ts --target=bun --outfile dist/cli.js",
+    test: "bun test tests/core",
+    "check:types": "tsc --noEmit",
+    lint: "prettier --check . && eslint .",
+    "check:release": "bun tests/security/repository-privacy.ts && bun tests/release/repository-ownership.ts",
+    "check:package": "bun run build && bun --no-install dist/cli.js self-check --json",
+    check: "bun run check:types && bun run lint && bun run test && bun run check:release && bun run check:package"
+  },
+  dependencies: {
+    "proper-lockfile": "^4.1.2",
+    zod: "^4.0.0"
+  },
+  devDependencies: {
+    "@types/bun": "latest",
+    "@types/proper-lockfile": "^4.1.4",
+    eslint: "latest",
+    prettier: "latest",
+    typescript: "^6.0.0",
+    "typescript-eslint": "latest"
+  }
+};
+
 // src/domain/schemas.ts
 var NonEmptyStringSchema = exports_external.string().min(1);
 var TimestampSchema = exports_external.string().datetime({ offset: true });
@@ -15876,8 +15910,40 @@ var ModelTransportSchema = exports_external.enum(["http", "cli", "subscription-c
 var ModelRouteSchema = exports_external.strictObject({
   primary: NonEmptyStringSchema,
   fallbacks: exports_external.array(NonEmptyStringSchema),
-  transport: ModelTransportSchema
+  transport: ModelTransportSchema,
+  alternateTransports: exports_external.array(ModelTransportSchema).optional()
 });
+var ModelRouteRegistrySourceSchema = exports_external.enum(["built-in", "override"]);
+var BuiltInRouteSourcesSchema = exports_external.strictObject({
+  anthropic: exports_external.literal("built-in"),
+  openai: exports_external.literal("built-in"),
+  xai: exports_external.literal("built-in"),
+  google: exports_external.literal("built-in"),
+  deepseek: exports_external.literal("built-in"),
+  moonshot: exports_external.literal("built-in")
+});
+var ResolvedRouteSourcesSchema = exports_external.strictObject({
+  anthropic: ModelRouteRegistrySourceSchema,
+  openai: ModelRouteRegistrySourceSchema,
+  xai: ModelRouteRegistrySourceSchema,
+  google: ModelRouteRegistrySourceSchema,
+  deepseek: ModelRouteRegistrySourceSchema,
+  moonshot: ModelRouteRegistrySourceSchema
+});
+var BuiltInRegistryProvenanceSchema = exports_external.strictObject({
+  kind: exports_external.literal("built-in-only"),
+  routes: BuiltInRouteSourcesSchema
+});
+var OverrideRegistryProvenanceSchema = exports_external.strictObject({
+  kind: exports_external.literal("override"),
+  overridePath: NonEmptyStringSchema,
+  overrideSha256: exports_external.string().regex(/^[a-f0-9]{64}$/),
+  routes: ResolvedRouteSourcesSchema
+});
+var ModelRegistryProvenanceSchema = exports_external.discriminatedUnion("kind", [
+  BuiltInRegistryProvenanceSchema,
+  OverrideRegistryProvenanceSchema
+]);
 var RoleCategorySchema = exports_external.enum(["domain", "maintainer", "risk", "systems", "contrarian"]);
 var MotionImpactSchema = exports_external.enum(["low", "medium", "high"]);
 var RefinementTriggerSchema = exports_external.strictObject({
@@ -15929,6 +15995,7 @@ var RunManifestSchema = exports_external.strictObject({
   scope: CouncilScopeSchema,
   classification: DataClassificationSchema,
   routes: exports_external.partialRecord(ProviderFamilySchema, ModelRouteSchema),
+  registryProvenance: ModelRegistryProvenanceSchema,
   lenses: exports_external.array(RoleLensSchema),
   rounds: exports_external.number().int().min(1).max(3),
   refinementTrigger: RefinementTriggerSchema.optional(),
@@ -16560,6 +16627,7 @@ var defaultRetryPolicy = (timeoutMs) => ({
 });
 var answerInstruction = `Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.`;
 var healthPrompt = "Return the required JSON object confirming this provider route is available.";
+var grokInlineAnswerGuard = "IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.";
 function structuredPrompt(prompt) {
   return `${answerInstruction}
 
@@ -16813,6 +16881,43 @@ var AgyResultEventSchema = exports_external.object({
     structured_output: exports_external.record(exports_external.string(), exports_external.unknown())
   })
 });
+var GrokInitEventSchema = exports_external.object({
+  type: exports_external.literal("system"),
+  subtype: exports_external.literal("init"),
+  session_id: exports_external.string().min(1),
+  apiKeySource: exports_external.literal("oauth"),
+  model: exports_external.string().min(1),
+  cwd: exports_external.string().min(1),
+  permissionMode: exports_external.literal("default"),
+  tools: exports_external.array(exports_external.string()).length(0),
+  mcp_servers: exports_external.array(exports_external.unknown()).length(0),
+  skills: exports_external.array(exports_external.string()).length(0)
+});
+var GrokContentBlockSchema = exports_external.discriminatedUnion("type", [
+  exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }),
+  exports_external.object({ type: exports_external.literal("thinking"), thinking: exports_external.string(), signature: exports_external.string() })
+]);
+var GrokAssistantEventSchema = exports_external.object({
+  type: exports_external.literal("assistant"),
+  message: exports_external.object({
+    type: exports_external.literal("message"),
+    role: exports_external.literal("assistant"),
+    model: exports_external.string().min(1),
+    content: exports_external.array(GrokContentBlockSchema).min(1),
+    stop_reason: exports_external.literal("end_turn")
+  }),
+  session_id: exports_external.string().min(1)
+});
+var GrokResultEventSchema = exports_external.object({
+  type: exports_external.literal("result"),
+  subtype: exports_external.literal("success"),
+  is_error: exports_external.literal(false),
+  num_turns: exports_external.literal(1),
+  result: exports_external.string().min(1),
+  stop_reason: exports_external.literal("end_turn"),
+  modelUsage: exports_external.record(exports_external.string().min(1), exports_external.unknown()),
+  session_id: exports_external.string().min(1)
+});
 var councilAnswerJsonSchema = JSON.stringify({
   type: "object",
   additionalProperties: false,
@@ -17000,6 +17105,82 @@ function extractAgyOutput(stdout, workingDirectory, _stderr, _prompt, requestedM
   if (!sawPromptRead)
     return parseFailure("unsafe-tool-isolation", actualModel);
   return { status: "ok", actualModel, rawAnswer };
+}
+function grokReportedModel(value) {
+  if (!isRecord(value))
+    return;
+  if (typeof value.model === "string" && value.model.trim())
+    return value.model;
+  return isRecord(value.message) && typeof value.message.model === "string" && value.message.model.trim() ? value.message.model : undefined;
+}
+function grokInitViolatesIsolation(value, workingDirectory) {
+  if (!isRecord(value))
+    return false;
+  const cwd = typeof value.cwd === "string" ? value.cwd : undefined;
+  return Array.isArray(value.tools) && value.tools.length > 0 || Array.isArray(value.mcp_servers) && value.mcp_servers.length > 0 || typeof value.permissionMode === "string" && value.permissionMode !== "default" || cwd !== undefined && (workingDirectory === undefined || !isAbsolute2(cwd) || canonicalPath(cwd) !== canonicalPath(workingDirectory));
+}
+function extractGrokOutput(stdout, workingDirectory) {
+  let state = "await-init";
+  let sessionId;
+  let actualModel;
+  let rawAnswer;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim())
+      continue;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (containsUnsafeToolNode(value)) {
+      return parseFailure("unsafe-tool-isolation", grokReportedModel(value) ?? actualModel);
+    }
+    if (!isRecord(value) || typeof value.type !== "string") {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (value.type === "system") {
+      const init = GrokInitEventSchema.safeParse(value);
+      const reportedModel = grokReportedModel(value);
+      if (state !== "await-init" || !init.success || workingDirectory === undefined || !isAbsolute2(workingDirectory) || !isAbsolute2(init.data.cwd) || canonicalPath(init.data.cwd) !== canonicalPath(workingDirectory)) {
+        return parseFailure(grokInitViolatesIsolation(value, workingDirectory) ? "unsafe-tool-isolation" : "identity-unverified", reportedModel);
+      }
+      sessionId = init.data.session_id;
+      actualModel = init.data.model;
+      state = "await-assistant";
+      continue;
+    }
+    if (value.type === "assistant") {
+      const assistant = GrokAssistantEventSchema.safeParse(value);
+      const reportedModel = grokReportedModel(value);
+      if (state !== "await-assistant" || !assistant.success || sessionId === undefined || actualModel === undefined || assistant.data.session_id !== sessionId || assistant.data.message.model !== actualModel) {
+        return parseFailure("identity-unverified", reportedModel ?? actualModel);
+      }
+      rawAnswer = "";
+      for (const block of assistant.data.message.content) {
+        if (block.type === "text")
+          rawAnswer += block.text;
+      }
+      if (!rawAnswer.trim())
+        return parseFailure("identity-unverified", actualModel);
+      state = "await-result";
+      continue;
+    }
+    if (value.type === "result") {
+      const result = GrokResultEventSchema.safeParse(value);
+      if (state !== "await-result" || !result.success || sessionId === undefined || actualModel === undefined || rawAnswer === undefined || result.data.session_id !== sessionId || result.data.result !== rawAnswer) {
+        return parseFailure("identity-unverified", actualModel);
+      }
+      const usageModels = Object.keys(result.data.modelUsage);
+      if (usageModels.length !== 1 || usageModels[0] !== actualModel) {
+        return parseFailure("identity-unverified", actualModel);
+      }
+      state = "closed";
+      continue;
+    }
+    return parseFailure("identity-unverified", actualModel);
+  }
+  return state === "closed" && actualModel !== undefined && rawAnswer !== undefined ? { status: "ok", actualModel, rawAnswer } : parseFailure("identity-unverified", actualModel);
 }
 function observedRoute(route, actualModel) {
   if (actualModel === route.primary)
@@ -17222,6 +17403,132 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
     }),
     output: extractAgyOutput
   }, transport, resolveExecutable);
+}
+function resolveGrokExecutable() {
+  return Bun.which("grok") ?? undefined;
+}
+function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveGrokExecutable, modelOverride = () => process.env.GROK_CLI_MODEL?.trim() || undefined) {
+  return createSubscriptionCliAdapter({
+    family: "xai",
+    executableName: "grok",
+    request: (executable, _route, prompt, timeoutMs) => {
+      const councilPrompt = `${grokInlineAnswerGuard}
+
+${structuredPrompt(prompt)}`;
+      const override = modelOverride()?.trim();
+      return {
+        executable,
+        args: [
+          "--no-auto-update",
+          "--prompt-file",
+          (workingDirectory) => join2(workingDirectory, "council-prompt.txt"),
+          "--output-format",
+          "streaming-messages-json",
+          "--sandbox",
+          "read-only",
+          "--no-plan",
+          "--no-subagents",
+          "--no-memory",
+          "--disable-web-search",
+          "--tools",
+          "__claude_council_no_tools__",
+          "--max-turns",
+          "1",
+          "--verbatim",
+          ...override ? ["-m", override] : []
+        ],
+        stdin: "",
+        timeoutMs,
+        cwd: tmpdir(),
+        files: { "council-prompt.txt": councilPrompt }
+      };
+    },
+    output: extractGrokOutput
+  }, transport, resolveExecutable);
+}
+var xaiUnconfiguredReason = "set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH";
+function withTransportResolution(adapter, transportResolution) {
+  return {
+    ...adapter,
+    transportResolution,
+    async availability(context) {
+      const availability = await adapter.availability(context);
+      return availability.status === "available" ? { ...availability, reason: transportResolution.reason } : availability;
+    },
+    async probe(context) {
+      const health = await adapter.probe(context);
+      return health.status === "healthy" ? { ...health, reason: transportResolution.reason } : health;
+    }
+  };
+}
+function createUnconfiguredXaiAdapter() {
+  const family = "xai";
+  const transportResolution = {
+    preferred: "http",
+    effective: null,
+    reason: xaiUnconfiguredReason
+  };
+  const adapter = {
+    family,
+    transport: "http",
+    transportResolution,
+    async availability(context) {
+      return {
+        status: "unconfigured",
+        provider: family,
+        model: context.registry.xai.primary,
+        reason: xaiUnconfiguredReason
+      };
+    },
+    async invoke(request) {
+      return seatError(request, family, request.context.registry.xai.primary, "skipped", "missing-xai-transport", xaiUnconfiguredReason, 0);
+    },
+    async probe(context) {
+      return healthFromResponse(await adapter.invoke({
+        context,
+        seatId: "health-xai",
+        role: "health",
+        prompt: healthPrompt
+      }));
+    }
+  };
+  return adapter;
+}
+function createXaiAdapter(options = {}) {
+  const env = options.env ?? process.env;
+  if (env.XAI_API_KEY && options.transportPreference !== "subscription-cli") {
+    return withTransportResolution(createHttpAdapter({
+      family: "xai",
+      credential: "XAI_API_KEY",
+      endpoint: "https://api.x.ai/v1/chat/completions",
+      allowRegistryFallback: false
+    }, options.httpTransport), {
+      preferred: "http",
+      effective: "http",
+      reason: "XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI."
+    });
+  }
+  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
+  if (executable) {
+    return withTransportResolution(createXaiSubscriptionAdapter(options.cliTransport, () => executable, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined)), {
+      preferred: "http",
+      effective: "subscription-cli",
+      reason: env.XAI_API_KEY && options.transportPreference === "subscription-cli" ? "The subscription CLI was explicitly preferred and grok resolved on PATH; HTTPS was not used." : "XAI_API_KEY is not set; resolved the grok subscription CLI on PATH."
+    });
+  }
+  if (env.XAI_API_KEY) {
+    return withTransportResolution(createHttpAdapter({
+      family: "xai",
+      credential: "XAI_API_KEY",
+      endpoint: "https://api.x.ai/v1/chat/completions",
+      allowRegistryFallback: false
+    }, options.httpTransport), {
+      preferred: "http",
+      effective: "http",
+      reason: "The subscription CLI was explicitly preferred but grok was not found on PATH; resolved HTTPS because XAI_API_KEY is set."
+    });
+  }
+  return createUnconfiguredXaiAdapter();
 }
 function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("claude") ?? undefined) {
   const family = "anthropic";
@@ -17995,7 +18302,8 @@ class CouncilRunner {
         response: failureResponse(assignment, requestedModel, "skipped", "adapter-unconfigured", "No configured adapter is available for this provider family.")
       };
     }
-    if (adapter.transport !== this.context.registry[assignment.provider].transport) {
+    const governedRoute = this.context.registry[assignment.provider];
+    if (adapter.transport !== governedRoute.transport && !governedRoute.alternateTransports?.includes(adapter.transport)) {
       return {
         response: failureResponse(assignment, requestedModel, "failed", "unsafe-transport", "The provider adapter transport does not match the governed route.")
       };
@@ -18070,6 +18378,11 @@ class CouncilRunner {
     return response;
   }
 }
+
+// src/models/registry.ts
+import { createHash as createHash2 } from "crypto";
+import { homedir as homedir2 } from "os";
+import { isAbsolute as isAbsolute3, join as join3, resolve as resolve3 } from "path";
 // src/models/registry.json
 var registry_default = {
   anthropic: {
@@ -18083,9 +18396,10 @@ var registry_default = {
     transport: "subscription-cli"
   },
   xai: {
-    primary: "grok-4.5",
-    fallbacks: [],
-    transport: "http"
+    primary: "grok-4.6",
+    fallbacks: ["grok-4.5"],
+    transport: "http",
+    alternateTransports: ["subscription-cli"]
   },
   google: {
     primary: "gemini-3.1-pro-high",
@@ -18113,32 +18427,141 @@ var ModelRegistrySchema = exports_external.strictObject({
   deepseek: ModelRouteSchema,
   moonshot: ModelRouteSchema
 });
-var RegistryOverrideSchema = exports_external.record(exports_external.string(), exports_external.unknown());
-var ModelRouteOverrideSchema = exports_external.strictObject({
-  primary: ModelRouteSchema.shape.primary.optional(),
-  fallbacks: ModelRouteSchema.shape.fallbacks.optional(),
-  transport: ModelRouteSchema.shape.transport.optional()
+var ModelRouteOverrideSchema = ModelRouteSchema.partial();
+var ModelRegistryOverrideSchema = exports_external.strictObject({
+  anthropic: ModelRouteOverrideSchema.optional(),
+  openai: ModelRouteOverrideSchema.optional(),
+  xai: ModelRouteOverrideSchema.optional(),
+  google: ModelRouteOverrideSchema.optional(),
+  deepseek: ModelRouteOverrideSchema.optional(),
+  moonshot: ModelRouteOverrideSchema.optional()
 });
+var BUILT_IN_ROUTE_SOURCES = {
+  anthropic: "built-in",
+  openai: "built-in",
+  xai: "built-in",
+  google: "built-in",
+  deepseek: "built-in",
+  moonshot: "built-in"
+};
 function mergeRoute(base, override) {
   if (override === undefined)
     return base;
   const parsedOverride = ModelRouteOverrideSchema.parse(override);
   return ModelRouteSchema.parse({ ...base, ...parsedOverride });
 }
-async function loadModelRegistry(overridePath) {
-  const base = ModelRegistrySchema.parse(registry_default);
-  if (overridePath === undefined)
-    return base;
-  const override = RegistryOverrideSchema.parse(await Bun.file(overridePath).json());
-  const merged = {
+function validationMessage(error51) {
+  return error51.issues.map((issue2) => {
+    const location = issue2.path.length === 0 ? "<root>" : issue2.path.join(".");
+    if (issue2.code === "unrecognized_keys") {
+      const pluralSuffix = issue2.keys.length === 1 ? "" : "s";
+      return `${location}: unknown key${pluralSuffix} ${issue2.keys.join(", ")}`;
+    }
+    return `${location}: ${issue2.message}`;
+  }).join("; ");
+}
+function mergedRegistry(base, override) {
+  return ModelRegistrySchema.parse({
     anthropic: mergeRoute(base.anthropic, override.anthropic),
     openai: mergeRoute(base.openai, override.openai),
     xai: mergeRoute(base.xai, override.xai),
     google: mergeRoute(base.google, override.google),
     deepseek: mergeRoute(base.deepseek, override.deepseek),
     moonshot: mergeRoute(base.moonshot, override.moonshot)
+  });
+}
+function routeSources(override) {
+  return {
+    anthropic: override.anthropic === undefined ? "built-in" : "override",
+    openai: override.openai === undefined ? "built-in" : "override",
+    xai: override.xai === undefined ? "built-in" : "override",
+    google: override.google === undefined ? "built-in" : "override",
+    deepseek: override.deepseek === undefined ? "built-in" : "override",
+    moonshot: override.moonshot === undefined ? "built-in" : "override"
   };
-  return ModelRegistrySchema.parse(merged);
+}
+function builtInRegistry() {
+  return {
+    registry: ModelRegistrySchema.parse(registry_default),
+    provenance: ModelRegistryProvenanceSchema.parse({
+      kind: "built-in-only",
+      routes: BUILT_IN_ROUTE_SOURCES
+    })
+  };
+}
+async function loadModelRegistryWithProvenance(overridePath) {
+  const builtIn = builtInRegistry();
+  if (overridePath === undefined)
+    return builtIn;
+  const absolutePath = resolve3(overridePath);
+  let contents;
+  let fileBytes;
+  try {
+    fileBytes = new Uint8Array(await Bun.file(absolutePath).arrayBuffer());
+    contents = new TextDecoder("utf-8", { fatal: true }).decode(fileBytes);
+  } catch (error51) {
+    const message = error51 instanceof Error ? error51.message : String(error51);
+    throw new Error(`Unable to read model registry override "${absolutePath}": ${message}`, {
+      cause: error51
+    });
+  }
+  let rawOverride;
+  try {
+    rawOverride = JSON.parse(contents);
+  } catch (error51) {
+    const message = error51 instanceof Error ? error51.message : String(error51);
+    throw new Error(`Invalid model registry override "${absolutePath}": malformed JSON: ${message}`, { cause: error51 });
+  }
+  let override;
+  try {
+    override = ModelRegistryOverrideSchema.parse(rawOverride);
+  } catch (error51) {
+    if (error51 instanceof exports_external.ZodError) {
+      throw new Error(`Invalid model registry override "${absolutePath}": ${validationMessage(error51)}`, { cause: error51 });
+    }
+    throw error51;
+  }
+  let registry2;
+  try {
+    registry2 = mergedRegistry(builtIn.registry, override);
+  } catch (error51) {
+    if (error51 instanceof exports_external.ZodError) {
+      throw new Error(`Invalid model registry override "${absolutePath}": ${validationMessage(error51)}`, { cause: error51 });
+    }
+    throw error51;
+  }
+  return {
+    registry: registry2,
+    provenance: ModelRegistryProvenanceSchema.parse({
+      kind: "override",
+      overridePath: absolutePath,
+      overrideSha256: createHash2("sha256").update(fileBytes).digest("hex"),
+      routes: routeSources(override)
+    })
+  };
+}
+async function resolveModelRegistry(options = {}) {
+  const cwd = resolve3(options.cwd ?? process.cwd());
+  if (options.overridePath !== undefined) {
+    const explicitPath = isAbsolute3(options.overridePath) ? options.overridePath : resolve3(cwd, options.overridePath);
+    return loadModelRegistryWithProvenance(explicitPath);
+  }
+  if (options.recordsRoot !== undefined) {
+    const recordsRoot = isAbsolute3(options.recordsRoot) ? options.recordsRoot : resolve3(cwd, options.recordsRoot);
+    const recordsRegistryPath = join3(recordsRoot, "models.json");
+    if (await Bun.file(recordsRegistryPath).exists()) {
+      return loadModelRegistryWithProvenance(recordsRegistryPath);
+    }
+  }
+  const environment = options.env ?? process.env;
+  const configuredHome = environment.HOME?.trim() || environment.USERPROFILE?.trim();
+  const homeValue = configuredHome || homedir2();
+  const home = isAbsolute3(homeValue) ? resolve3(homeValue) : resolve3(cwd, homeValue);
+  const userRegistryPath = join3(home, ".claude", "council", "models.json");
+  if (await Bun.file(userRegistryPath).exists()) {
+    return loadModelRegistryWithProvenance(userRegistryPath);
+  }
+  return builtInRegistry();
 }
 
 // src/health/probe.ts
@@ -18209,7 +18632,7 @@ async function probeAdapter(adapter, context) {
   const configuredRoute = context.registry[provider];
   const transport = ModelTransportSchema.parse(adapter.transport);
   const requestedModel = sanitiseModel(configuredRoute.primary);
-  if (transport !== configuredRoute.transport) {
+  if (transport !== configuredRoute.transport && !configuredRoute.alternateTransports?.includes(transport)) {
     return failedProbe(provider, transport, requestedModel, "unsafe-transport", "adapter transport does not match the configured route");
   }
   let availability;
@@ -18348,7 +18771,8 @@ function sanitiseRoute(route) {
   return ModelRouteSchema.parse({
     primary: sanitiseModel2(route.primary),
     fallbacks: route.fallbacks.map(sanitiseModel2),
-    transport: route.transport
+    transport: route.transport,
+    ...route.alternateTransports === undefined ? {} : { alternateTransports: route.alternateTransports }
   });
 }
 function identityState(probe) {
@@ -18558,7 +18982,7 @@ async function doctor(adapters, context, capturedAt = new Date().toISOString()) 
 }
 
 // src/policy/data-guard.ts
-import { createHash as createHash2 } from "crypto";
+import { createHash as createHash3 } from "crypto";
 
 // src/domain/classification.ts
 var classificationRank = {
@@ -18671,7 +19095,7 @@ function appendReason(reasons, reason) {
     reasons.push(reason);
 }
 function sha256(value) {
-  return createHash2("sha256").update(value).digest("hex");
+  return createHash3("sha256").update(value).digest("hex");
 }
 function sanitiseDiagnosticValue(value) {
   const scan = scanAndRedact(value);
@@ -18908,13 +19332,8 @@ function openaiAdapter(transport, resolveExecutable) {
 }
 
 // src/providers/xai.ts
-function xaiAdapter(transport) {
-  return createHttpAdapter({
-    family: "xai",
-    credential: "XAI_API_KEY",
-    endpoint: "https://api.x.ai/v1/chat/completions",
-    allowRegistryFallback: false
-  }, transport);
+function xaiAdapter(options = {}) {
+  return createXaiAdapter(options);
 }
 
 // src/providers/index.ts
@@ -18922,7 +19341,14 @@ function createProviderRoster(options = {}) {
   return {
     anthropic: anthropicAdapter(options.cliTransport, options.resolveClaudeExecutable),
     openai: openaiAdapter(options.cliTransport, options.resolveOpenAiExecutable),
-    xai: xaiAdapter(options.httpTransport),
+    xai: xaiAdapter({
+      env: options.env,
+      httpTransport: options.httpTransport,
+      cliTransport: options.cliTransport,
+      resolveExecutable: options.resolveXaiExecutable,
+      modelOverride: options.xaiModelOverride,
+      transportPreference: options.xaiTransportPreference
+    }),
     google: googleAdapter(options.cliTransport, options.resolveGoogleExecutable),
     deepseek: deepseekAdapter(options.httpTransport),
     moonshot: moonshotAdapter(options.httpTransport)
@@ -18931,16 +19357,16 @@ function createProviderRoster(options = {}) {
 
 // src/records/migrate-general.ts
 import { chmod } from "fs/promises";
-import { isAbsolute as isAbsolute3, relative as relative2, resolve as resolve4, win32 } from "path";
+import { isAbsolute as isAbsolute4, relative as relative2, resolve as resolve5, win32 } from "path";
 
 // src/records/store.ts
 import { randomUUID } from "crypto";
-import { dirname, basename, join as join3, resolve as resolve3 } from "path";
+import { dirname, basename, join as join4, resolve as resolve4 } from "path";
 import { link, mkdir as mkdir2, open, readdir, rename, rm as rm2 } from "fs/promises";
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
 
 // src/roles/allocator.ts
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash4 } from "crypto";
 
 // src/roles/catalogue.json
 var catalogue_default = [
@@ -19325,7 +19751,7 @@ function selectLenses(motion, seats, options = {}) {
 function sha256Permutation(runId, namespace, items, identityOf) {
   return items.map((item) => {
     const identity = identityOf(item);
-    const digest = createHash3("sha256").update(JSON.stringify([runId, namespace, identity]), "utf8").digest("hex");
+    const digest = createHash4("sha256").update(JSON.stringify([runId, namespace, identity]), "utf8").digest("hex");
     return { item, digest, identity };
   }).sort((left, right) => {
     if (left.digest !== right.digest)
@@ -19705,7 +20131,7 @@ async function writeTextAtomically(destination, content, options = {}) {
   if (!replaceExisting && await Bun.file(destination).exists()) {
     throw new Error(`Refusing to replace append-only record: ${destination}`);
   }
-  const temporary = join3(parent, `.${basename(destination)}.${randomUUID()}.tmp`);
+  const temporary = join4(parent, `.${basename(destination)}.${randomUUID()}.tmp`);
   const intendedHash = sha256Hex(content);
   try {
     await Bun.write(temporary, content);
@@ -19743,15 +20169,15 @@ async function writeTextAtomically(destination, content, options = {}) {
 }
 function scopeDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join3(root, "general");
+    return join4(root, "general");
   if (!projectId)
     throw new Error("Project records require a projectId");
-  return join3(root, "projects", projectId);
+  return join4(root, "projects", projectId);
 }
 async function jsonFiles(directory) {
   try {
     const entries = await readdir(directory, { withFileTypes: true });
-    return entries.filter((entry) => entry.isFile() && /\.json$/i.test(entry.name)).map((entry) => join3(directory, entry.name)).sort();
+    return entries.filter((entry) => entry.isFile() && /\.json$/i.test(entry.name)).map((entry) => join4(directory, entry.name)).sort();
   } catch (error51) {
     if (systemErrorCode(error51) === "ENOENT")
       return [];
@@ -19776,9 +20202,9 @@ function fileStem(path) {
   return name.slice(0, -".json".length);
 }
 async function validatePersistedScope(directory) {
-  const sessionPaths = await jsonFiles(join3(directory, "sessions"));
-  const resolutionPaths = await jsonFiles(join3(directory, "resolutions"));
-  const chairAcceptancePaths = await jsonFiles(join3(directory, "chair-acceptances"));
+  const sessionPaths = await jsonFiles(join4(directory, "sessions"));
+  const resolutionPaths = await jsonFiles(join4(directory, "resolutions"));
+  const chairAcceptancePaths = await jsonFiles(join4(directory, "chair-acceptances"));
   const sessions = [];
   const resolutions = [];
   const chairAcceptances = [];
@@ -19939,7 +20365,7 @@ async function removeCommittedFile(path, originalError) {
 }
 async function withScopeWriteLock(directory, operation) {
   await mkdir2(directory, { recursive: true });
-  const lockPath = join3(directory, ".write.lock");
+  const lockPath = join4(directory, ".write.lock");
   const release = await import_proper_lockfile.lock(directory, {
     lockfilePath: lockPath,
     realpath: false,
@@ -19976,7 +20402,7 @@ class CouncilStore {
     this.root = root;
   }
   static open(root) {
-    return new CouncilStore(resolve3(NonEmptyStringSchema3.parse(root)));
+    return new CouncilStore(resolve4(NonEmptyStringSchema3.parse(root)));
   }
   async readAssignmentHistory(scope, expectedMotion, projectId) {
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(scope), projectId);
@@ -20008,9 +20434,9 @@ class CouncilStore {
           throw new Error(`Motion id ${record2.motionId} has a different execution protocol`);
         }
       }
-      const sessionsDirectory = join3(directory, "sessions");
-      const jsonPath = join3(sessionsDirectory, `${record2.runId}.json`);
-      const markdownPath = join3(sessionsDirectory, `${record2.runId}.md`);
+      const sessionsDirectory = join4(directory, "sessions");
+      const jsonPath = join4(sessionsDirectory, `${record2.runId}.json`);
+      const markdownPath = join4(sessionsDirectory, `${record2.runId}.md`);
       if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
         throw new Error(`Duplicate session id: ${record2.runId}`);
       }
@@ -20052,9 +20478,9 @@ class CouncilStore {
       if (state.chairAcceptances.some(({ runId }) => runId === record2.runId)) {
         throw new Error(`Session already has a chair acceptance: ${record2.runId}`);
       }
-      const acceptancesDirectory = join3(directory, "chair-acceptances");
-      const jsonPath = join3(acceptancesDirectory, `${record2.acceptanceId}.json`);
-      const markdownPath = join3(acceptancesDirectory, `${record2.acceptanceId}.md`);
+      const acceptancesDirectory = join4(directory, "chair-acceptances");
+      const jsonPath = join4(acceptancesDirectory, `${record2.acceptanceId}.json`);
+      const markdownPath = join4(acceptancesDirectory, `${record2.acceptanceId}.md`);
       if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
         throw new Error(`Duplicate chair acceptance id: ${record2.acceptanceId}`);
       }
@@ -20112,10 +20538,10 @@ class CouncilStore {
       if (state.resolutions.some((resolution) => resolution.resolutionId === record2.resolutionId)) {
         throw new Error(`Duplicate resolution id: ${record2.resolutionId}`);
       }
-      const resolutionsDirectory = join3(directory, "resolutions");
-      const jsonPath = join3(resolutionsDirectory, `${record2.resolutionId}.json`);
-      const markdownPath = join3(resolutionsDirectory, `${record2.resolutionId}.md`);
-      const ledgerPath = join3(directory, "ledger.md");
+      const resolutionsDirectory = join4(directory, "resolutions");
+      const jsonPath = join4(resolutionsDirectory, `${record2.resolutionId}.json`);
+      const markdownPath = join4(resolutionsDirectory, `${record2.resolutionId}.md`);
+      const ledgerPath = join4(directory, "ledger.md");
       if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
         throw new Error(`Duplicate resolution id: ${record2.resolutionId}`);
       }
@@ -20169,7 +20595,7 @@ var SingleLineStringSchema2 = exports_external.string().trim().min(1).refine((va
 var TimestampSchema6 = exports_external.string().datetime({ offset: true });
 var Sha256Schema = exports_external.string().regex(/^[a-f0-9]{64}$/);
 var StorageIdSchema2 = exports_external.string().trim().min(1).max(128).regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/).refine((value) => value !== "." && value !== "..", "must be a safe storage identifier");
-var RelativePathSchema = exports_external.string().trim().min(1).transform((value) => value.replace(/\\/g, "/").replace(/\/+/g, "/")).refine((value) => !isAbsolute3(value) && !win32.isAbsolute(value) && !value.startsWith("/") && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== ".."), "must be a safe relative path");
+var RelativePathSchema = exports_external.string().trim().min(1).transform((value) => value.replace(/\\/g, "/").replace(/\/+/g, "/")).refine((value) => !isAbsolute4(value) && !win32.isAbsolute(value) && !value.startsWith("/") && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== ".."), "must be a safe relative path");
 var GeneralMigrationDestinationSchema = exports_external.strictObject({
   scope: exports_external.literal("general")
 });
@@ -20453,7 +20879,7 @@ function planGeneralMigration(input) {
   const archiveRelativePath = `archive/${date5}-general/ledger-${sourceSha256.slice(0, 12)}.md`;
   const body = MigrationPlanBodySchema.parse({
     schemaVersion: 1,
-    root: resolve4(parsed.root),
+    root: resolve5(parsed.root),
     sourceRelativePath: parsed.sourceRelativePath,
     sourceContent: parsed.sourceContent,
     sourceSha256,
@@ -20475,10 +20901,10 @@ function planGeneralMigration(input) {
   });
 }
 function absolutePathInsideRoot(root, relativePath) {
-  const absoluteRoot = resolve4(root);
-  const destination = resolve4(absoluteRoot, relativePath);
+  const absoluteRoot = resolve5(root);
+  const destination = resolve5(absoluteRoot, relativePath);
   const fromRoot = relative2(absoluteRoot, destination);
-  if (fromRoot === "" || !fromRoot.startsWith("..") && !isAbsolute3(fromRoot))
+  if (fromRoot === "" || !fromRoot.startsWith("..") && !isAbsolute4(fromRoot))
     return destination;
   throw new Error(`Migration path escapes its root: ${relativePath}`);
 }
@@ -20666,12 +21092,16 @@ async function applyGeneralMigration(input) {
 }
 
 // src/cli.ts
+var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 300000;
 var DEFAULT_SEAT_COUNT = 5;
 var DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
 var REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
 var REDUCED_QUORUM_WARNING = "REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.";
+var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_default.version);
+var EXECUTABLE_PATH = resolve6(import.meta.main ? Bun.main : import.meta.path);
+var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set(["dry-run", "json", "contested", "help"]);
 var COMMON_RUN_FLAGS = new Set([
@@ -20688,6 +21118,7 @@ var COMMON_RUN_FLAGS = new Set([
   "project-policy",
   "providers",
   "refinement-question",
+  "registry",
   "records-root",
   "rounds",
   "run-id",
@@ -20695,6 +21126,7 @@ var COMMON_RUN_FLAGS = new Set([
   "timeout-ms"
 ]);
 var COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, "min-families"]);
+var REGISTRY_REPORT_FLAGS = new Set(["help", "json", "records-root", "registry"]);
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -20754,6 +21186,61 @@ function integerFlag(parsed, name, fallback, minimum, maximum) {
   }
   return parsedValue;
 }
+function resolvedRecordsRoot(parsed, environment) {
+  const value = oneFlag(parsed, "records-root") ?? environment.recordsRoot;
+  if (value === undefined)
+    return;
+  if (value.trim().length === 0)
+    throw new Error("Records root must not be blank");
+  const cwd = resolve6(environment.cwd ?? process.cwd());
+  return isAbsolute5(value) ? resolve6(value) : resolve6(cwd, value);
+}
+async function configuredModelRegistry(parsed, environment) {
+  const stateRoot = resolvedRecordsRoot(parsed, environment);
+  const explicitOverride = oneFlag(parsed, "registry");
+  if (explicitOverride !== undefined || environment.registry === undefined) {
+    const loaded = await resolveModelRegistry({
+      ...explicitOverride === undefined ? {} : { overridePath: explicitOverride },
+      ...stateRoot === undefined ? {} : { recordsRoot: stateRoot },
+      cwd: environment.cwd ?? process.cwd(),
+      env: environment.env ?? process.env
+    });
+    return { ...loaded, ...stateRoot === undefined ? {} : { stateRoot } };
+  }
+  const registry2 = ModelRegistrySchema.parse(environment.registry);
+  const builtIn = await loadModelRegistryWithProvenance();
+  if (environment.registryProvenance === undefined && JSON.stringify(registry2) !== JSON.stringify(builtIn.registry)) {
+    throw new Error("An injected model registry requires explicit registry provenance");
+  }
+  const provenance = ModelRegistryProvenanceSchema.parse(environment.registryProvenance ?? builtIn.provenance);
+  return { registry: registry2, provenance, ...stateRoot === undefined ? {} : { stateRoot } };
+}
+function engineIdentity(configured, environment) {
+  const base = {
+    executablePath: EXECUTABLE_PATH,
+    packageVersion: PACKAGE_VERSION,
+    stateRoot: configured.stateRoot ?? null,
+    routes: configured.registry,
+    registryProvenance: configured.provenance,
+    adapterContractVersion: ADAPTER_CONTRACT_VERSION
+  };
+  const suppliedValue = (environment.env ?? process.env).COUNCIL_INSTALLER_PROVENANCE?.trim();
+  if (!suppliedValue) {
+    return {
+      ...base,
+      installerProvenance: null,
+      reason: "COUNCIL_INSTALLER_PROVENANCE was not supplied; installer provenance cannot be self-attested."
+    };
+  }
+  return {
+    ...base,
+    installerProvenance: {
+      value: INSTALLER_PROVENANCE_VALUE_SCHEMA.parse(suppliedValue),
+      source: "installer-supplied",
+      selfAttested: false
+    }
+  };
+}
 function safeStorageId(value, label) {
   if (value.length > 128 || !SAFE_STORAGE_ID.test(value) || value === "." || value === "..") {
     throw new Error(`${label} must be a safe storage identifier`);
@@ -20761,7 +21248,7 @@ function safeStorageId(value, label) {
   return value;
 }
 function deterministicId(prefix, command, motion, now) {
-  const digest = createHash4("sha256").update(JSON.stringify([prefix, command, motion, now])).digest("hex").slice(0, 16);
+  const digest = createHash5("sha256").update(JSON.stringify([prefix, command, motion, now])).digest("hex").slice(0, 16);
   return `${prefix}-${digest}`;
 }
 function safeError(error51) {
@@ -20807,7 +21294,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   const policyPath = oneFlag(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath = isAbsolute4(policyPath) ? policyPath : resolve5(cwd, policyPath);
+  const absolutePath = isAbsolute5(policyPath) ? policyPath : resolve6(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath).json();
@@ -20823,8 +21310,7 @@ function commandDefaults(command) {
     return { impact: "medium", contested: false, rounds: 1 };
   return { impact: "medium", contested: false, rounds: 1 };
 }
-async function parseRunOptions(command, args, environment, registry2) {
-  const parsed = parseArguments(args, command === "council" ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
+async function parseRunOptions(command, parsed, environment, registry2, recordsRoot) {
   if (parsed.positionals.length > 0)
     throw new Error("Run commands accept options only");
   const now = (environment.now ?? (() => new Date().toISOString()))();
@@ -20895,7 +21381,7 @@ async function parseRunOptions(command, args, environment, registry2) {
     ...minimumFamilies === undefined ? {} : { minimumFamilies },
     ...refinementTrigger === undefined ? {} : { refinementTrigger },
     timeoutMs: integerFlag(parsed, "timeout-ms", DEFAULT_TIMEOUT_MS, 1, 3600000),
-    ...(oneFlag(parsed, "records-root") ?? environment.recordsRoot) === undefined ? {} : { recordsRoot: oneFlag(parsed, "records-root") ?? environment.recordsRoot }
+    ...recordsRoot === undefined ? {} : { recordsRoot }
   };
 }
 function quorumPolicy(options) {
@@ -20913,7 +21399,7 @@ function quorumPolicy(options) {
     } : {}
   };
 }
-function buildManifestAndAssignments(options, registry2, history) {
+function buildManifestAndAssignments(options, registry2, registryProvenance, history) {
   const policy = quorumPolicy(options);
   const lenses = selectLenses({ domains: [...options.domains], impact: options.impact, contested: options.contested }, options.providerFamilies.length, { allowReducedThreeSeatCoverage: policy.reducedQuorum !== undefined });
   const seatIds = options.providerFamilies.map((provider) => `${provider}-seat`);
@@ -20939,6 +21425,7 @@ function buildManifestAndAssignments(options, registry2, history) {
     scope: options.scope,
     classification: options.classification,
     routes,
+    registryProvenance,
     lenses,
     rounds: options.rounds,
     ...options.refinementTrigger === undefined ? {} : { refinementTrigger: options.refinementTrigger },
@@ -21098,8 +21585,10 @@ async function resolveCouncilProviders(options, adapters, context) {
   return { providerFamilies, unavailableProviders };
 }
 async function runCouncilCommand(command, args, environment) {
-  const registry2 = environment.registry ?? await loadModelRegistry();
-  const options = await parseRunOptions(command, args, environment, registry2);
+  const parsed = parseArguments(args, command === "council" ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
+  const configured = await configuredModelRegistry(parsed, environment);
+  const registry2 = configured.registry;
+  const options = await parseRunOptions(command, parsed, environment, registry2, configured.stateRoot);
   const requestedProviderFamilies = options.providerFamilies;
   const destinations = requestedProviderFamilies.map((provider) => ({
     provider,
@@ -21132,7 +21621,7 @@ async function runCouncilCommand(command, args, environment) {
   }
   if (options.dryRun) {
     const assignmentHistory2 = await loadAssignmentHistory(options, environment);
-    const { manifest: manifest2 } = buildManifestAndAssignments(options, registry2, assignmentHistory2);
+    const { manifest: manifest2 } = buildManifestAndAssignments(options, registry2, configured.provenance, assignmentHistory2);
     const reducedQuorumWarning2 = manifest2.quorumPolicy.reducedQuorum?.warning;
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
@@ -21153,7 +21642,7 @@ async function runCouncilCommand(command, args, environment) {
       }
     });
   }
-  const adapters = environment.adapters ?? createProviderRoster();
+  const adapters = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
   const diagnostics = [];
   const context = {
     registry: registry2,
@@ -21198,7 +21687,7 @@ async function runCouncilCommand(command, args, environment) {
     };
   }
   const assignmentHistory = await loadAssignmentHistory(executionOptions, environment);
-  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(executionOptions, registry2, assignmentHistory);
+  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(executionOptions, registry2, configured.provenance, assignmentHistory);
   const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
   const preflight = {
     classification: policyDecision.effectiveClassification,
@@ -21236,14 +21725,14 @@ async function runCouncilCommand(command, args, environment) {
     ...records === undefined ? {} : { records }
   });
 }
-async function providerContext(environment) {
-  const registry2 = environment.registry ?? await loadModelRegistry();
-  const roster = environment.adapters ?? createProviderRoster();
+async function providerContext(parsed, environment) {
+  const configured = await configuredModelRegistry(parsed, environment);
+  const roster = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
   return {
-    registry: registry2,
+    configured,
     roster,
     context: {
-      registry: registry2,
+      registry: configured.registry,
       env: environment.env ?? process.env,
       cwd: environment.cwd ?? process.cwd(),
       timeoutMs: DEFAULT_TIMEOUT_MS
@@ -21256,25 +21745,62 @@ function orderedAdapters(roster) {
     return adapter === undefined ? [] : [adapter];
   });
 }
+function providerTransportResolution(provider, registry2, roster) {
+  const adapter = roster[provider];
+  if (adapter === undefined) {
+    return {
+      preferred: registry2[provider].transport,
+      effective: null,
+      reason: "No adapter is available for this provider family."
+    };
+  }
+  if (adapter.transportResolution !== undefined) {
+    return {
+      ...adapter.transportResolution,
+      preferred: registry2[provider].transport
+    };
+  }
+  return {
+    preferred: registry2[provider].transport,
+    effective: adapter.transport,
+    reason: "The adapter uses its governed preferred transport."
+  };
+}
+function selfCheckTransportResolutions(registry2, roster) {
+  return {
+    anthropic: providerTransportResolution("anthropic", registry2, roster),
+    openai: providerTransportResolution("openai", registry2, roster),
+    xai: providerTransportResolution("xai", registry2, roster),
+    google: providerTransportResolution("google", registry2, roster),
+    deepseek: providerTransportResolution("deepseek", registry2, roster),
+    moonshot: providerTransportResolution("moonshot", registry2, roster)
+  };
+}
 async function healthCommand(command, args, environment) {
-  const parsed = parseArguments(args, new Set(["help", "json"]));
+  const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
   if (parsed.positionals.length > 0)
     throw new Error(`${command} accepts no positional arguments`);
-  const configured = await providerContext(environment);
-  const adapters = orderedAdapters(configured.roster);
+  const providerConfiguration = await providerContext(parsed, environment);
+  const adapters = orderedAdapters(providerConfiguration.roster);
   if (command === "doctor") {
-    const report = await doctor(adapters, configured.context);
-    return output(0, report);
+    const report = await doctor(adapters, providerConfiguration.context);
+    return output(0, {
+      ...report,
+      engineIdentity: engineIdentity(providerConfiguration.configured, environment)
+    });
   }
-  const probes = await probeRoster(adapters, configured.context);
-  return output(0, snapshot(probes, configured.registry));
+  const probes = await probeRoster(adapters, providerConfiguration.context);
+  return output(0, {
+    ...snapshot(probes, providerConfiguration.configured.registry),
+    registryProvenance: providerConfiguration.configured.provenance
+  });
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join4(resolve5(root), "general", "sessions");
+    return join5(resolve6(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join4(resolve5(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join5(resolve6(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
@@ -21295,7 +21821,7 @@ async function storedSessionCommand(command, args) {
         return output(0, { schemaVersion: SCHEMA_VERSION, sessions: [] });
       throw error51;
     }
-    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join4(sessionsDirectory, name)).json())));
+    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join5(sessionsDirectory, name)).json())));
     sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     return output(0, { schemaVersion: SCHEMA_VERSION, sessions });
   }
@@ -21305,7 +21831,7 @@ async function storedSessionCommand(command, args) {
   const runId = safeStorageId(runIdValue, "Run id");
   let session;
   try {
-    session = SessionRecordSchema.parse(await Bun.file(join4(sessionsDirectory, `${runId}.json`)).json());
+    session = SessionRecordSchema.parse(await Bun.file(join5(sessionsDirectory, `${runId}.json`)).json());
   } catch (error51) {
     const code = error51.code;
     if (code === "ENOENT")
@@ -21334,9 +21860,9 @@ async function migrationCommand(args, environment) {
       throw new Error("migrate-general plan requires --root and --output");
     }
     const sourceRelativePath = oneFlag(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join4(resolve5(root), sourceRelativePath)).text();
+    const sourceContent = await Bun.file(join5(resolve6(root), sourceRelativePath)).text();
     const rulesPath = oneFlag(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve5(rulesPath)).json());
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve6(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -21344,12 +21870,12 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve5(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve6(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve5(destination),
+      output: resolve6(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
@@ -21358,7 +21884,7 @@ async function migrationCommand(args, environment) {
     const planPath = oneFlag(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve5(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve6(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }
@@ -21377,13 +21903,25 @@ function help() {
       "health",
       "doctor",
       "migrate-general",
+      "version",
       "self-check"
     ],
     invocation: "All execution is explicit; no automatic hook starts a council.",
     defaultSeatCount: DEFAULT_SEAT_COUNT,
     councilOptions: {
       "--min-families <n>": "Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker."
-    }
+    },
+    registryOptions: {
+      "--registry <path>": "Use this strict partial registry override instead of the default locations.",
+      "--records-root <path>": "Use <records-root>/models.json when present and report this resolved state root."
+    },
+    registryPrecedence: [
+      "--registry <path>",
+      "<records-root>/models.json when present",
+      "~/.claude/council/models.json when present",
+      "built-in registry"
+    ],
+    installerProvenance: "Installers may set COUNCIL_INSTALLER_PROVENANCE; the engine reports it as installer-supplied and never self-attests a source commit."
   });
 }
 async function runCliFacade(argv, environment = {}) {
@@ -21403,16 +21941,30 @@ async function runCliFacade(argv, environment = {}) {
     }
     if (command === "migrate-general")
       return await migrationCommand(args, environment);
+    if (command === "version") {
+      const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
+      if (parsed.positionals.length > 0)
+        throw new Error("version accepts no positional arguments");
+      const configured = await configuredModelRegistry(parsed, environment);
+      return output(0, {
+        schemaVersion: SCHEMA_VERSION,
+        command,
+        ...engineIdentity(configured, environment)
+      });
+    }
     if (command === "self-check") {
-      const parsed = parseArguments(args, new Set(["help", "json"]));
+      const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0)
         throw new Error("self-check accepts no positional arguments");
-      const registry2 = environment.registry ?? await loadModelRegistry();
+      const configured = await configuredModelRegistry(parsed, environment);
+      const roster = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
       return output(0, {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
         providers: ProviderFamilySchema.options,
-        routes: registry2,
+        routes: configured.registry,
+        transportResolutions: selfCheckTransportResolutions(configured.registry, roster),
+        registryProvenance: configured.provenance,
         lenses: roleCatalogue.map(({ name, category }) => ({ name, category })),
         runtimeDependencies: ["zod", "proper-lockfile"]
       });
@@ -21439,5 +21991,6 @@ if (import.meta.main)
   process.exit(await main());
 export {
   runCliFacade,
-  main
+  main,
+  ADAPTER_CONTRACT_VERSION
 };

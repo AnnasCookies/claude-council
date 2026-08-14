@@ -10,9 +10,10 @@
     "transport": "subscription-cli"
   },
   "xai": {
-    "primary": "grok-4.5",
-    "fallbacks": [],
-    "transport": "http"
+    "primary": "grok-4.6",
+    "fallbacks": ["grok-4.5"],
+    "transport": "http",
+    "alternateTransports": ["subscription-cli"]
   },
   "google": {
     "primary": "gemini-3.1-pro-high",

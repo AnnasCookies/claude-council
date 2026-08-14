@@ -1,0 +1,10 @@
+// Remove these comments before copying this file to models.json; overrides are strict JSON.
+// A family entry is merged into the built-in route, so omitted families and fields are inherited.
+// This example changes only xAI's primary model; its fallbacks and governed transports remain built in.
+// Unknown family or route keys are rejected instead of silently leaving a stale route active.
+// Precedence: --registry, <records-root>/models.json, ~/.claude/council/models.json, built-in.
+{
+  "xai": {
+    "primary": "grok-5"
+  }
+}

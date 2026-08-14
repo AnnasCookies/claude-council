@@ -4,7 +4,51 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
-## Unreleased
+## 2026.8.15
+
+### Added
+
+- The xAI seat now supports **two governed transports**. It resolves HTTPS when
+  `XAI_API_KEY` is present, otherwise the `grok` subscription CLI when that
+  binary resolves on `PATH`, otherwise it reports `unconfigured` naming both
+  ways to configure it. `ModelRoute` gains an optional `alternateTransports`
+  list so the _registry_ — not adapter code — remains the authority on which
+  transports a family may use; the runner and health probe still reject any
+  transport outside that governed set. `doctor` and `self-check` report the
+  preferred transport, the effective transport and why it was selected, so it
+  is never ambiguous which one ran.
+- A fail-closed Grok subscription-CLI parser. It requires subscription
+  evidence (`init.apiKeySource === "oauth"`), an absolute matching isolated
+  working directory, no tools/MCPs/skills, and the same non-empty model and
+  session id across the init frame, the assistant frame and the terminal
+  result's sole `modelUsage` key. Drift or missing identity is
+  `identity-unverified`; tool, browser or subagent activity is
+  `unsafe-tool-isolation`. The prompt is staged mode `0600` and passed by path,
+  never through argv, avoiding the documented Windows argv-size failure.
+- **User-level model registry overrides**, so a new model can be adopted on any
+  machine without a code release. Precedence: explicit `--registry <path>`, then
+  `<records-root>/models.json`, then `~/.claude/council/models.json`, then the
+  built-in registry. Overrides **merge per family** — supplying only `primary`
+  preserves that family's fallbacks and transports. Unknown families or route
+  keys fail closed naming the file and the offending key, so a typo can never
+  silently leave a stale model in place. See `models.json.example`.
+- A `version` command emitting JSON engine identity: `executablePath`,
+  `packageVersion`, `adapterContractVersion`, `stateRoot`, per-family registry
+  provenance with the override file's SHA-256, and `installerProvenance`.
+  Provenance is honest by construction: there is no self-attested source commit,
+  so `installerProvenance` is either supplied by the installer through
+  `COUNCIL_INSTALLER_PROVENANCE` or reported as `null` with a reason. `doctor`
+  embeds the same identity block, and every run manifest records the registry
+  provenance actually used.
+
+### Changed
+
+- The governed xAI primary moves to `grok-4.6`, retaining `grok-4.5` as a
+  same-family fallback, per the current official model defaults.
+- Health diagnostics preserve `alternateTransports` in the reported route, so a
+  diagnostic never shows a partial governed route.
+
+## 2026.8.14
 
 ### Added
 
@@ -13,6 +57,30 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   persisted session all warn that three families are weaker than the standing
   four-family default; three-seat lens precedence is domain, risk and
   contrarian.
+
+### Fixed
+
+- The OpenAI seat runs `codex exec` directly instead of shelling out to a nested
+  harness under an isolated profile whose credential store was separate. That
+  profile was never authenticated for `openai-codex`, so the child exited
+  immediately and left a handle on the isolation directory — surfacing as a
+  misleading `EBUSY` cleanup error rather than the authentication failure it was.
+  Reasoning effort is now pinned to `xhigh` and **bound from the response**, so a
+  silent downgrade is rejected.
+- The Antigravity parser binds facts rather than an expected event sequence. A
+  longer motion produced additional `step_update` events and the whole stream was
+  rejected as `identity-unverified`. All isolation invariants are retained.
+- The council front door selects only configured, reachable families and
+  auto-reduces at three with an unmissable notice naming each unavailable family
+  and why. Previously it hard-required four families while seats are strictly
+  1:1 with families, so three healthy families could never convene.
+- Per-round deadline budgeting replaces a single run-wide deadline that let the
+  analysis round consume the whole allowance and starve the rebuttal round.
+- `non-zero-exit` is no longer treated as transient. Seat CLIs also exit
+  non-zero for authentication, configuration and unknown-model faults, so
+  retrying burned budget on something that would never clear.
+- Quota exhaustion reports as `quota-exhausted` with the reset time the CLI
+  gives, instead of an opaque `subscription CLI failed` with omitted stderr.
 
 ## 2026.7.11
 

@@ -41,8 +41,44 @@ export const ModelRouteSchema = z.strictObject({
   primary: NonEmptyStringSchema,
   fallbacks: z.array(NonEmptyStringSchema),
   transport: ModelTransportSchema,
+  alternateTransports: z.array(ModelTransportSchema).optional(),
 });
 export type ModelRoute = z.infer<typeof ModelRouteSchema>;
+
+export const ModelRouteRegistrySourceSchema = z.enum(['built-in', 'override']);
+export type ModelRouteRegistrySource = z.infer<typeof ModelRouteRegistrySourceSchema>;
+
+const BuiltInRouteSourcesSchema = z.strictObject({
+  anthropic: z.literal('built-in'),
+  openai: z.literal('built-in'),
+  xai: z.literal('built-in'),
+  google: z.literal('built-in'),
+  deepseek: z.literal('built-in'),
+  moonshot: z.literal('built-in'),
+});
+const ResolvedRouteSourcesSchema = z.strictObject({
+  anthropic: ModelRouteRegistrySourceSchema,
+  openai: ModelRouteRegistrySourceSchema,
+  xai: ModelRouteRegistrySourceSchema,
+  google: ModelRouteRegistrySourceSchema,
+  deepseek: ModelRouteRegistrySourceSchema,
+  moonshot: ModelRouteRegistrySourceSchema,
+});
+const BuiltInRegistryProvenanceSchema = z.strictObject({
+  kind: z.literal('built-in-only'),
+  routes: BuiltInRouteSourcesSchema,
+});
+const OverrideRegistryProvenanceSchema = z.strictObject({
+  kind: z.literal('override'),
+  overridePath: NonEmptyStringSchema,
+  overrideSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  routes: ResolvedRouteSourcesSchema,
+});
+export const ModelRegistryProvenanceSchema = z.discriminatedUnion('kind', [
+  BuiltInRegistryProvenanceSchema,
+  OverrideRegistryProvenanceSchema,
+]);
+export type ModelRegistryProvenance = z.infer<typeof ModelRegistryProvenanceSchema>;
 
 export const RoleCategorySchema = z.enum(['domain', 'maintainer', 'risk', 'systems', 'contrarian']);
 export type RoleCategory = z.infer<typeof RoleCategorySchema>;
@@ -120,6 +156,7 @@ export const RunManifestSchema = z.strictObject({
   scope: CouncilScopeSchema,
   classification: DataClassificationSchema,
   routes: z.partialRecord(ProviderFamilySchema, ModelRouteSchema),
+  registryProvenance: ModelRegistryProvenanceSchema,
   lenses: z.array(RoleLensSchema),
   rounds: z.number().int().min(1).max(3),
   refinementTrigger: RefinementTriggerSchema.optional(),

@@ -142,6 +142,28 @@ describe('provider health probes', () => {
 });
 
 describe('health baselines', () => {
+  test('preserves governed alternate transports without adding empty route keys', async () => {
+    const baseline = snapshot(
+      await probeRoster(
+        [
+          fakeAdapter('anthropic', { status: 'healthy' }),
+          fakeAdapter('xai', { status: 'healthy' }),
+        ],
+        context,
+      ),
+      registry,
+      CAPTURED_AT,
+    );
+    const anthropic = baseline.providers.find(({ provider }) => provider === 'anthropic');
+    const xai = baseline.providers.find(({ provider }) => provider === 'xai');
+    if (anthropic === undefined || xai === undefined) {
+      throw new Error('Expected both route-health records');
+    }
+
+    expect(xai.route.alternateTransports).toEqual(['subscription-cli']);
+    expect(anthropic.route).not.toHaveProperty('alternateTransports');
+  });
+
   test('reports partial degradation without calling it a total outage', async () => {
     const baseline = snapshot(
       await probeRoster(
