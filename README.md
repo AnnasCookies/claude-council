@@ -104,42 +104,66 @@ The default command seat count is five and the standing `council` quorum remains
 
 ## Provider routes
 
-| Family    | Exact primary         | Same-family fallback    | Transport                | Credential                |
-| --------- | --------------------- | ----------------------- | ------------------------ | ------------------------- |
-| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI      | local Claude subscription |
-| OpenAI    | `gpt-5.6-sol`         | none                    | isolated OMP CLI         | local OpenAI subscription |
-| xAI       | `grok-4.5`            | none                    | HTTPS                    | `XAI_API_KEY`             |
-| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI | local Google subscription |
-| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                    | `DEEPSEEK_API_KEY`        |
-| Moonshot  | `kimi-k3`             | none                    | HTTPS                    | `MOONSHOT_API_KEY`        |
+| Family    | Exact primary         | Same-family fallback    | Transport                        | Credential                            |
+| --------- | --------------------- | ----------------------- | -------------------------------- | ------------------------------------- |
+| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI              | local Claude subscription             |
+| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`            | local OpenAI subscription             |
+| xAI       | `grok-4.6`            | `grok-4.5`              | HTTPS **or** isolated `grok` CLI | `XAI_API_KEY` **or** xAI subscription |
+| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI         | local Google subscription             |
+| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                            | `DEEPSEEK_API_KEY`                    |
+| Moonshot  | `kimi-k3`             | none                    | HTTPS                            | `MOONSHOT_API_KEY`                    |
 
-OpenAI requires a dedicated OMP profile at
-`~/.omp/profiles/claude-council/agent/config.yml`:
+### xAI: either transport, no configuration change
 
-```yaml
-setupVersion: 1
-advisor:
-  enabled: false
-prewalk:
-  enabled: false
-autolearn:
-  enabled: false
+xAI is the one family with two governed transports. The effective transport is
+resolved from observable facts and reported in `doctor` and `self-check`:
+
+1. `XAI_API_KEY` present → HTTPS.
+2. Otherwise a `grok` binary resolvable on `PATH` → isolated subscription CLI,
+   which uses that subscription's OAuth session and no API key.
+3. Otherwise `unconfigured`, naming both options.
+
+Switching between them requires no edit: add or remove the key, or install or
+remove the binary. `ModelRoute.alternateTransports` in the registry — not adapter
+code — governs which transports a family may use, and the runner and health probe
+still reject anything outside that set. The Grok parser demands subscription
+evidence, one consistent model and session identity across every frame, and no
+tool activity; anything else is `identity-unverified` or `unsafe-tool-isolation`.
+
+### Credentials
+
+Anthropic, OpenAI and Google use authenticated local subscription CLIs and never
+read `OPENAI_API_KEY` or `GEMINI_API_KEY`; a missing executable disables that
+seat rather than changing transport. The HTTPS keys are `XAI_API_KEY`,
+`DEEPSEEK_API_KEY` and `MOONSHOT_API_KEY`. Export them in the launch
+environment, or let the maintained Claude facade load the same names from the
+machine-local, untracked `~/.claude/council/providers.env`. An unset credential
+disables only its own family. Failed, unavailable and identity-unverified seats
+remain visible in the structured result. Cross-provider fallback is prohibited.
+
+### Adopting a new model without a release
+
+Model routes are overridable per machine, so a newly released model does not need
+a code change, a version bump or a plugin update:
+
+```jsonc
+// ~/.claude/council/models.json — or <records-root>/models.json, or --registry <path>
+{ "xai": { "primary": "grok-5" } }
 ```
 
-Launch `omp --profile claude-council`, run `/login`, and select
-`ChatGPT Plus/Pro (Codex Subscription)` once. The council additionally applies
-a one-shot overlay that disables the advisor, prewalk and every external
-configuration discovery provider; an absent profile is reported as
-`unconfigured`.
+Overrides **merge per family**: supplying only `primary` preserves that family's
+fallbacks and transports. An unknown family or route key fails closed naming the
+file and the offending key, so a typo can never silently leave a stale model in
+place. Precedence is `--registry <path>`, then `<records-root>/models.json`, then
+`~/.claude/council/models.json`, then the built-in registry. See
+`models.json.example`.
 
-OpenAI and Google never read `OPENAI_API_KEY` or `GEMINI_API_KEY`; missing
-subscription executables disable those seats rather than changing transport.
-The remaining HTTPS keys are `XAI_API_KEY`, `DEEPSEEK_API_KEY` and
-`MOONSHOT_API_KEY`. Export them in the launch environment. The maintained
-Claude facade loads the same names from the machine-local, untracked
-`~/.claude/council/providers.env` file. An unset credential disables only its
-HTTP family. Failed, unavailable and identity-unverified seats remain visible
-in the structured result. Cross-provider fallback is prohibited.
+`council version --json` reports which engine is executing and where each route
+came from — `executablePath`, `packageVersion`, `adapterContractVersion`, the
+override path with its SHA-256, per-family provenance, and `installerProvenance`
+(supplied by the installer, or `null` with a reason; the kernel never
+self-attests a source commit). `doctor --json` embeds the same block, and every
+run manifest records the registry provenance actually used.
 
 ## Evidence and data safety
 

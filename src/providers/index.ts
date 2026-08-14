@@ -12,8 +12,12 @@ export type ProviderRoster = Readonly<Record<ProviderFamily, ProviderAdapter>>;
 export interface ProviderRosterOptions {
   httpTransport?: HttpTransport;
   cliTransport?: CliTransport;
+  env?: Readonly<Record<string, string | undefined>>;
   resolveClaudeExecutable?: () => string | undefined;
   resolveOpenAiExecutable?: () => string | undefined;
+  resolveXaiExecutable?: () => string | undefined;
+  xaiModelOverride?: () => string | undefined;
+  xaiTransportPreference?: 'http' | 'subscription-cli';
   resolveGoogleExecutable?: () => string | undefined;
 }
 
@@ -21,7 +25,14 @@ export function createProviderRoster(options: ProviderRosterOptions = {}): Provi
   return {
     anthropic: anthropicAdapter(options.cliTransport, options.resolveClaudeExecutable),
     openai: openaiAdapter(options.cliTransport, options.resolveOpenAiExecutable),
-    xai: xaiAdapter(options.httpTransport),
+    xai: xaiAdapter({
+      env: options.env,
+      httpTransport: options.httpTransport,
+      cliTransport: options.cliTransport,
+      resolveExecutable: options.resolveXaiExecutable,
+      modelOverride: options.xaiModelOverride,
+      transportPreference: options.xaiTransportPreference,
+    }),
     google: googleAdapter(options.cliTransport, options.resolveGoogleExecutable),
     deepseek: deepseekAdapter(options.httpTransport),
     moonshot: moonshotAdapter(options.httpTransport),

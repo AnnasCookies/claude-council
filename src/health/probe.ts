@@ -100,7 +100,10 @@ async function probeAdapter(
   const transport = ModelTransportSchema.parse(adapter.transport);
   const requestedModel = sanitiseModel(configuredRoute.primary);
 
-  if (transport !== configuredRoute.transport) {
+  if (
+    transport !== configuredRoute.transport &&
+    !configuredRoute.alternateTransports?.includes(transport)
+  ) {
     return failedProbe(
       provider,
       transport,

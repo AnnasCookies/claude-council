@@ -33,6 +33,9 @@ const stagedCouncilPrompt =
   'Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.\n\nEvaluate the supplied evidence pack.';
 const capturedCodexPrompt =
   'Before the final assessment, send a separate progress update as a JSON object matching the required schema; then send the final JSON assessment. The evidence pack is intentionally absent.';
+const grokInlineAnswerGuard =
+  'IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.';
+const stagedGrokPrompt = `${grokInlineAnswerGuard}\n\n${stagedCouncilPrompt}`;
 
 class FakeHttp implements HttpTransport {
   readonly calls: { request: HttpRequest; policy: RetryPolicy }[] = [];
@@ -256,6 +259,84 @@ const agyOutput = (model: string, content = answer, options: AgyOutputOptions = 
   ];
   return events.map((event) => JSON.stringify(event)).join('\n');
 };
+interface GrokOutputOptions {
+  omitInitModel?: boolean;
+  contentBlocks?: readonly unknown[];
+  apiKeySource?: 'oauth' | 'user';
+}
+
+function grokMessagesOutput(
+  model: string,
+  content = answer,
+  options: GrokOutputOptions = {},
+): string {
+  const sessionId = 'grok-session-1';
+  const init = {
+    type: 'system',
+    subtype: 'init',
+    session_id: sessionId,
+    apiKeySource: options.apiKeySource ?? 'oauth',
+    ...(options.omitInitModel ? {} : { model }),
+    cwd: ownedDirectory,
+    permissionMode: 'default',
+    tools: [],
+    slash_commands: [],
+    mcp_servers: [],
+    skills: [],
+    uuid: 'grok-init-1',
+  };
+  const assistant = {
+    type: 'assistant',
+    message: {
+      id: 'grok-message-1',
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: options.contentBlocks ?? [{ type: 'text', text: content }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    },
+    parent_tool_use_id: null,
+    session_id: sessionId,
+    uuid: 'grok-assistant-1',
+  };
+  const result = {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    duration_ms: 10,
+    duration_api_ms: 9,
+    num_turns: 1,
+    result: content,
+    stop_reason: 'end_turn',
+    total_cost_usd: 0,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
+    modelUsage: {
+      [model]: {
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        webSearchRequests: 0,
+        costUSD: 0,
+      },
+    },
+    session_id: sessionId,
+    uuid: 'grok-result-1',
+  };
+  return [init, assistant, result].map((event) => JSON.stringify(event)).join('\n');
+}
 
 async function capturedAgyOutput(fixtureName = 'agy-stream-json-success.jsonl'): Promise<string> {
   const fixture = await Bun.file(join(import.meta.dir, 'fixtures', fixtureName)).text();
@@ -319,7 +400,7 @@ function request(providerContext: ProviderContext): ProviderRequest {
 
 describe('provider roster', () => {
   test('constructs exactly one adapter for every governed family', () => {
-    const roster = createProviderRoster();
+    const roster = createProviderRoster({ env: {}, resolveXaiExecutable: () => undefined });
 
     expect(Object.keys(roster)).toEqual([
       'anthropic',
@@ -354,15 +435,22 @@ describe('provider roster', () => {
 
 describe('HTTP provider adapters', () => {
   test('xAI and Moonshot preserve exact family and actual response identity', async () => {
-    for (const [adapter, key, model] of [
-      [xaiAdapter, 'XAI_API_KEY', 'grok-4.5'],
-      [moonshotAdapter, 'MOONSHOT_API_KEY', 'kimi-k3'],
-    ] as const) {
-      const transport = new FakeHttp([okHttp(model)]);
-      const response = await adapter(transport).invoke(request(context({ [key]: 'test-key' })));
-      expect(response.status).toBe('ok');
-      expect(response.actualModel).toBe(model);
-    }
+    const xaiTransport = new FakeHttp([okHttp(registry.xai.primary)]);
+    const xaiResponse = await xaiAdapter({
+      env: { XAI_API_KEY: 'test-key' },
+      httpTransport: xaiTransport,
+      cliTransport: new FakeCli(okCli('')),
+      resolveExecutable: () => undefined,
+    }).invoke(request(context({ XAI_API_KEY: 'test-key' })));
+    expect(xaiResponse.status).toBe('ok');
+    expect(xaiResponse.actualModel).toBe(registry.xai.primary);
+
+    const moonshotTransport = new FakeHttp([okHttp('kimi-k3')]);
+    const moonshotResponse = await moonshotAdapter(moonshotTransport).invoke(
+      request(context({ MOONSHOT_API_KEY: 'test-key' })),
+    );
+    expect(moonshotResponse.status).toBe('ok');
+    expect(moonshotResponse.actualModel).toBe('kimi-k3');
   });
 
   test('DeepSeek fallback remains the same family and is explicit', async () => {
@@ -378,7 +466,7 @@ describe('HTTP provider adapters', () => {
   });
 
   test('missing credentials skip rather than substitute another family', async () => {
-    for (const adapter of [xaiAdapter, deepseekAdapter, moonshotAdapter]) {
+    for (const adapter of [deepseekAdapter, moonshotAdapter]) {
       const response = await adapter(new FakeHttp([])).invoke(request(context({})));
       expect(response.status).toBe('skipped');
       if (response.status === 'ok') throw new Error('missing credential unexpectedly succeeded');
@@ -389,15 +477,310 @@ describe('HTTP provider adapters', () => {
   test('malformed structured output fails and retains only sanitised local diagnostics', async () => {
     const diagnostics: ProviderDiagnostic[] = [];
     const secret = ['sk', 'proj', 'abcdefghijklmnopqrstuvwxyz0123456789'].join('-');
-    const transport = new FakeHttp([okHttp('grok-4.5', `not-json ${secret}`)]);
-    const response = await xaiAdapter(transport).invoke(
-      request(context({ XAI_API_KEY: 'test-key' }, diagnostics)),
-    );
+    const transport = new FakeHttp([okHttp(registry.xai.primary, `not-json ${secret}`)]);
+    const response = await xaiAdapter({
+      env: { XAI_API_KEY: 'test-key' },
+      httpTransport: transport,
+      cliTransport: new FakeCli(okCli('')),
+      resolveExecutable: () => undefined,
+    }).invoke(request(context({ XAI_API_KEY: 'test-key' }, diagnostics)));
 
     expect(response.status).toBe('failed');
     expect(diagnostics).toHaveLength(1);
     expect(JSON.stringify(diagnostics)).not.toContain(secret);
     expect(diagnostics[0]?.rawText).toContain('<SECRET:OPENAI:');
+  });
+});
+
+describe('xAI automatic transport resolution', () => {
+  test('prefers HTTPS when both the API key and grok executable are present', async () => {
+    const http = new FakeHttp([okHttp(registry.xai.primary), okHttp(registry.xai.primary)]);
+    const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
+    const adapter = xaiAdapter({
+      env: { XAI_API_KEY: 'test-key' },
+      httpTransport: http,
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+    });
+
+    const response = await adapter.invoke(request(context({ XAI_API_KEY: 'test-key' })));
+
+    expect(adapter.transport).toBe('http');
+    expect(adapter.transportResolution).toEqual({
+      preferred: 'http',
+      effective: 'http',
+      reason: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
+    });
+    expect(response.status).toBe('ok');
+    const report = await doctor(
+      [adapter],
+      context({ XAI_API_KEY: 'test-key' }),
+      '2026-08-14T00:00:00.000Z',
+    );
+    expect(report.diagnostics[0]).toMatchObject({
+      provider: 'xai',
+      transport: 'http',
+      status: 'healthy',
+      detail: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
+    });
+    expect(http.calls).toHaveLength(2);
+    expect(cli.calls).toHaveLength(0);
+  });
+
+  test('allows an explicit subscription preference when both transports are configured', async () => {
+    const http = new FakeHttp([okHttp(registry.xai.primary)]);
+    const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
+    const adapter = xaiAdapter({
+      env: { XAI_API_KEY: 'test-key' },
+      httpTransport: http,
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+      transportPreference: 'subscription-cli',
+    });
+
+    const response = await adapter.invoke(request(context({ XAI_API_KEY: 'test-key' })));
+
+    expect(response.status).toBe('ok');
+    expect(adapter.transport).toBe('subscription-cli');
+    expect(adapter.transportResolution?.reason).toBe(
+      'The subscription CLI was explicitly preferred and grok resolved on PATH; HTTPS was not used.',
+    );
+    expect(cli.calls).toHaveLength(1);
+    expect(http.calls).toHaveLength(0);
+  });
+
+  test('selects the subscription CLI when only an absolute grok executable is present', async () => {
+    const http = new FakeHttp([]);
+    const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
+    const adapter = xaiAdapter({
+      env: {},
+      httpTransport: http,
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+    });
+
+    const response = await adapter.invoke(request(context({})));
+
+    expect(adapter.transport).toBe('subscription-cli');
+    expect(adapter.transportResolution).toEqual({
+      preferred: 'http',
+      effective: 'subscription-cli',
+      reason: 'XAI_API_KEY is not set; resolved the grok subscription CLI on PATH.',
+    });
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe(registry.xai.primary);
+    expect(response.modelIdentity).toBe('verified');
+    expect(response.route).toBe('primary');
+    expect(http.calls).toHaveLength(0);
+
+    const call = cli.calls[0];
+    const args = call?.args.map((argument) =>
+      typeof argument === 'function' ? argument(ownedDirectory) : argument,
+    );
+    expect(args).toEqual([
+      '--no-auto-update',
+      '--prompt-file',
+      join(ownedDirectory, 'council-prompt.txt'),
+      '--output-format',
+      'streaming-messages-json',
+      '--sandbox',
+      'read-only',
+      '--no-plan',
+      '--no-subagents',
+      '--no-memory',
+      '--disable-web-search',
+      '--tools',
+      '__claude_council_no_tools__',
+      '--max-turns',
+      '1',
+      '--verbatim',
+    ]);
+    expect(args).not.toContain('Evaluate the supplied evidence pack.');
+    expect(call?.stdin).toBe('');
+    expect(call?.cwd).toBe(tmpdir());
+    expect(call?.files).toEqual({ 'council-prompt.txt': stagedGrokPrompt });
+  });
+
+  test('passes a model flag only for an explicit Grok CLI override', async () => {
+    const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
+    await xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+      modelOverride: () => registry.xai.primary,
+    }).invoke(request(context({})));
+
+    const args = cli.calls[0]?.args.map((argument) =>
+      typeof argument === 'function' ? argument(ownedDirectory) : argument,
+    );
+    expect(args?.slice(-2)).toEqual(['-m', registry.xai.primary]);
+  });
+
+  test('reports both configuration paths when neither transport is available', async () => {
+    const adapter = xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: new FakeCli(okCli('')),
+      resolveExecutable: () => undefined,
+    });
+    const expectedReason =
+      'set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
+
+    expect(adapter.transportResolution).toEqual({
+      preferred: 'http',
+      effective: null,
+      reason: expectedReason,
+    });
+    await expect(adapter.availability(context({}))).resolves.toMatchObject({
+      status: 'unconfigured',
+      reason: expectedReason,
+    });
+    const response = await adapter.invoke(request(context({})));
+    expect(response.status).toBe('skipped');
+    if (response.status === 'ok') throw new Error('unconfigured xAI unexpectedly succeeded');
+    expect(response.error.message).toBe(expectedReason);
+
+    const report = await doctor([adapter], context({}), '2026-08-14T00:00:00.000Z');
+    expect(report.diagnostics[0]).toMatchObject({
+      provider: 'xai',
+      transport: 'http',
+      status: 'unconfigured',
+      detail: expectedReason,
+    });
+  });
+
+  test('doctor reports the effective CLI transport and why HTTPS was not selected', async () => {
+    const adapter = xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: new FakeCli(okCli(grokMessagesOutput(registry.xai.primary))),
+      resolveExecutable: () => process.execPath,
+    });
+
+    const report = await doctor([adapter], context({}), '2026-08-14T00:00:00.000Z');
+
+    expect(report.diagnostics[0]).toMatchObject({
+      provider: 'xai',
+      transport: 'subscription-cli',
+      status: 'healthy',
+      actualModel: registry.xai.primary,
+      identity: 'verified',
+      detail: 'XAI_API_KEY is not set; resolved the grok subscription CLI on PATH.',
+    });
+  });
+
+  test('rejects a Grok model outside the governed route as unverified', async () => {
+    const response = await xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: new FakeCli(okCli(grokMessagesOutput('grok-unapproved'))),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('out-of-route Grok model unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.actualModel).toBe('grok-unapproved');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('rejects unexpected Grok tool activity', async () => {
+    const response = await xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: new FakeCli(
+        okCli(
+          grokMessagesOutput(registry.xai.primary, answer, {
+            contentBlocks: [
+              {
+                type: 'tool_use',
+                id: 'tool-1',
+                name: 'run_terminal_cmd',
+                input: { command: 'pwd' },
+              },
+              { type: 'text', text: answer },
+            ],
+          }),
+        ),
+      ),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok')
+      throw new Error('tool-bearing Grok output unexpectedly succeeded');
+    expect(response.error.code).toBe('unsafe-tool-isolation');
+  });
+
+  test('never verifies Grok output without all CLI-owned identity evidence', async () => {
+    const response = await xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: new FakeCli(
+        okCli(grokMessagesOutput(registry.xai.primary, answer, { omitInitModel: true })),
+      ),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok')
+      throw new Error('identity-free Grok output unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.modelIdentity).not.toBe('verified');
+  });
+
+  test('rejects a Grok stream authenticated with an API key as subscription evidence', async () => {
+    const response = await xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: new FakeCli(
+        okCli(grokMessagesOutput(registry.xai.primary, answer, { apiKeySource: 'user' })),
+      ),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('API-key Grok stream unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.actualModel).toBe(registry.xai.primary);
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('classifies Grok timeout and non-zero exit without retrying either', async () => {
+    const cases = [
+      [
+        {
+          ...okCli(''),
+          status: 'timed-out',
+          exitCode: null,
+          errorCode: 'timeout',
+          treeTerminated: true,
+        },
+        'timed-out',
+        'timeout',
+      ],
+      [
+        { ...okCli(''), status: 'failed', exitCode: 1, errorCode: 'non-zero-exit' },
+        'failed',
+        'non-zero-exit',
+      ],
+    ] as const;
+
+    for (const [result, expectedStatus, expectedCode] of cases) {
+      const cli = new FakeCli(result);
+      const response = await xaiAdapter({
+        env: {},
+        httpTransport: new FakeHttp([]),
+        cliTransport: cli,
+        resolveExecutable: () => process.execPath,
+      }).invoke(request(context({})));
+      expect(response.status).toBe(expectedStatus);
+      if (response.status === 'ok')
+        throw new Error('failing Grok invocation unexpectedly succeeded');
+      expect(response.error.code).toBe(expectedCode);
+      expect(cli.calls).toHaveLength(1);
+    }
   });
 });
 

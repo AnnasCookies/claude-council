@@ -580,7 +580,11 @@ export class CouncilRunner {
       };
     }
 
-    if (adapter.transport !== this.context.registry[assignment.provider].transport) {
+    const governedRoute = this.context.registry[assignment.provider];
+    if (
+      adapter.transport !== governedRoute.transport &&
+      !governedRoute.alternateTransports?.includes(adapter.transport)
+    ) {
       return {
         response: failureResponse(
           assignment,

@@ -124,6 +124,9 @@ function sanitiseRoute(route: ModelRoute): ModelRoute {
     primary: sanitiseModel(route.primary),
     fallbacks: route.fallbacks.map(sanitiseModel),
     transport: route.transport,
+    ...(route.alternateTransports === undefined
+      ? {}
+      : { alternateTransports: route.alternateTransports }),
   });
 }
 

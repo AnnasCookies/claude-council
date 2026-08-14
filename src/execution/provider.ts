@@ -66,6 +66,13 @@ export interface ProviderAdapter {
   availability(context: ProviderContext): Promise<Availability>;
   invoke(request: ProviderRequest): Promise<SeatResponse>;
   probe(context: ProviderContext): Promise<HealthResult>;
+  readonly transportResolution?: ProviderTransportResolution;
+}
+
+export interface ProviderTransportResolution {
+  preferred: ModelTransport;
+  effective: ModelTransport | null;
+  reason: string;
 }
 
 export interface HttpTransport {
@@ -98,6 +105,8 @@ const defaultRetryPolicy = (timeoutMs: number): RetryPolicy => ({
 
 const answerInstruction = `Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.`;
 const healthPrompt = 'Return the required JSON object confirming this provider route is available.';
+const grokInlineAnswerGuard =
+  'IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.';
 
 function structuredPrompt(prompt: string): string {
   return `${answerInstruction}\n\n${prompt}`;
@@ -422,7 +431,7 @@ interface SubscriptionCliOutputFailure {
 type SubscriptionCliParseResult = SubscriptionCliOutput | SubscriptionCliOutputFailure;
 
 interface SubscriptionCliAdapterConfig {
-  family: Extract<ProviderFamily, 'openai' | 'google'>;
+  family: Extract<ProviderFamily, 'openai' | 'xai' | 'google'>;
   executableName: string;
   request(executable: string, route: ModelRoute, prompt: string, timeoutMs: number): CliRequest;
   output(
@@ -506,6 +515,43 @@ const AgyResultEventSchema = z.object({
     status: z.literal('SUCCESS'),
     structured_output: z.record(z.string(), z.unknown()),
   }),
+});
+const GrokInitEventSchema = z.object({
+  type: z.literal('system'),
+  subtype: z.literal('init'),
+  session_id: z.string().min(1),
+  apiKeySource: z.literal('oauth'),
+  model: z.string().min(1),
+  cwd: z.string().min(1),
+  permissionMode: z.literal('default'),
+  tools: z.array(z.string()).length(0),
+  mcp_servers: z.array(z.unknown()).length(0),
+  skills: z.array(z.string()).length(0),
+});
+const GrokContentBlockSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string() }),
+  z.object({ type: z.literal('thinking'), thinking: z.string(), signature: z.string() }),
+]);
+const GrokAssistantEventSchema = z.object({
+  type: z.literal('assistant'),
+  message: z.object({
+    type: z.literal('message'),
+    role: z.literal('assistant'),
+    model: z.string().min(1),
+    content: z.array(GrokContentBlockSchema).min(1),
+    stop_reason: z.literal('end_turn'),
+  }),
+  session_id: z.string().min(1),
+});
+const GrokResultEventSchema = z.object({
+  type: z.literal('result'),
+  subtype: z.literal('success'),
+  is_error: z.literal(false),
+  num_turns: z.literal(1),
+  result: z.string().min(1),
+  stop_reason: z.literal('end_turn'),
+  modelUsage: z.record(z.string().min(1), z.unknown()),
+  session_id: z.string().min(1),
 });
 
 const councilAnswerJsonSchema = JSON.stringify({
@@ -898,6 +944,129 @@ function extractAgyOutput(
   }
   if (!sawPromptRead) return parseFailure('unsafe-tool-isolation', actualModel);
   return { status: 'ok', actualModel, rawAnswer };
+}
+
+function grokReportedModel(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  if (typeof value.model === 'string' && value.model.trim()) return value.model;
+  return isRecord(value.message) &&
+    typeof value.message.model === 'string' &&
+    value.message.model.trim()
+    ? value.message.model
+    : undefined;
+}
+
+function grokInitViolatesIsolation(value: unknown, workingDirectory: string | undefined): boolean {
+  if (!isRecord(value)) return false;
+  const cwd = typeof value.cwd === 'string' ? value.cwd : undefined;
+  return (
+    (Array.isArray(value.tools) && value.tools.length > 0) ||
+    (Array.isArray(value.mcp_servers) && value.mcp_servers.length > 0) ||
+    (typeof value.permissionMode === 'string' && value.permissionMode !== 'default') ||
+    (cwd !== undefined &&
+      (workingDirectory === undefined ||
+        !isAbsolute(cwd) ||
+        canonicalPath(cwd) !== canonicalPath(workingDirectory)))
+  );
+}
+
+function extractGrokOutput(
+  stdout: string,
+  workingDirectory: string | undefined,
+): SubscriptionCliParseResult {
+  let state: 'await-init' | 'await-assistant' | 'await-result' | 'closed' = 'await-init';
+  let sessionId: string | undefined;
+  let actualModel: string | undefined;
+  let rawAnswer: string | undefined;
+
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return parseFailure('identity-unverified', actualModel);
+    }
+    if (containsUnsafeToolNode(value)) {
+      return parseFailure('unsafe-tool-isolation', grokReportedModel(value) ?? actualModel);
+    }
+    if (!isRecord(value) || typeof value.type !== 'string') {
+      return parseFailure('identity-unverified', actualModel);
+    }
+
+    if (value.type === 'system') {
+      const init = GrokInitEventSchema.safeParse(value);
+      const reportedModel = grokReportedModel(value);
+      if (
+        state !== 'await-init' ||
+        !init.success ||
+        workingDirectory === undefined ||
+        !isAbsolute(workingDirectory) ||
+        !isAbsolute(init.data.cwd) ||
+        canonicalPath(init.data.cwd) !== canonicalPath(workingDirectory)
+      ) {
+        return parseFailure(
+          grokInitViolatesIsolation(value, workingDirectory)
+            ? 'unsafe-tool-isolation'
+            : 'identity-unverified',
+          reportedModel,
+        );
+      }
+      sessionId = init.data.session_id;
+      actualModel = init.data.model;
+      state = 'await-assistant';
+      continue;
+    }
+
+    if (value.type === 'assistant') {
+      const assistant = GrokAssistantEventSchema.safeParse(value);
+      const reportedModel = grokReportedModel(value);
+      if (
+        state !== 'await-assistant' ||
+        !assistant.success ||
+        sessionId === undefined ||
+        actualModel === undefined ||
+        assistant.data.session_id !== sessionId ||
+        assistant.data.message.model !== actualModel
+      ) {
+        return parseFailure('identity-unverified', reportedModel ?? actualModel);
+      }
+      rawAnswer = '';
+      for (const block of assistant.data.message.content) {
+        if (block.type === 'text') rawAnswer += block.text;
+      }
+      if (!rawAnswer.trim()) return parseFailure('identity-unverified', actualModel);
+      state = 'await-result';
+      continue;
+    }
+
+    if (value.type === 'result') {
+      const result = GrokResultEventSchema.safeParse(value);
+      if (
+        state !== 'await-result' ||
+        !result.success ||
+        sessionId === undefined ||
+        actualModel === undefined ||
+        rawAnswer === undefined ||
+        result.data.session_id !== sessionId ||
+        result.data.result !== rawAnswer
+      ) {
+        return parseFailure('identity-unverified', actualModel);
+      }
+      const usageModels = Object.keys(result.data.modelUsage);
+      if (usageModels.length !== 1 || usageModels[0] !== actualModel) {
+        return parseFailure('identity-unverified', actualModel);
+      }
+      state = 'closed';
+      continue;
+    }
+
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  return state === 'closed' && actualModel !== undefined && rawAnswer !== undefined
+    ? { status: 'ok', actualModel, rawAnswer }
+    : parseFailure('identity-unverified', actualModel);
 }
 
 function observedRoute(
@@ -1359,6 +1528,204 @@ export function createGoogleSubscriptionAdapter(
     transport,
     resolveExecutable,
   );
+}
+
+function resolveGrokExecutable(): string | undefined {
+  return Bun.which('grok') ?? undefined;
+}
+
+/**
+ * Grok's Messages stream exposes the response model in its CLI-owned init, assistant and
+ * model-usage frames. Plain and ordinary JSON output omit that identity and therefore cannot
+ * satisfy the council's responding-model invariant.
+ */
+export function createXaiSubscriptionAdapter(
+  transport: CliTransport = nativeCliTransport,
+  resolveExecutable: () => string | undefined = resolveGrokExecutable,
+  modelOverride: () => string | undefined = () => process.env.GROK_CLI_MODEL?.trim() || undefined,
+): ProviderAdapter {
+  return createSubscriptionCliAdapter(
+    {
+      family: 'xai',
+      executableName: 'grok',
+      request: (executable, _route, prompt, timeoutMs) => {
+        const councilPrompt = `${grokInlineAnswerGuard}\n\n${structuredPrompt(prompt)}`;
+        const override = modelOverride()?.trim();
+        return {
+          executable,
+          args: [
+            '--no-auto-update',
+            // Headless Grok has no stdin prompt source; the staged file keeps large prompts off argv.
+            '--prompt-file',
+            (workingDirectory) => join(workingDirectory, 'council-prompt.txt'),
+            '--output-format',
+            'streaming-messages-json',
+            '--sandbox',
+            'read-only',
+            '--no-plan',
+            '--no-subagents',
+            '--no-memory',
+            '--disable-web-search',
+            // Grok treats an empty --tools value as "unset"; a deliberately impossible tool id
+            // makes the allowlist non-empty while matching no built-in, hosted or MCP tool.
+            '--tools',
+            '__claude_council_no_tools__',
+            '--max-turns',
+            '1',
+            '--verbatim',
+            ...(override ? ['-m', override] : []),
+          ],
+          stdin: '',
+          timeoutMs,
+          cwd: tmpdir(),
+          files: { 'council-prompt.txt': councilPrompt },
+        };
+      },
+      output: extractGrokOutput,
+    },
+    transport,
+    resolveExecutable,
+  );
+}
+
+export interface XaiAdapterOptions {
+  env?: Readonly<Record<string, string | undefined>> | undefined;
+  httpTransport?: HttpTransport | undefined;
+  cliTransport?: CliTransport | undefined;
+  resolveExecutable?: (() => string | undefined) | undefined;
+  modelOverride?: (() => string | undefined) | undefined;
+  transportPreference?: 'http' | 'subscription-cli' | undefined;
+}
+
+const xaiUnconfiguredReason =
+  'set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
+
+function withTransportResolution(
+  adapter: ProviderAdapter,
+  transportResolution: ProviderTransportResolution,
+): ProviderAdapter {
+  return {
+    ...adapter,
+    transportResolution,
+    async availability(context) {
+      const availability = await adapter.availability(context);
+      return availability.status === 'available'
+        ? { ...availability, reason: transportResolution.reason }
+        : availability;
+    },
+    async probe(context) {
+      const health = await adapter.probe(context);
+      return health.status === 'healthy'
+        ? { ...health, reason: transportResolution.reason }
+        : health;
+    },
+  };
+}
+
+function createUnconfiguredXaiAdapter(): ProviderAdapter {
+  const family = 'xai' as const;
+  const transportResolution: ProviderTransportResolution = {
+    preferred: 'http',
+    effective: null,
+    reason: xaiUnconfiguredReason,
+  };
+  const adapter: ProviderAdapter = {
+    family,
+    transport: 'http',
+    transportResolution,
+    async availability(context) {
+      return {
+        status: 'unconfigured',
+        provider: family,
+        model: context.registry.xai.primary,
+        reason: xaiUnconfiguredReason,
+      };
+    },
+    async invoke(request) {
+      return seatError(
+        request,
+        family,
+        request.context.registry.xai.primary,
+        'skipped',
+        'missing-xai-transport',
+        xaiUnconfiguredReason,
+        0,
+      );
+    },
+    async probe(context) {
+      return healthFromResponse(
+        await adapter.invoke({
+          context,
+          seatId: 'health-xai',
+          role: 'health',
+          prompt: healthPrompt,
+        }),
+      );
+    },
+  };
+  return adapter;
+}
+
+/** Resolves xAI once at adapter construction: HTTPS first, then subscription CLI. */
+export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapter {
+  const env = options.env ?? process.env;
+  if (env.XAI_API_KEY && options.transportPreference !== 'subscription-cli') {
+    return withTransportResolution(
+      createHttpAdapter(
+        {
+          family: 'xai',
+          credential: 'XAI_API_KEY',
+          endpoint: 'https://api.x.ai/v1/chat/completions',
+          allowRegistryFallback: false,
+        },
+        options.httpTransport,
+      ),
+      {
+        preferred: 'http',
+        effective: 'http',
+        reason: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
+      },
+    );
+  }
+
+  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
+  if (executable) {
+    return withTransportResolution(
+      createXaiSubscriptionAdapter(
+        options.cliTransport,
+        () => executable,
+        options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined),
+      ),
+      {
+        preferred: 'http',
+        effective: 'subscription-cli',
+        reason:
+          env.XAI_API_KEY && options.transportPreference === 'subscription-cli'
+            ? 'The subscription CLI was explicitly preferred and grok resolved on PATH; HTTPS was not used.'
+            : 'XAI_API_KEY is not set; resolved the grok subscription CLI on PATH.',
+      },
+    );
+  }
+  if (env.XAI_API_KEY) {
+    return withTransportResolution(
+      createHttpAdapter(
+        {
+          family: 'xai',
+          credential: 'XAI_API_KEY',
+          endpoint: 'https://api.x.ai/v1/chat/completions',
+          allowRegistryFallback: false,
+        },
+        options.httpTransport,
+      ),
+      {
+        preferred: 'http',
+        effective: 'http',
+        reason:
+          'The subscription CLI was explicitly preferred but grok was not found on PATH; resolved HTTPS because XAI_API_KEY is set.',
+      },
+    );
+  }
+  return createUnconfiguredXaiAdapter();
 }
 
 export function createAnthropicAdapter(

@@ -2,14 +2,17 @@ import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
+import packageManifest from '../package.json';
 import {
   DataClassificationSchema,
   MotionImpactSchema,
+  ModelRegistryProvenanceSchema,
   ProjectPolicySchema,
   ProviderFamilySchema,
   RefinementTriggerSchema,
   RunManifestSchema,
   type DataClassification,
+  type ModelRegistryProvenance,
   type ProjectPolicy,
   type ProviderFamily,
   type RefinementTrigger,
@@ -20,6 +23,7 @@ import {
   type ProviderAdapter,
   type ProviderContext,
   type ProviderDiagnostic,
+  type ProviderTransportResolution,
 } from './execution/provider';
 import {
   CouncilRunner,
@@ -29,7 +33,13 @@ import {
 import { snapshot } from './health/baseline';
 import { doctor } from './health/doctor';
 import { probeRoster, type ProviderProbe } from './health/probe';
-import { loadModelRegistry, type ModelRegistry } from './models/registry';
+import {
+  loadModelRegistryWithProvenance,
+  ModelRegistrySchema,
+  resolveModelRegistry,
+  type LoadedModelRegistry,
+  type ModelRegistry,
+} from './models/registry';
 import { evaluateOutbound, type PolicyDecision } from './policy/data-guard';
 import { scanAndRedact } from './policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './providers';
@@ -55,6 +65,7 @@ import {
   type RoleAssignment,
 } from './roles/allocator';
 
+export const ADAPTER_CONTRACT_VERSION = 1 as const;
 const SCHEMA_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_SEAT_COUNT = 5;
@@ -71,6 +82,14 @@ interface UnavailableProvider {
   readonly reason: UnavailableProviderReason;
   readonly detail: string;
 }
+const PACKAGE_VERSION = z.string().trim().min(1).parse(packageManifest.version);
+const EXECUTABLE_PATH = resolve(import.meta.main ? Bun.main : import.meta.path);
+const INSTALLER_PROVENANCE_VALUE_SCHEMA = z
+  .string()
+  .trim()
+  .min(1)
+  .max(2_048)
+  .refine((value) => !/[\r\n]/.test(value), 'must be a single line');
 const SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const BOOLEAN_FLAGS = new Set(['dry-run', 'json', 'contested', 'help']);
 const COMMON_RUN_FLAGS = new Set([
@@ -87,6 +106,7 @@ const COMMON_RUN_FLAGS = new Set([
   'project-policy',
   'providers',
   'refinement-question',
+  'registry',
   'records-root',
   'rounds',
   'run-id',
@@ -94,6 +114,7 @@ const COMMON_RUN_FLAGS = new Set([
   'timeout-ms',
 ]);
 const COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, 'min-families']);
+const REGISTRY_REPORT_FLAGS = new Set(['help', 'json', 'records-root', 'registry']);
 
 interface ParsedArguments {
   readonly flags: ReadonlyMap<string, readonly string[]>;
@@ -123,8 +144,39 @@ interface RunOptions {
   readonly recordsRoot?: string;
 }
 
+interface ConfiguredModelRegistry extends LoadedModelRegistry {
+  readonly stateRoot?: string;
+}
+
+interface InstallerSuppliedProvenance {
+  readonly value: string;
+  readonly source: 'installer-supplied';
+  readonly selfAttested: false;
+}
+
+interface EngineIdentityBase {
+  readonly executablePath: string;
+  readonly packageVersion: string;
+  readonly stateRoot: string | null;
+  readonly routes: ModelRegistry;
+  readonly registryProvenance: ModelRegistryProvenance;
+  readonly adapterContractVersion: typeof ADAPTER_CONTRACT_VERSION;
+}
+
+export type EngineIdentity = EngineIdentityBase &
+  (
+    | {
+        readonly installerProvenance: InstallerSuppliedProvenance;
+      }
+    | {
+        readonly installerProvenance: null;
+        readonly reason: string;
+      }
+  );
+
 export interface CliFacadeEnvironment {
   readonly registry?: ModelRegistry;
+  readonly registryProvenance?: ModelRegistryProvenance;
   readonly adapters?: Partial<Record<ProviderFamily, ProviderAdapter>>;
   readonly projectPolicy?: ProjectPolicy;
   readonly assignmentHistory?: AssignmentHistory;
@@ -208,6 +260,79 @@ function integerFlag(
     throw new Error(`Option --${name} must be an integer from ${minimum} to ${maximum}`);
   }
   return parsedValue;
+}
+
+function resolvedRecordsRoot(
+  parsed: ParsedArguments,
+  environment: CliFacadeEnvironment,
+): string | undefined {
+  const value = oneFlag(parsed, 'records-root') ?? environment.recordsRoot;
+  if (value === undefined) return undefined;
+  if (value.trim().length === 0) throw new Error('Records root must not be blank');
+  const cwd = resolve(environment.cwd ?? process.cwd());
+  return isAbsolute(value) ? resolve(value) : resolve(cwd, value);
+}
+
+async function configuredModelRegistry(
+  parsed: ParsedArguments,
+  environment: CliFacadeEnvironment,
+): Promise<ConfiguredModelRegistry> {
+  const stateRoot = resolvedRecordsRoot(parsed, environment);
+  const explicitOverride = oneFlag(parsed, 'registry');
+  if (explicitOverride !== undefined || environment.registry === undefined) {
+    const loaded = await resolveModelRegistry({
+      ...(explicitOverride === undefined ? {} : { overridePath: explicitOverride }),
+      ...(stateRoot === undefined ? {} : { recordsRoot: stateRoot }),
+      cwd: environment.cwd ?? process.cwd(),
+      env: environment.env ?? process.env,
+    });
+    return { ...loaded, ...(stateRoot === undefined ? {} : { stateRoot }) };
+  }
+
+  const registry = ModelRegistrySchema.parse(environment.registry);
+  const builtIn = await loadModelRegistryWithProvenance();
+  if (
+    environment.registryProvenance === undefined &&
+    JSON.stringify(registry) !== JSON.stringify(builtIn.registry)
+  ) {
+    throw new Error('An injected model registry requires explicit registry provenance');
+  }
+  const provenance = ModelRegistryProvenanceSchema.parse(
+    environment.registryProvenance ?? builtIn.provenance,
+  );
+  return { registry, provenance, ...(stateRoot === undefined ? {} : { stateRoot }) };
+}
+
+function engineIdentity(
+  configured: ConfiguredModelRegistry,
+  environment: CliFacadeEnvironment,
+): EngineIdentity {
+  const base: EngineIdentityBase = {
+    executablePath: EXECUTABLE_PATH,
+    packageVersion: PACKAGE_VERSION,
+    stateRoot: configured.stateRoot ?? null,
+    routes: configured.registry,
+    registryProvenance: configured.provenance,
+    adapterContractVersion: ADAPTER_CONTRACT_VERSION,
+  };
+  const suppliedValue = (environment.env ?? process.env).COUNCIL_INSTALLER_PROVENANCE?.trim();
+  if (!suppliedValue) {
+    return {
+      ...base,
+      installerProvenance: null,
+      reason:
+        'COUNCIL_INSTALLER_PROVENANCE was not supplied; installer provenance cannot be self-attested.',
+    };
+  }
+
+  return {
+    ...base,
+    installerProvenance: {
+      value: INSTALLER_PROVENANCE_VALUE_SCHEMA.parse(suppliedValue),
+      source: 'installer-supplied',
+      selfAttested: false,
+    },
+  };
 }
 
 function safeStorageId(value: string, label: string): string {
@@ -324,11 +449,11 @@ function commandDefaults(command: RunOptions['command']): {
 
 async function parseRunOptions(
   command: RunOptions['command'],
-  args: readonly string[],
+  parsed: ParsedArguments,
   environment: CliFacadeEnvironment,
   registry: ModelRegistry,
+  recordsRoot: string | undefined,
 ): Promise<RunOptions> {
-  const parsed = parseArguments(args, command === 'council' ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
   if (parsed.positionals.length > 0) throw new Error('Run commands accept options only');
   const now = (environment.now ?? (() => new Date().toISOString()))();
   const cwd = environment.cwd ?? process.cwd();
@@ -425,9 +550,7 @@ async function parseRunOptions(
     ...(minimumFamilies === undefined ? {} : { minimumFamilies }),
     ...(refinementTrigger === undefined ? {} : { refinementTrigger }),
     timeoutMs: integerFlag(parsed, 'timeout-ms', DEFAULT_TIMEOUT_MS, 1, 3_600_000),
-    ...((oneFlag(parsed, 'records-root') ?? environment.recordsRoot) === undefined
-      ? {}
-      : { recordsRoot: oneFlag(parsed, 'records-root') ?? environment.recordsRoot }),
+    ...(recordsRoot === undefined ? {} : { recordsRoot }),
   };
 }
 
@@ -458,6 +581,7 @@ function quorumPolicy(options: RunOptions): RunManifest['quorumPolicy'] {
 function buildManifestAndAssignments(
   options: RunOptions,
   registry: ModelRegistry,
+  registryProvenance: ModelRegistryProvenance,
   history: AssignmentHistory,
 ): {
   manifest: RunManifest;
@@ -495,6 +619,7 @@ function buildManifestAndAssignments(
     scope: options.scope,
     classification: options.classification,
     routes,
+    registryProvenance,
     lenses,
     rounds: options.rounds,
     ...(options.refinementTrigger === undefined
@@ -721,8 +846,16 @@ async function runCouncilCommand(
   args: readonly string[],
   environment: CliFacadeEnvironment,
 ): Promise<CliFacadeResult> {
-  const registry = environment.registry ?? (await loadModelRegistry());
-  const options = await parseRunOptions(command, args, environment, registry);
+  const parsed = parseArguments(args, command === 'council' ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
+  const configured = await configuredModelRegistry(parsed, environment);
+  const registry = configured.registry;
+  const options = await parseRunOptions(
+    command,
+    parsed,
+    environment,
+    registry,
+    configured.stateRoot,
+  );
   const requestedProviderFamilies = options.providerFamilies;
   const destinations = requestedProviderFamilies.map((provider) => ({
     provider,
@@ -758,7 +891,12 @@ async function runCouncilCommand(
 
   if (options.dryRun) {
     const assignmentHistory = await loadAssignmentHistory(options, environment);
-    const { manifest } = buildManifestAndAssignments(options, registry, assignmentHistory);
+    const { manifest } = buildManifestAndAssignments(
+      options,
+      registry,
+      configured.provenance,
+      assignmentHistory,
+    );
     const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
@@ -785,7 +923,8 @@ async function runCouncilCommand(
     });
   }
 
-  const adapters = environment.adapters ?? createProviderRoster();
+  const adapters =
+    environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
   const diagnostics: ProviderDiagnostic[] = [];
   const context: ProviderContext = {
     registry,
@@ -848,6 +987,7 @@ async function runCouncilCommand(
   const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(
     executionOptions,
     registry,
+    configured.provenance,
     assignmentHistory,
   );
   const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
@@ -902,18 +1042,22 @@ async function runCouncilCommand(
   });
 }
 
-async function providerContext(environment: CliFacadeEnvironment): Promise<{
-  registry: ModelRegistry;
+async function providerContext(
+  parsed: ParsedArguments,
+  environment: CliFacadeEnvironment,
+): Promise<{
+  configured: ConfiguredModelRegistry;
   roster: ProviderRoster | Partial<Record<ProviderFamily, ProviderAdapter>>;
   context: ProviderContext;
 }> {
-  const registry = environment.registry ?? (await loadModelRegistry());
-  const roster = environment.adapters ?? createProviderRoster();
+  const configured = await configuredModelRegistry(parsed, environment);
+  const roster =
+    environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
   return {
-    registry,
+    configured,
     roster,
     context: {
-      registry,
+      registry: configured.registry,
       env: environment.env ?? process.env,
       cwd: environment.cwd ?? process.cwd(),
       timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -930,21 +1074,67 @@ function orderedAdapters(
   });
 }
 
+function providerTransportResolution(
+  provider: ProviderFamily,
+  registry: ModelRegistry,
+  roster: Partial<Record<ProviderFamily, ProviderAdapter>>,
+): ProviderTransportResolution {
+  const adapter = roster[provider];
+  if (adapter === undefined) {
+    return {
+      preferred: registry[provider].transport,
+      effective: null,
+      reason: 'No adapter is available for this provider family.',
+    };
+  }
+  if (adapter.transportResolution !== undefined) {
+    return {
+      ...adapter.transportResolution,
+      preferred: registry[provider].transport,
+    };
+  }
+  return {
+    preferred: registry[provider].transport,
+    effective: adapter.transport,
+    reason: 'The adapter uses its governed preferred transport.',
+  };
+}
+
+function selfCheckTransportResolutions(
+  registry: ModelRegistry,
+  roster: Partial<Record<ProviderFamily, ProviderAdapter>>,
+): Record<ProviderFamily, ProviderTransportResolution> {
+  return {
+    anthropic: providerTransportResolution('anthropic', registry, roster),
+    openai: providerTransportResolution('openai', registry, roster),
+    xai: providerTransportResolution('xai', registry, roster),
+    google: providerTransportResolution('google', registry, roster),
+    deepseek: providerTransportResolution('deepseek', registry, roster),
+    moonshot: providerTransportResolution('moonshot', registry, roster),
+  };
+}
+
 async function healthCommand(
   command: 'health' | 'doctor',
   args: readonly string[],
   environment: CliFacadeEnvironment,
 ): Promise<CliFacadeResult> {
-  const parsed = parseArguments(args, new Set(['help', 'json']));
+  const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
   if (parsed.positionals.length > 0) throw new Error(`${command} accepts no positional arguments`);
-  const configured = await providerContext(environment);
-  const adapters = orderedAdapters(configured.roster);
+  const providerConfiguration = await providerContext(parsed, environment);
+  const adapters = orderedAdapters(providerConfiguration.roster);
   if (command === 'doctor') {
-    const report = await doctor(adapters, configured.context);
-    return output(0, report);
+    const report = await doctor(adapters, providerConfiguration.context);
+    return output(0, {
+      ...report,
+      engineIdentity: engineIdentity(providerConfiguration.configured, environment),
+    });
   }
-  const probes = await probeRoster(adapters, configured.context);
-  return output(0, snapshot(probes, configured.registry));
+  const probes = await probeRoster(adapters, providerConfiguration.context);
+  return output(0, {
+    ...snapshot(probes, providerConfiguration.configured.registry),
+    registryProvenance: providerConfiguration.configured.provenance,
+  });
 }
 
 function recordsDirectory(root: string, scope: 'general' | 'project', projectId?: string): string {
@@ -1072,6 +1262,7 @@ function help(): CliFacadeResult {
       'health',
       'doctor',
       'migrate-general',
+      'version',
       'self-check',
     ],
     invocation: 'All execution is explicit; no automatic hook starts a council.',
@@ -1080,6 +1271,20 @@ function help(): CliFacadeResult {
       '--min-families <n>':
         'Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker.',
     },
+    registryOptions: {
+      '--registry <path>':
+        'Use this strict partial registry override instead of the default locations.',
+      '--records-root <path>':
+        'Use <records-root>/models.json when present and report this resolved state root.',
+    },
+    registryPrecedence: [
+      '--registry <path>',
+      '<records-root>/models.json when present',
+      '~/.claude/council/models.json when present',
+      'built-in registry',
+    ],
+    installerProvenance:
+      'Installers may set COUNCIL_INSTALLER_PROVENANCE; the engine reports it as installer-supplied and never self-attests a source commit.',
   });
 }
 
@@ -1101,16 +1306,30 @@ export async function runCliFacade(
       return await storedSessionCommand(command, args);
     }
     if (command === 'migrate-general') return await migrationCommand(args, environment);
+    if (command === 'version') {
+      const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
+      if (parsed.positionals.length > 0) throw new Error('version accepts no positional arguments');
+      const configured = await configuredModelRegistry(parsed, environment);
+      return output(0, {
+        schemaVersion: SCHEMA_VERSION,
+        command,
+        ...engineIdentity(configured, environment),
+      });
+    }
     if (command === 'self-check') {
-      const parsed = parseArguments(args, new Set(['help', 'json']));
+      const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0)
         throw new Error('self-check accepts no positional arguments');
-      const registry = environment.registry ?? (await loadModelRegistry());
+      const configured = await configuredModelRegistry(parsed, environment);
+      const roster =
+        environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
       return output(0, {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
         providers: ProviderFamilySchema.options,
-        routes: registry,
+        routes: configured.registry,
+        transportResolutions: selfCheckTransportResolutions(configured.registry, roster),
+        registryProvenance: configured.provenance,
         lenses: roleCatalogue.map(({ name, category }) => ({ name, category })),
         runtimeDependencies: ['zod', 'proper-lockfile'],
       });
