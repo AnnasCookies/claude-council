@@ -28,7 +28,7 @@ import {
 } from './execution/runner';
 import { snapshot } from './health/baseline';
 import { doctor } from './health/doctor';
-import { probeRoster } from './health/probe';
+import { probeRoster, type ProviderProbe } from './health/probe';
 import { loadModelRegistry, type ModelRegistry } from './models/registry';
 import { evaluateOutbound, type PolicyDecision } from './policy/data-guard';
 import { scanAndRedact } from './policy/secrets';
@@ -58,6 +58,19 @@ import {
 const SCHEMA_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 300_000;
 const DEFAULT_SEAT_COUNT = 5;
+const DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
+const REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
+const REDUCED_QUORUM_WARNING =
+  'REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.';
+
+type UnavailableProviderReason =
+  'missing key' | 'unconfigured' | 'unhealthy' | 'identity-unverified' | 'unsafe-transport';
+
+interface UnavailableProvider {
+  readonly provider: ProviderFamily;
+  readonly reason: UnavailableProviderReason;
+  readonly detail: string;
+}
 const SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const BOOLEAN_FLAGS = new Set(['dry-run', 'json', 'contested', 'help']);
 const COMMON_RUN_FLAGS = new Set([
@@ -80,6 +93,7 @@ const COMMON_RUN_FLAGS = new Set([
   'scope',
   'timeout-ms',
 ]);
+const COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, 'min-families']);
 
 interface ParsedArguments {
   readonly flags: ReadonlyMap<string, readonly string[]>;
@@ -104,6 +118,8 @@ interface RunOptions {
   readonly rounds: number;
   readonly refinementTrigger?: RefinementTrigger;
   readonly timeoutMs: number;
+  readonly minimumFamilies?: number;
+  readonly reducedQuorumWarning?: string;
   readonly recordsRoot?: string;
 }
 
@@ -215,6 +231,31 @@ function safeError(error: unknown): string {
   return (redacted || 'Council command failed').slice(0, 500);
 }
 
+function unavailableProvider(probe: ProviderProbe): UnavailableProvider {
+  const reason: UnavailableProviderReason =
+    probe.status === 'identity-unverified'
+      ? 'identity-unverified'
+      : probe.status === 'down'
+        ? 'unhealthy'
+        : probe.status === 'unsafe-transport'
+          ? 'unsafe-transport'
+          : /^missing\s+\S+/i.test(probe.reason)
+            ? 'missing key'
+            : 'unconfigured';
+  return {
+    provider: probe.provider,
+    reason,
+    detail: probe.reason || reason,
+  };
+}
+
+function autoReducedQuorumWarning(unavailable: readonly UnavailableProvider[]): string {
+  const unavailableSummary = unavailable
+    .map(({ provider, reason, detail }) => `${provider} — ${reason} (${detail})`)
+    .join('; ');
+  return `REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: ${unavailableSummary}.`;
+}
+
 function selectProviderFamilies(
   value: string | undefined,
   registry: ModelRegistry,
@@ -287,7 +328,7 @@ async function parseRunOptions(
   environment: CliFacadeEnvironment,
   registry: ModelRegistry,
 ): Promise<RunOptions> {
-  const parsed = parseArguments(args, COMMON_RUN_FLAGS);
+  const parsed = parseArguments(args, command === 'council' ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
   if (parsed.positionals.length > 0) throw new Error('Run commands accept options only');
   const now = (environment.now ?? (() => new Date().toISOString()))();
   const cwd = environment.cwd ?? process.cwd();
@@ -301,6 +342,16 @@ async function parseRunOptions(
   const impact = MotionImpactSchema.parse(oneFlag(parsed, 'impact') ?? defaults.impact);
   const contested = hasFlag(parsed, 'contested') || defaults.contested;
   const rounds = integerFlag(parsed, 'rounds', defaults.rounds, 1, 3);
+  const minimumFamilies =
+    command === 'council' && parsed.flags.has('min-families')
+      ? integerFlag(
+          parsed,
+          'min-families',
+          DEFAULT_COUNCIL_MINIMUM_FAMILIES,
+          REDUCED_COUNCIL_MINIMUM_FAMILIES,
+          ProviderFamilySchema.options.length,
+        )
+      : undefined;
   const significant = command === 'council' || impact === 'high' || contested;
   if (!significant && rounds !== 1) {
     throw new Error('Ordinary motions require exactly one blind round');
@@ -371,6 +422,7 @@ async function parseRunOptions(
     contested,
     domains: uniqueDomains,
     rounds,
+    ...(minimumFamilies === undefined ? {} : { minimumFamilies }),
     ...(refinementTrigger === undefined ? {} : { refinementTrigger }),
     timeoutMs: integerFlag(parsed, 'timeout-ms', DEFAULT_TIMEOUT_MS, 1, 3_600_000),
     ...((oneFlag(parsed, 'records-root') ?? environment.recordsRoot) === undefined
@@ -382,9 +434,24 @@ async function parseRunOptions(
 function quorumPolicy(options: RunOptions): RunManifest['quorumPolicy'] {
   const significant =
     options.command === 'council' || options.impact === 'high' || options.contested;
+  const minimumDistinctFamilies =
+    options.command === 'council'
+      ? (options.minimumFamilies ?? DEFAULT_COUNCIL_MINIMUM_FAMILIES)
+      : significant
+        ? 4
+        : 3;
   return {
-    minimumDistinctFamilies: significant ? 4 : 3,
+    minimumDistinctFamilies,
     requiresContrarian: significant,
+    ...(options.command === 'council' && minimumDistinctFamilies < DEFAULT_COUNCIL_MINIMUM_FAMILIES
+      ? {
+          reducedQuorum: {
+            standingDefaultMinimumDistinctFamilies: DEFAULT_COUNCIL_MINIMUM_FAMILIES,
+            weakerThanStandingDefault: true as const,
+            warning: options.reducedQuorumWarning ?? REDUCED_QUORUM_WARNING,
+          },
+        }
+      : {}),
   };
 }
 
@@ -397,9 +464,11 @@ function buildManifestAndAssignments(
   assignments: CouncilSeatAssignment[];
   roleAssignments: RoleAssignment[];
 } {
+  const policy = quorumPolicy(options);
   const lenses = selectLenses(
     { domains: [...options.domains], impact: options.impact, contested: options.contested },
     options.providerFamilies.length,
+    { allowReducedThreeSeatCoverage: policy.reducedQuorum !== undefined },
   );
   const seatIds = options.providerFamilies.map((provider) => `${provider}-seat`);
   const roleAssignments = assignLenses(options.runId, options.motionId, seatIds, lenses, history);
@@ -431,7 +500,7 @@ function buildManifestAndAssignments(
     ...(options.refinementTrigger === undefined
       ? {}
       : { refinementTrigger: options.refinementTrigger }),
-    quorumPolicy: quorumPolicy(options),
+    quorumPolicy: policy,
     evidenceReferences: [],
   });
   return { manifest, assignments, roleAssignments };
@@ -516,6 +585,17 @@ async function persistRun(
   }
   const store = CouncilStore.open(options.recordsRoot);
   const status = result.outcome;
+  const outcomeSummary =
+    status === 'completed'
+      ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.`
+      : status === 'degraded'
+        ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.`
+        : `Quorum blocked: ${result.quorum.failureReasons.join(', ') || 'insufficient responses'}.`;
+  const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
+  const sessionSummary =
+    reducedQuorumWarning === undefined
+      ? outcomeSummary
+      : `${reducedQuorumWarning} ${outcomeSummary}`;
   const sessionBase = {
     runId: options.runId,
     motionId: options.motionId,
@@ -540,12 +620,7 @@ async function persistRun(
       quorumPolicy: result.quorumPolicy,
     },
     assignments: roleAssignments,
-    summary:
-      status === 'completed'
-        ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.`
-        : status === 'degraded'
-          ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.`
-          : `Quorum blocked: ${result.quorum.failureReasons.join(', ') || 'insufficient responses'}.`,
+    summary: sessionSummary,
   } as const;
   const session: SessionRecord =
     options.scope === 'general'
@@ -594,6 +669,53 @@ async function persistRun(
   }
 }
 
+async function resolveCouncilProviders(
+  options: RunOptions,
+  adapters: Partial<Record<ProviderFamily, ProviderAdapter>>,
+  context: ProviderContext,
+): Promise<{
+  providerFamilies: ProviderFamily[];
+  unavailableProviders: UnavailableProvider[];
+}> {
+  const candidateAdapters = options.providerFamilies.flatMap((provider) => {
+    const adapter = adapters[provider];
+    return adapter === undefined ? [] : [adapter];
+  });
+  const probes = await probeRoster(candidateAdapters, context);
+  const providerFamilies: ProviderFamily[] = [];
+  const unavailableProviders: UnavailableProvider[] = [];
+  let probeIndex = 0;
+
+  for (const provider of options.providerFamilies) {
+    const adapter = adapters[provider];
+    if (adapter === undefined) {
+      unavailableProviders.push({
+        provider,
+        reason: 'unhealthy',
+        detail: 'provider adapter is unavailable',
+      });
+      continue;
+    }
+    const probe = probes[probeIndex];
+    probeIndex += 1;
+    if (probe === undefined || probe.provider !== provider) {
+      unavailableProviders.push({
+        provider,
+        reason: 'unhealthy',
+        detail: 'provider health result did not match the requested family',
+      });
+      continue;
+    }
+    if (probe.status === 'healthy') {
+      providerFamilies.push(provider);
+    } else {
+      unavailableProviders.push(unavailableProvider(probe));
+    }
+  }
+
+  return { providerFamilies, unavailableProviders };
+}
+
 async function runCouncilCommand(
   command: RunOptions['command'],
   args: readonly string[],
@@ -601,7 +723,8 @@ async function runCouncilCommand(
 ): Promise<CliFacadeResult> {
   const registry = environment.registry ?? (await loadModelRegistry());
   const options = await parseRunOptions(command, args, environment, registry);
-  const destinations = options.providerFamilies.map((provider) => ({
+  const requestedProviderFamilies = options.providerFamilies;
+  const destinations = requestedProviderFamilies.map((provider) => ({
     provider,
     model: registry[provider].primary,
   }));
@@ -621,43 +744,44 @@ async function runCouncilCommand(
       command,
       status: 'blocked-policy',
       preflight: {
-        selectedProviders: options.providerFamilies,
+        requestedProviders: requestedProviderFamilies,
+        selectedProviders: requestedProviderFamilies,
+        unavailableProviders: [],
         eligibleProviders: options.eligibleProviderFamilies,
         omittedEligibleProviders: options.eligibleProviderFamilies.filter(
-          (provider) => !options.providerFamilies.includes(provider),
+          (provider) => !requestedProviderFamilies.includes(provider),
         ),
         decision: policyDecision,
       },
     });
   }
 
-  const assignmentHistory = await loadAssignmentHistory(options, environment);
-  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(
-    options,
-    registry,
-    assignmentHistory,
-  );
-  const preflight = {
-    classification: policyDecision.effectiveClassification,
-    destinations: policyDecision.dispositions,
-    selectedProviders: options.providerFamilies,
-    eligibleProviders: options.eligibleProviderFamilies,
-    omittedEligibleProviders: options.eligibleProviderFamilies.filter(
-      (provider) => !options.providerFamilies.includes(provider),
-    ),
-    redactionCount: policyDecision.redactions.reduce(
-      (count, redaction) => count + redaction.findings.length,
-      0,
-    ),
-  };
   if (options.dryRun) {
+    const assignmentHistory = await loadAssignmentHistory(options, environment);
+    const { manifest } = buildManifestAndAssignments(options, registry, assignmentHistory);
+    const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       command,
       status: 'dry-run',
       runId: options.runId,
+      ...(reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning }),
       manifest,
-      preflight,
+      preflight: {
+        classification: policyDecision.effectiveClassification,
+        destinations: policyDecision.dispositions,
+        requestedProviders: requestedProviderFamilies,
+        selectedProviders: requestedProviderFamilies,
+        unavailableProviders: [],
+        eligibleProviders: options.eligibleProviderFamilies,
+        omittedEligibleProviders: options.eligibleProviderFamilies.filter(
+          (provider) => !requestedProviderFamilies.includes(provider),
+        ),
+        redactionCount: policyDecision.redactions.reduce(
+          (count, redaction) => count + redaction.findings.length,
+          0,
+        ),
+      },
     });
   }
 
@@ -672,20 +796,90 @@ async function runCouncilCommand(
       diagnostics.push(diagnostic);
     },
   };
+  let executionOptions = options;
+  let unavailableProviders: UnavailableProvider[] = [];
+
+  if (command === 'council') {
+    const readiness = await resolveCouncilProviders(options, adapters, context);
+    unavailableProviders = readiness.unavailableProviders;
+    const minimumFamilies =
+      options.minimumFamilies ??
+      (readiness.providerFamilies.length >= DEFAULT_COUNCIL_MINIMUM_FAMILIES
+        ? DEFAULT_COUNCIL_MINIMUM_FAMILIES
+        : REDUCED_COUNCIL_MINIMUM_FAMILIES);
+    const preflight = {
+      classification: policyDecision.effectiveClassification,
+      destinations: policyDecision.dispositions,
+      requestedProviders: requestedProviderFamilies,
+      selectedProviders: readiness.providerFamilies,
+      unavailableProviders,
+      eligibleProviders: options.eligibleProviderFamilies,
+      omittedEligibleProviders: options.eligibleProviderFamilies.filter(
+        (provider) => !requestedProviderFamilies.includes(provider),
+      ),
+      redactionCount: policyDecision.redactions.reduce(
+        (count, redaction) => count + redaction.findings.length,
+        0,
+      ),
+    };
+    if (readiness.providerFamilies.length < minimumFamilies) {
+      return output(4, undefined, {
+        schemaVersion: SCHEMA_VERSION,
+        command,
+        status: 'blocked-quorum',
+        runId: options.runId,
+        message: `Council requires at least ${minimumFamilies} configured, reachable provider families; found ${readiness.providerFamilies.length}.`,
+        preflight,
+      });
+    }
+    executionOptions = {
+      ...options,
+      providerFamilies: readiness.providerFamilies,
+      minimumFamilies,
+      ...(minimumFamilies === REDUCED_COUNCIL_MINIMUM_FAMILIES &&
+      readiness.providerFamilies.length === REDUCED_COUNCIL_MINIMUM_FAMILIES &&
+      unavailableProviders.length > 0
+        ? { reducedQuorumWarning: autoReducedQuorumWarning(unavailableProviders) }
+        : {}),
+    };
+  }
+
+  const assignmentHistory = await loadAssignmentHistory(executionOptions, environment);
+  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(
+    executionOptions,
+    registry,
+    assignmentHistory,
+  );
+  const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
+  const preflight = {
+    classification: policyDecision.effectiveClassification,
+    destinations: policyDecision.dispositions,
+    requestedProviders: requestedProviderFamilies,
+    selectedProviders: executionOptions.providerFamilies,
+    unavailableProviders,
+    eligibleProviders: options.eligibleProviderFamilies,
+    omittedEligibleProviders: options.eligibleProviderFamilies.filter(
+      (provider) => !requestedProviderFamilies.includes(provider),
+    ),
+    redactionCount: policyDecision.redactions.reduce(
+      (count, redaction) => count + redaction.findings.length,
+      0,
+    ),
+  };
   const runner = new CouncilRunner({ adapters, context });
   const execution = await runner.run({
-    runId: options.runId,
-    motion: options.motion,
-    rounds: options.rounds,
+    runId: executionOptions.runId,
+    motion: executionOptions.motion,
+    rounds: executionOptions.rounds,
     assignments,
     quorumPolicy: manifest.quorumPolicy,
-    ...(options.refinementTrigger === undefined
+    ...(executionOptions.refinementTrigger === undefined
       ? {}
-      : { refinementTrigger: options.refinementTrigger }),
+      : { refinementTrigger: executionOptions.refinementTrigger }),
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
   const records = await persistRun(
-    options,
+    executionOptions,
     policyDecision,
     manifest,
     execution,
@@ -698,7 +892,8 @@ async function runCouncilCommand(
     schemaVersion: SCHEMA_VERSION,
     command,
     status,
-    runId: options.runId,
+    runId: executionOptions.runId,
+    ...(reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning }),
     manifest,
     preflight,
     execution: publicExecution(execution),
@@ -881,6 +1076,10 @@ function help(): CliFacadeResult {
     ],
     invocation: 'All execution is explicit; no automatic hook starts a council.',
     defaultSeatCount: DEFAULT_SEAT_COUNT,
+    councilOptions: {
+      '--min-families <n>':
+        'Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker.',
+    },
   });
 }
 

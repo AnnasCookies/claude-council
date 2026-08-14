@@ -117,6 +117,11 @@ function unsuccessfulResponse(
   request: ProviderRequest,
   provider: ProviderFamily,
   status: 'failed' | 'skipped' | 'timed-out' | 'cancelled',
+  options: {
+    code?: string;
+    message?: string;
+    retryable?: boolean;
+  } = {},
 ): SeatResponse {
   return {
     status,
@@ -126,9 +131,9 @@ function unsuccessfulResponse(
     role: request.role,
     latencyMs: 1,
     error: {
-      code: `fixture-${status}`,
-      message: `Deterministic ${status} fixture.`,
-      retryable: false,
+      code: options.code ?? `fixture-${status}`,
+      message: options.message ?? `Deterministic ${status} fixture.`,
+      retryable: options.retryable ?? false,
     },
   };
 }
@@ -173,8 +178,10 @@ describe('CouncilRunner', () => {
     ]);
     const google = new FakeAdapter('google', [
       (request) => unsuccessfulResponse(request, 'google', 'timed-out'),
+      (request) => unsuccessfulResponse(request, 'google', 'timed-out'),
     ]);
     const deepseek = new FakeAdapter('deepseek', [
+      (request) => unsuccessfulResponse(request, 'deepseek', 'cancelled'),
       (request) => unsuccessfulResponse(request, 'deepseek', 'cancelled'),
     ]);
     const moonshot = new FakeAdapter('moonshot', [
@@ -247,6 +254,173 @@ describe('CouncilRunner', () => {
     await pendingRun;
 
     expect(callsBeforeFirstSeatResolved).toEqual([1, 1]);
+  });
+
+  test('retries a transient timeout once and records the retry without changing the seat', async () => {
+    const diagnostics: ProviderDiagnostic[] = [];
+    const openai = new FakeAdapter('openai', [
+      (request) =>
+        unsuccessfulResponse(request, 'openai', 'timed-out', {
+          code: 'timeout',
+          message: 'First attempt timed out.',
+        }),
+      (request) => successfulResponse(request, 'openai'),
+    ]);
+    const xai = new FakeAdapter('xai', [(request) => successfulResponse(request, 'xai')]);
+    const google = new FakeAdapter('google', [(request) => successfulResponse(request, 'google')]);
+    const runner = new CouncilRunner({
+      adapters: { openai, xai, google },
+      context: {
+        ...providerContext,
+        captureDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      },
+    });
+
+    const result = await runner.run(runInput());
+    const round = result.rounds[0];
+    if (!round) throw new Error('runner omitted round one');
+    const openAiResponse = round.responses.find(({ provider }) => provider === 'openai');
+
+    expect(openAiResponse?.status).toBe('ok');
+    expect(openai.calls).toHaveLength(2);
+    expect(openai.calls[1]).toMatchObject({
+      seatId: openai.calls[0]?.seatId,
+      role: openai.calls[0]?.role,
+      prompt: openai.calls[0]?.prompt,
+    });
+    expect(round.retries).toEqual([
+      {
+        seatId: 'openai-seat',
+        provider: 'openai',
+        role: 'architect',
+        attempt: 2,
+        reason: {
+          status: 'timed-out',
+          error: {
+            code: 'timeout',
+            message: 'First attempt timed out.',
+            retryable: false,
+          },
+        },
+      },
+    ]);
+    expect(result.synthesisEligible).toBe(true);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      family: 'openai',
+      seatId: 'openai-seat',
+      code: 'provider-failure',
+    });
+    expect(diagnostics[0]?.rawText).toContain('attempt 2');
+    expect(diagnostics[0]?.rawText).toContain('timeout');
+    expect(diagnostics[0]?.rawText).toContain('First attempt timed out.');
+  });
+
+  test('fails an identity-unverified seat closed without retrying', async () => {
+    const openai = new FakeAdapter('openai', [
+      (request) =>
+        unsuccessfulResponse(request, 'openai', 'failed', {
+          code: 'identity-unverified',
+          message: 'The model identity could not be verified.',
+          retryable: true,
+        }),
+    ]);
+    const runner = new CouncilRunner({
+      adapters: { openai },
+      context: providerContext,
+    });
+
+    const result = await runner.run(runInput());
+    const round = result.rounds[0];
+    const response = round?.responses.find(({ provider }) => provider === 'openai');
+
+    expect(openai.calls).toHaveLength(1);
+    expect(response?.status).toBe('failed');
+    if (response?.status === 'ok') throw new Error('identity-unverified response succeeded');
+    expect(response?.error.code).toBe('identity-unverified');
+    expect(round?.retries).toEqual([]);
+  });
+
+  test('fails a tool-isolation violation closed without retrying', async () => {
+    const openai = new FakeAdapter('openai', [
+      (request) =>
+        unsuccessfulResponse(request, 'openai', 'failed', {
+          code: 'unsafe-tool-isolation',
+          message: 'The provider used a prohibited tool.',
+          retryable: true,
+        }),
+    ]);
+    const runner = new CouncilRunner({
+      adapters: { openai },
+      context: providerContext,
+    });
+
+    const result = await runner.run(runInput());
+    const round = result.rounds[0];
+    const response = round?.responses.find(({ provider }) => provider === 'openai');
+
+    expect(openai.calls).toHaveLength(1);
+    expect(response?.status).toBe('failed');
+    if (response?.status === 'ok') throw new Error('tool-isolation violation succeeded');
+    expect(response?.error.code).toBe('unsafe-tool-isolation');
+    expect(round?.retries).toEqual([]);
+  });
+
+  test('stops after two transient failures and preserves the final failure', async () => {
+    const openai = new FakeAdapter('openai', [
+      (request) =>
+        unsuccessfulResponse(request, 'openai', 'failed', {
+          code: 'spawn-failed',
+          message: 'The CLI process could not be spawned.',
+        }),
+      (request) =>
+        unsuccessfulResponse(request, 'openai', 'timed-out', {
+          code: 'timeout',
+          message: 'The retry timed out.',
+        }),
+    ]);
+    const runner = new CouncilRunner({
+      adapters: { openai },
+      context: providerContext,
+    });
+
+    const result = await runner.run(runInput());
+    const round = result.rounds[0];
+    const response = round?.responses.find(({ provider }) => provider === 'openai');
+
+    expect(openai.calls).toHaveLength(2);
+    expect(response?.status).toBe('timed-out');
+    if (response?.status === 'ok') throw new Error('exhausted transient failures succeeded');
+    expect(response?.error.code).toBe('timeout');
+    expect(round?.retries).toHaveLength(1);
+    expect(round?.retries[0]?.reason.error.code).toBe('spawn-failed');
+  });
+
+  test('does not start a retry when its backoff would exceed the run deadline', async () => {
+    const openai = new FakeAdapter('openai', [
+      (request) =>
+        unsuccessfulResponse(request, 'openai', 'failed', {
+          code: 'network',
+          message: 'The network request failed.',
+        }),
+    ]);
+    const runner = new CouncilRunner({
+      adapters: { openai },
+      context: {
+        ...providerContext,
+        timeoutMs: 50,
+      },
+    });
+
+    const result = await runner.run(runInput());
+    const round = result.rounds[0];
+    const response = round?.responses.find(({ provider }) => provider === 'openai');
+
+    expect(openai.calls).toHaveLength(1);
+    expect(response?.status).toBe('failed');
+    if (response?.status === 'ok') throw new Error('deadline-limited response succeeded');
+    expect(response?.error.code).toBe('network');
+    expect(round?.retries).toEqual([]);
   });
 
   test('fails a governed transport mismatch before invoking the adapter', async () => {

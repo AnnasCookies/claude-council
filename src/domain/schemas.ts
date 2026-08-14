@@ -71,11 +71,48 @@ export const RoleLensSchema = z.strictObject({
 });
 export type RoleLens = z.infer<typeof RoleLensSchema>;
 
-export const QuorumPolicySchema = z.strictObject({
-  minimumDistinctFamilies: z.number().int().min(1).max(ProviderFamilySchema.options.length),
-  requiresContrarian: z.boolean(),
-  chairProvider: ProviderFamilySchema.optional(),
+export const ReducedQuorumNoticeSchema = z.strictObject({
+  standingDefaultMinimumDistinctFamilies: z.literal(4),
+  weakerThanStandingDefault: z.literal(true),
+  warning: NonEmptyStringSchema,
 });
+export type ReducedQuorumNotice = z.infer<typeof ReducedQuorumNoticeSchema>;
+
+export const QuorumPolicySchema = z
+  .strictObject({
+    minimumDistinctFamilies: z.number().int().min(1).max(ProviderFamilySchema.options.length),
+    requiresContrarian: z.boolean(),
+    chairProvider: ProviderFamilySchema.optional(),
+    reducedQuorum: ReducedQuorumNoticeSchema.optional(),
+  })
+  .superRefine((policy, context) => {
+    const notice = policy.reducedQuorum;
+    if (notice === undefined) return;
+
+    if (
+      !policy.requiresContrarian ||
+      policy.minimumDistinctFamilies < 3 ||
+      policy.minimumDistinctFamilies >= notice.standingDefaultMinimumDistinctFamilies
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['reducedQuorum'],
+        message: 'Reduced quorum is valid only for a three-family significant council',
+      });
+    }
+    if (
+      !notice.warning.includes(String(policy.minimumDistinctFamilies)) ||
+      !notice.warning.includes(String(notice.standingDefaultMinimumDistinctFamilies)) ||
+      !/standing default/i.test(notice.warning) ||
+      !/weaker/i.test(notice.warning)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['reducedQuorum', 'warning'],
+        message: 'Reduced-quorum warning must state both family floors and that it is weaker',
+      });
+    }
+  });
 export type QuorumPolicy = z.infer<typeof QuorumPolicySchema>;
 
 export const RunManifestSchema = z.strictObject({

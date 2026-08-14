@@ -425,7 +425,13 @@ interface SubscriptionCliAdapterConfig {
   family: Extract<ProviderFamily, 'openai' | 'google'>;
   executableName: string;
   request(executable: string, route: ModelRoute, prompt: string, timeoutMs: number): CliRequest;
-  output(stdout: string, workingDirectory?: string): SubscriptionCliParseResult;
+  output(
+    stdout: string,
+    workingDirectory: string | undefined,
+    stderr: string,
+    prompt: string,
+    requestedModel: string,
+  ): SubscriptionCliParseResult;
   configurationError?: () => string | undefined;
 }
 
@@ -463,6 +469,15 @@ const OmpAgentEndSchema = z.object({
   type: z.literal('agent_end'),
   messages: z.array(OmpMessageSchema).min(1),
 });
+const codexReasoningEffort = 'xhigh';
+const CodexIdentitySchema = z.object({
+  workdir: z.string().min(1),
+  model: z.string().min(1),
+  provider: z.literal('openai'),
+  approval: z.literal('never'),
+  sandbox: z.literal('read-only'),
+  'reasoning effort': z.literal(codexReasoningEffort),
+});
 
 const AgyEventEnvelopeSchema = z.object({ event: z.string().min(1) }).passthrough();
 const AgyInitEventSchema = z.object({
@@ -471,14 +486,6 @@ const AgyInitEventSchema = z.object({
     model: z.string().min(1),
     cwd: z.string().min(1),
     tools: z.array(z.string().min(1)),
-  }),
-});
-const AgyStepEventSchema = z.object({
-  event: z.literal('step_update'),
-  step_update: z.object({
-    step_index: z.number().int().nonnegative(),
-    state: z.string().min(1),
-    step_type: z.string().min(1),
   }),
 });
 const AgyToolEventSchema = z.object({
@@ -497,11 +504,11 @@ const AgyResultEventSchema = z.object({
   event: z.literal('result'),
   result: z.object({
     status: z.literal('SUCCESS'),
-    response: z.string().min(1),
+    structured_output: z.record(z.string(), z.unknown()),
   }),
 });
 
-const agyAnswerSchema = JSON.stringify({
+const councilAnswerJsonSchema = JSON.stringify({
   type: 'object',
   additionalProperties: false,
   required: ['recommendation', 'evidence', 'assumptions', 'risks', 'uncertainty', 'decisiveTest'],
@@ -522,6 +529,103 @@ function parseFailure(
   return actualModel === undefined
     ? { status: 'failed', code }
     : { status: 'failed', code, actualModel };
+}
+
+function extractCodexOutput(
+  stdout: string,
+  workingDirectory: string | undefined,
+  stderr: string,
+  expectedPrompt: string,
+): SubscriptionCliParseResult {
+  const normalised = stderr.replace(/\r\n/g, '\n');
+  const userPrefix = `\nuser\n${expectedPrompt.replace(/\r\n/g, '\n')}\n`;
+  const promptStart = normalised.indexOf(userPrefix);
+  if (promptStart < 0 || normalised.lastIndexOf(userPrefix) !== promptStart) {
+    return parseFailure('identity-unverified');
+  }
+  const rendererPreamble = normalised.slice(0, promptStart);
+  const headers = [
+    ...rendererPreamble.matchAll(
+      /(?:^|\n)OpenAI Codex v[^\n]+\n--------\n([\s\S]*?)\n--------(?=\n|$)/g,
+    ),
+  ];
+  const header = headers[0];
+  if (
+    headers.length !== 1 ||
+    header === undefined ||
+    workingDirectory === undefined ||
+    !isAbsolute(workingDirectory)
+  ) {
+    return parseFailure('identity-unverified');
+  }
+
+  const fields: Record<string, string> = {};
+  for (const line of header[1]?.split('\n') ?? []) {
+    const separator = line.indexOf(':');
+    if (separator <= 0) return parseFailure('identity-unverified');
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!key || !value || fields[key] !== undefined) {
+      return parseFailure('identity-unverified', fields.model);
+    }
+    fields[key] = value;
+  }
+
+  const identity = CodexIdentitySchema.safeParse(fields);
+  const actualModel = identity.success ? identity.data.model : fields.model;
+  if (
+    !identity.success ||
+    !isAbsolute(identity.data.workdir) ||
+    canonicalPath(identity.data.workdir) !== canonicalPath(workingDirectory)
+  ) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  const responseTranscript = normalised.slice(promptStart + userPrefix.length);
+  const answerMarker = 'codex\n';
+  const tokenSuffix = responseTranscript.match(/\ntokens used\n([\d,]+)\n?$/);
+  if (tokenSuffix?.index === undefined) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  const renderedMessages = responseTranscript.slice(0, tokenSuffix.index);
+  if (/(?:^|\n)model rerouted: [^\n]+ -> [^\n]+(?:\n|$)/i.test(renderedMessages)) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  if (
+    /(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(
+      renderedMessages,
+    )
+  ) {
+    return parseFailure('unsafe-tool-isolation', actualModel);
+  }
+  if (!renderedMessages.startsWith(answerMarker)) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+
+  const answers = renderedMessages
+    .slice(answerMarker.length)
+    .split(`\n${answerMarker}`)
+    .map((value) => value.trim());
+
+  for (const renderedAnswer of answers) {
+    let value: unknown;
+    try {
+      value = JSON.parse(renderedAnswer);
+    } catch {
+      return parseFailure('identity-unverified', actualModel);
+    }
+    if (!CouncilAnswerSchema.safeParse(value).success) {
+      return parseFailure('identity-unverified', actualModel);
+    }
+  }
+
+  const rawAnswer = stdout.trim();
+  const normalisedAnswer = stdout.replace(/\r\n/g, '\n').trim();
+  if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  return { status: 'ok', actualModel: identity.data.model, rawAnswer };
 }
 
 function containsUnsafeToolNode(value: unknown): boolean {
@@ -687,12 +791,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function extractAgyOutput(stdout: string, workingDirectory?: string): SubscriptionCliParseResult {
-  let state: 'await-init' | 'before-read' | 'reading' | 'after-read' | 'finished' | 'terminal' =
-    'await-init';
+function extractAgyOutput(
+  stdout: string,
+  workingDirectory: string | undefined,
+  _stderr: string,
+  _prompt: string,
+  requestedModel: string,
+): SubscriptionCliParseResult {
   let actualModel: string | undefined;
-  let activeToolIndex: number | undefined;
   let rawAnswer: string | undefined;
+  let sawPromptRead = false;
+  let sawTerminalResult = false;
   const expectedWorkingDirectory =
     workingDirectory !== undefined && isAbsolute(workingDirectory)
       ? canonicalPath(workingDirectory)
@@ -711,13 +820,25 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
       return parseFailure('identity-unverified', actualModel);
     }
     const envelope = AgyEventEnvelopeSchema.safeParse(value);
-    if (!envelope.success) return parseFailure('identity-unverified', actualModel);
-    if (state === 'terminal') return parseFailure('identity-unverified', actualModel);
+    if (!envelope.success || sawTerminalResult) {
+      return parseFailure('identity-unverified', actualModel);
+    }
 
     if (envelope.data.event === 'init') {
       const init = AgyInitEventSchema.safeParse(value);
-      if (!init.success || state !== 'await-init') {
-        return parseFailure('unsafe-tool-isolation', actualModel);
+      if (actualModel !== undefined) return parseFailure('identity-unverified', actualModel);
+      if (!init.success) {
+        const reportedModel =
+          isRecord(value) &&
+          isRecord(value.init) &&
+          typeof value.init.model === 'string' &&
+          value.init.model.trim()
+            ? value.init.model
+            : undefined;
+        return parseFailure(
+          reportedModel === undefined ? 'identity-unverified' : 'unsafe-tool-isolation',
+          reportedModel,
+        );
       }
       actualModel = init.data.init.model;
       if (
@@ -728,22 +849,13 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
       ) {
         return parseFailure('unsafe-tool-isolation', actualModel);
       }
-      // AGY reports its compiled catalogue here; the ephemeral permission file is
-      // the capability boundary. Every observed non-view_file tool still fails below.
-      state = 'before-read';
       continue;
     }
 
     if (envelope.data.event === 'step_update') {
-      const step = AgyStepEventSchema.safeParse(value);
-      if (!step.success) {
-        return parseFailure(
-          containsUnsafeToolNode(value) ? 'unsafe-tool-isolation' : 'identity-unverified',
-          actualModel,
-        );
-      }
-      const update = step.data.step_update;
-      if (update.step_type === 'tool') {
+      const stepUpdate =
+        isRecord(value) && isRecord(value.step_update) ? value.step_update : undefined;
+      if (stepUpdate?.step_type === 'tool') {
         const tool = AgyToolEventSchema.safeParse(value);
         if (!tool.success || expectedPromptPath === undefined) {
           return parseFailure('unsafe-tool-isolation', actualModel);
@@ -756,75 +868,36 @@ function extractAgyOutput(stdout: string, workingDirectory?: string): Subscripti
         ) {
           return parseFailure('unsafe-tool-isolation', actualModel);
         }
-        if (
-          tool.data.step_update.state === 'ACTIVE' &&
-          state === 'before-read' &&
-          activeToolIndex === undefined
-        ) {
-          activeToolIndex = tool.data.step_update.step_index;
-          state = 'reading';
-          continue;
-        }
-        if (
-          tool.data.step_update.state === 'DONE' &&
-          state === 'reading' &&
-          activeToolIndex === tool.data.step_update.step_index
-        ) {
-          state = 'after-read';
-          continue;
-        }
+        if (tool.data.step_update.state === 'DONE') sawPromptRead = true;
+        continue;
+      }
+      if (containsUnsafeToolNode(value)) {
         return parseFailure('unsafe-tool-isolation', actualModel);
       }
-
-      if (
-        state === 'before-read' &&
-        update.state === 'DONE' &&
-        ['user_input', 'unknown', 'agent_response'].includes(update.step_type)
-      ) {
-        continue;
-      }
-      if (
-        state === 'after-read' &&
-        update.state === 'DONE' &&
-        ['checkpoint', 'agent_response'].includes(update.step_type)
-      ) {
-        continue;
-      }
-      if (state === 'after-read' && update.state === 'DONE' && update.step_type === 'finish') {
-        state = 'finished';
-        continue;
-      }
-      return parseFailure(
-        containsUnsafeToolNode(value) || update.step_type === 'subagent'
-          ? 'unsafe-tool-isolation'
-          : 'identity-unverified',
-        actualModel,
-      );
+      continue;
     }
 
     if (envelope.data.event === 'result') {
       const result = AgyResultEventSchema.safeParse(value);
-      if (!result.success || state !== 'finished') {
-        return parseFailure('identity-unverified', actualModel);
-      }
-      rawAnswer = result.data.result.response;
-      state = 'terminal';
+      if (!result.success) return parseFailure('identity-unverified', actualModel);
+      rawAnswer = JSON.stringify(result.data.result.structured_output);
+      sawTerminalResult = true;
       continue;
     }
 
-    return parseFailure(
-      /tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)
-        ? 'unsafe-tool-isolation'
-        : 'identity-unverified',
-      actualModel,
-    );
+    if (/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)) {
+      return parseFailure('unsafe-tool-isolation', actualModel);
+    }
   }
 
-  return state === 'terminal' && actualModel !== undefined && rawAnswer !== undefined
-    ? { status: 'ok', actualModel, rawAnswer }
-    : state === 'await-init' || state === 'finished'
-      ? parseFailure('identity-unverified', actualModel)
-      : parseFailure('unsafe-tool-isolation', actualModel);
+  if (actualModel === undefined || rawAnswer === undefined) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  if (actualModel !== requestedModel) {
+    return parseFailure('identity-unverified', actualModel);
+  }
+  if (!sawPromptRead) return parseFailure('unsafe-tool-isolation', actualModel);
+  return { status: 'ok', actualModel, rawAnswer };
 }
 
 function observedRoute(
@@ -833,6 +906,30 @@ function observedRoute(
 ): 'primary' | 'same-provider-fallback' | undefined {
   if (actualModel === route.primary) return 'primary';
   return route.fallbacks.includes(actualModel) ? 'same-provider-fallback' : undefined;
+}
+
+/**
+ * Detect a subscription-credit exhaustion message in a seat CLI's stderr and return a concise,
+ * secret-free summary including any reset time the CLI reported. Returns undefined when the
+ * failure is not a quota exhaustion.
+ *
+ * Observed verbatim from codex-cli 0.147.0:
+ *   "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to
+ *    purchase more credits or try again at Aug 18th, 2026 9:21 AM."
+ */
+function quotaExhaustion(stderr: string | undefined): string | undefined {
+  if (!stderr) return undefined;
+  const line = stderr
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .find((value) =>
+      /usage limit|quota|out of credit|insufficient_quota|rate limit exceeded/i.test(value),
+    );
+  if (line === undefined) return undefined;
+  const resetsAt = /try again at ([^.]+)/i.exec(line)?.[1]?.trim();
+  return resetsAt
+    ? `Subscription quota exhausted; the provider reports it resets at ${resetsAt}.`
+    : `Subscription quota exhausted: ${line.slice(0, 200)}`;
 }
 
 function createSubscriptionCliAdapter(
@@ -908,6 +1005,23 @@ function createSubscriptionCliAdapter(
         config.request(executable, configuredRoute, request.prompt, request.context.timeoutMs),
       );
       if (result.status !== 'ok') {
+        // A seat CLI that has run out of subscription credit exits non-zero with a usage-limit
+        // message. That is neither a code fault nor a transient blip: retrying burns more calls
+        // against an exhausted quota and the operator cannot act on "subscription CLI failed".
+        // Surface it verbatim, with the reset time the CLI reports, so the cause is obvious.
+        const quota = quotaExhaustion(result.stderr);
+        if (quota !== undefined) {
+          capture(request, config.family, 'provider-failure', quota);
+          return seatError(
+            request,
+            config.family,
+            configuredRoute.primary,
+            'failed',
+            'quota-exhausted',
+            quota,
+            result.durationMs,
+          );
+        }
         capture(
           request,
           config.family,
@@ -925,7 +1039,13 @@ function createSubscriptionCliAdapter(
         );
       }
 
-      const output = config.output(result.stdout, result.workingDirectory);
+      const output = config.output(
+        result.stdout,
+        result.workingDirectory,
+        result.stderr,
+        structuredPrompt(request.prompt),
+        configuredRoute.primary,
+      );
       if (output.status === 'failed') {
         capture(
           request,
@@ -1036,6 +1156,100 @@ function ompCouncilProfileConfigurationError(): string | undefined {
     : `OMP profile ${ompCouncilProfile} is not configured`;
 }
 
+/**
+ * Direct Codex subscription transport. `read-only` is Codex's most restrictive usable sandbox;
+ * ambient configuration and every stable external tool surface are disabled independently.
+ */
+export function createOpenAiCodexAdapter(
+  transport: CliTransport = nativeCliTransport,
+  resolveExecutable: () => string | undefined = () => Bun.which('codex') ?? undefined,
+): ProviderAdapter {
+  return createSubscriptionCliAdapter(
+    {
+      family: 'openai',
+      executableName: 'codex',
+      request: (executable, route, prompt, timeoutMs) => {
+        const councilPrompt = structuredPrompt(prompt);
+        return {
+          executable,
+          args: [
+            'exec',
+            '--skip-git-repo-check',
+            '--strict-config',
+            '--model',
+            route.primary,
+            '--output-schema',
+            (workingDirectory) => join(workingDirectory, 'council-answer-schema.json'),
+            '--sandbox',
+            'read-only',
+            '--ephemeral',
+            '--ignore-user-config',
+            '--ignore-rules',
+            '-c',
+            // `--ignore-user-config` discards the user's own reasoning-effort setting, so the
+            // seat MUST set it explicitly or Codex runs at `reasoning effort: none`. Verified
+            // against codex-cli 0.147.0: stderr reports `reasoning effort: xhigh`.
+            `model_reasoning_effort="${codexReasoningEffort}"`,
+            '-c',
+            'web_search="disabled"',
+            '--disable',
+            'shell_tool',
+            '--disable',
+            'unified_exec',
+            '--disable',
+            'browser_use',
+            '--disable',
+            'browser_use_external',
+            '--disable',
+            'browser_use_full_cdp_access',
+            '--disable',
+            'computer_use',
+            '--disable',
+            'view_image',
+            '--disable',
+            'image_generation',
+            '--disable',
+            'apps',
+            '--disable',
+            'plugins',
+            '--disable',
+            'remote_plugin',
+            '--disable',
+            'multi_agent',
+            '--disable',
+            'hooks',
+            '--disable',
+            'skill_search',
+            '--disable',
+            'skill_mcp_dependency_install',
+            '--disable',
+            'workspace_dependencies',
+            '--color',
+            'never',
+            '-',
+          ],
+          // Codex has no prompt-file flag: asking it to read this path would execute a tool.
+          // Stage the bytes for isolation parity, then supply those same bytes through stdin.
+          stdin: councilPrompt,
+          timeoutMs,
+          cwd: tmpdir(),
+          files: {
+            'council-prompt.txt': councilPrompt,
+            'council-answer-schema.json': councilAnswerJsonSchema,
+          },
+        };
+      },
+      output: extractCodexOutput,
+    },
+    transport,
+    resolveExecutable,
+  );
+}
+
+/**
+ * Legacy OMP transport, retained for callers with an authenticated `claude-council` OMP profile.
+ * It is no longer the default because that isolated profile has its own expiring credential store.
+ */
 export function createOpenAiSubscriptionAdapter(
   transport: CliTransport = nativeCliTransport,
   resolveExecutable: () => string | undefined = () => Bun.which('omp') ?? undefined,
@@ -1115,7 +1329,7 @@ export function createGoogleSubscriptionAdapter(
           '--output-format',
           'stream-json',
           '--json-schema',
-          agyAnswerSchema,
+          councilAnswerJsonSchema,
           '--model',
           route.primary,
           '--print-timeout',

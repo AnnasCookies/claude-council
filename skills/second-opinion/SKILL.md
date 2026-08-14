@@ -24,7 +24,7 @@ Follow the [evidence-pack invariant](#evidence-pack-invariant) whenever the revi
 9. Require at least three successful distinct provider families for a normal result. Never substitute a different provider family under a failed seat's identity.
 10. Return the structured status and comparison. Include recommendation, evidence, assumptions, risks, uncertainty and a decisive test. Preserve `completed`, `degraded`, `blocked-policy` and `blocked-quorum` distinctions.
 
-Use the full `council` flow instead when material disagreement needs rebuttal, a contrarian lens is mandatory, or the motion requires chaired multi-round adjudication.
+Use the full `council` flow instead when material disagreement needs rebuttal, a contrarian lens is mandatory, or the motion requires chaired multi-round adjudication. Do not downgrade a council motion to this skill merely because only three configured, reachable families remain: `council` automatically runs a prominently disclosed three-family council with its contrarian intact, and fails closed only below three.
 
 ## Evidence-pack invariant
 

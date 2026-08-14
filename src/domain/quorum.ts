@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   ProviderFamilySchema,
   QuorumPolicySchema,
+  ReducedQuorumNoticeSchema,
   SeatResponseSchema,
   type ProviderFamily,
   type QuorumPolicy,
@@ -20,6 +21,10 @@ const familyOrder: Record<ProviderFamily, number> = {
   deepseek: 4,
   moonshot: 5,
 };
+
+export function minimumQuorumFamilyFloor(policy: QuorumPolicy): number {
+  return policy.requiresContrarian && policy.reducedQuorum === undefined ? 4 : 3;
+}
 
 export const QuorumFailureReasonSchema = z.enum([
   'insufficient-provider-families',
@@ -50,14 +55,32 @@ export const QuorumEvaluationSchema = z
     successfulFamilies: SuccessfulFamiliesSchema,
     requiresContrarian: z.boolean(),
     contrarianSatisfied: z.boolean(),
+    reducedQuorum: ReducedQuorumNoticeSchema.optional(),
     failureReasons: z.array(QuorumFailureReasonSchema).max(2),
   })
   .superRefine((evaluation, context) => {
-    if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4) {
+    if (
+      evaluation.requiresContrarian &&
+      evaluation.minimumDistinctFamilies < 4 &&
+      evaluation.reducedQuorum === undefined
+    ) {
       context.addIssue({
         code: 'custom',
         path: ['minimumDistinctFamilies'],
         message: 'Significant motions require at least four distinct provider families',
+      });
+    }
+    if (
+      evaluation.reducedQuorum !== undefined &&
+      (!evaluation.requiresContrarian ||
+        evaluation.minimumDistinctFamilies < 3 ||
+        evaluation.minimumDistinctFamilies >=
+          evaluation.reducedQuorum.standingDefaultMinimumDistinctFamilies)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['reducedQuorum'],
+        message: 'Reduced quorum must be an explicit significant-council floor below four',
       });
     }
 
@@ -107,8 +130,10 @@ export function evaluateQuorum(
       }
     })
     .parse(contrarianSeatIds);
-  const protocolFloor = parsedPolicy.requiresContrarian ? 4 : 3;
-  const minimumDistinctFamilies = Math.max(protocolFloor, parsedPolicy.minimumDistinctFamilies);
+  const minimumDistinctFamilies = Math.max(
+    minimumQuorumFamilyFloor(parsedPolicy),
+    parsedPolicy.minimumDistinctFamilies,
+  );
 
   const successfulResponses = parsedResponses.filter(
     (response) => response.status === 'ok' && response.modelIdentity === 'verified',
@@ -136,6 +161,9 @@ export function evaluateQuorum(
     successfulFamilies,
     requiresContrarian: parsedPolicy.requiresContrarian,
     contrarianSatisfied,
+    ...(parsedPolicy.reducedQuorum === undefined
+      ? {}
+      : { reducedQuorum: parsedPolicy.reducedQuorum }),
     failureReasons,
   });
 }

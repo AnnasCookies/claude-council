@@ -12,6 +12,17 @@ const significantPolicy = {
   requiresContrarian: true,
 } satisfies QuorumPolicy;
 
+const reducedSignificantPolicy = {
+  minimumDistinctFamilies: 3,
+  requiresContrarian: true,
+  reducedQuorum: {
+    standingDefaultMinimumDistinctFamilies: 4,
+    weakerThanStandingDefault: true,
+    warning:
+      'REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.',
+  },
+} satisfies QuorumPolicy;
+
 function successfulSeat(
   provider: ProviderFamily,
   seatId: string,
@@ -114,6 +125,25 @@ describe('quorum evaluation', () => {
     expect(evaluation.contrarianSatisfied).toBe(true);
     expect(evaluation.failureReasons).toEqual([]);
     expect(QuorumEvaluationSchema.parse(evaluation)).toEqual(evaluation);
+  });
+
+  test('permits only an explicitly marked three-family significant quorum', () => {
+    const evaluation = evaluateQuorum(
+      reducedSignificantPolicy,
+      [
+        successfulSeat('anthropic', 'anthropic-seat', 'architect'),
+        successfulSeat('openai', 'openai-seat', 'security'),
+        successfulSeat('google', 'google-seat', 'critic'),
+      ],
+      ['google-seat'],
+    );
+
+    expect(evaluation.passed).toBe(true);
+    expect(evaluation.minimumDistinctFamilies).toBe(3);
+    expect(evaluation.successfulFamilies).toEqual(['anthropic', 'openai', 'google']);
+    expect(evaluation.requiresContrarian).toBe(true);
+    expect(evaluation.contrarianSatisfied).toBe(true);
+    expect(evaluation.reducedQuorum).toEqual(reducedSignificantPolicy.reducedQuorum);
   });
 
   test('enforces the normal and significant family floors even for weaker input policy', () => {

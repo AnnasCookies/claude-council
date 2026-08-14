@@ -1,5 +1,5 @@
 import {
-  createOpenAiSubscriptionAdapter,
+  createOpenAiCodexAdapter,
   type CliTransport,
   type ProviderAdapter,
 } from '../execution/provider';
@@ -7,7 +7,6 @@ import {
 export function openaiAdapter(
   transport?: CliTransport,
   resolveExecutable?: () => string | undefined,
-  profileConfigurationError?: () => string | undefined,
 ): ProviderAdapter {
-  return createOpenAiSubscriptionAdapter(transport, resolveExecutable, profileConfigurationError);
+  return createOpenAiCodexAdapter(transport, resolveExecutable);
 }

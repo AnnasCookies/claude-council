@@ -30,6 +30,10 @@ tests/tmp/
 # Internal design docs — plans/specs stay local, not shipped in the plugin
 docs/superpowers/
 
+
+# Local audit/archaeology reports — operator-specific paths and history, never shipped publicly
+.audit/
+
 # Web/page cache (claude-crawl)
 .claude-crawl/
 

@@ -172,6 +172,10 @@ export const MotionMetadataSchema = z.strictObject({
 });
 export type MotionMetadata = z.infer<typeof MotionMetadataSchema>;
 
+export interface LensSelectionOptions {
+  readonly allowReducedThreeSeatCoverage?: boolean;
+}
+
 export const ChairOverrideSchema = z
   .strictObject({
     originalLensName: NonBlankStringSchema,
@@ -281,19 +285,30 @@ function scoreApplicability(
   return score;
 }
 
-export function selectLenses(motion: MotionMetadata, seats: number): RoleLens[] {
+export function selectLenses(
+  motion: MotionMetadata,
+  seats: number,
+  options: LensSelectionOptions = {},
+): RoleLens[] {
   const parsedMotion = MotionMetadataSchema.parse(motion);
   const parsedSeatCount = z.number().int().min(1).max(roleCatalogue.length).parse(seats);
   const motionDomains = new Set(parsedMotion.domains.map((domain) => domain.toLowerCase()));
-  const requiredCategories: RoleCategory[] = ['domain', 'maintainer', 'risk'];
+  const reducedThreeSeatCoverage =
+    parsedSeatCount === 3 && options.allowReducedThreeSeatCoverage === true;
+  // Reduced three-seat precedence keeps motion expertise, dedicated risk scrutiny and
+  // adversarial dissent. Maintainer and conditional systems coverage yield.
+  const requiredCategories: RoleCategory[] = reducedThreeSeatCoverage
+    ? ['domain', 'risk', 'contrarian']
+    : ['domain', 'maintainer', 'risk'];
   if (
+    !reducedThreeSeatCoverage &&
     parsedMotion.domains.some((domain) =>
       ['architecture', 'infrastructure', 'performance'].includes(domain.toLowerCase()),
     )
   ) {
     requiredCategories.push('systems');
   }
-  requiredCategories.push('contrarian');
+  if (!reducedThreeSeatCoverage) requiredCategories.push('contrarian');
 
   if (parsedSeatCount < requiredCategories.length) {
     throw new RangeError(

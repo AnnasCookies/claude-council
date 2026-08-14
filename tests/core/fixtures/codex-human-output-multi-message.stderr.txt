@@ -1,0 +1,21 @@
+OpenAI Codex v0.147.0
+--------
+workdir: C:\tmp\codexaudit
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019ff6e7-b420-7270-8276-6f4307096f01
+--------
+user
+Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.
+
+Before the final assessment, send a separate progress update as a JSON object matching the required schema; then send the final JSON assessment. The evidence pack is intentionally absent.
+codex
+{"recommendation":"Pause the assessment pending the missing decision question and evidence pack.","evidence":["No evidence pack was provided.","No proposition, options, or decision criterion was specified."],"assumptions":["The omission is intentional and no external sources should be substituted without authorization."],"risks":["Any substantive recommendation now would be unsupported and could address the wrong decision."],"uncertainty":"Maximal: both the subject of the assessment and its supporting evidence are absent.","decisiveTest":"Provide the exact question or proposition to assess together with the intended evidence pack."}
+codex
+{"recommendation":"No substantive assessment can be made from the supplied information.","evidence":["The evidence pack is absent.","No decision question, claim, alternatives, or evaluation criteria were supplied."],"assumptions":["Only the content in this request may be used.","The missing evidence should not be invented or replaced with unstated external research."],"risks":["Giving a directional recommendation would fabricate support.","Inferring the assessment topic could produce an irrelevant or misleading conclusion."],"uncertainty":"Complete uncertainty due to the missing assessment subject and evidence.","decisiveTest":"Supply the proposition or decision to evaluate and the evidence pack; then test whether the evidence materially favors one conclusion under explicit criteria."}
+tokens used
+8,359

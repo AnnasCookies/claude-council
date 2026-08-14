@@ -8,7 +8,10 @@ No hook starts a council automatically.
 
 - Bun 1.3.14 or later
 - Claude Code for the `anthropic` seat (`claude` must resolve to a trusted absolute executable)
-- OMP for the `openai` seat, authenticated in the governed `claude-council` profile
+- Codex CLI (`codex`) for the `openai` seat, authenticated with `codex login`. The seat runs
+  `codex exec` directly — it no longer depends on an OMP profile. The former OMP transport is
+  still exported as `createOpenAiSubscriptionAdapter` for anyone who prefers it, but it requires
+  the `claude-council` OMP profile to hold its own credentials, which is what used to break.
 - Antigravity CLI (`agy`) for the optional `google` seat
 - Optional HTTP credentials from `.env.example`
 
@@ -44,6 +47,13 @@ bun --no-install dist/cli.js second-opinion \
 bun --no-install dist/cli.js council \
   --classification public \
   --motion "Should this cross-platform CLI use an append-only record store?"
+
+# Deliberate reduced quorum: weaker than the standing four-family default
+bun --no-install dist/cli.js council \
+  --classification public \
+  --providers anthropic,openai,google \
+  --min-families 3 \
+  --motion "Should this bounded change proceed with a reduced council?"
 
 # Policy preflight and destinations only; no provider call
 bun --no-install dist/cli.js run --dry-run \
@@ -90,7 +100,7 @@ bun --no-install dist/cli.js council \
   --motion "Review the private architecture"
 ```
 
-The default command seat count is five. An allowlist defines eligibility, not mandatory participation: preflight reports selected, eligible and omitted eligible families. Use `--providers anthropic,openai,xai,google,moonshot` to select an explicit roster. The CLI never substitutes a different provider family under a failed seat.
+The default command seat count is five and the standing `council` quorum remains four distinct families. An allowlist defines eligibility, not mandatory participation: preflight reports selected, eligible and omitted eligible families. Use `--providers anthropic,openai,xai,google,moonshot` to select an explicit roster. When only three families are available, `council --min-families 3` deliberately selects a weaker reduced quorum; the manifest, top-level result warning and persisted session record all carry the reduced-quorum warning. Values below three are rejected. The CLI never substitutes a different provider family under a failed seat.
 
 ## Provider routes
 
@@ -142,8 +152,9 @@ in the structured result. Cross-provider fallback is prohibited.
   ephemeral home and may read only its staged `council-prompt.txt`; malformed,
   additional or unowned tool events fail closed.
 - Provider responses and diagnostics are redacted before output or persistence.
-- Ordinary quorum requires three distinct verified provider families. Significant quorum requires four, including the explicitly categorised contrarian seat, plus at least three verified rebuttals.
-- Results below normal quorum remain `degraded` at the two-family ordinary or three-family significant usability floor; lower results are `blocked-quorum`.
+- Ordinary quorum requires three distinct verified provider families. Significant quorum defaults to four, including the explicitly categorised contrarian seat, plus at least three verified rebuttals. `council --min-families 3` is the only explicit reduction: it preserves the contrarian requirement and marks the run as weaker than the standing default throughout its manifest, output and session record.
+- At explicit three-seat coverage, lens precedence is domain, risk and contrarian. Maintainer coverage yields; conditional systems coverage also yields when relevant. Four-or-more-seat selection is unchanged.
+- Results below the selected quorum remain `degraded` at the two-family ordinary or three-family significant usability floor; lower results are `blocked-quorum`.
 
 Project and general records are physically separate beneath a configured records root. Session, chair-acceptance and resolution files are schema-validated, atomically published and protected by scoped filesystem locks. Persisted protocol metadata includes rounds, quorum and any refinement trigger. Retries require unchanged canonical motion text, seat-to-lens assignments and execution protocol, while distinct motions rotate assignments. At most one resolution may be appended per motion. A degraded session requires a matching append-only chair acceptance before resolution; `blocked-quorum` can never resolve. Mixed general history is migrated only from a hash-matched plan carrying explicit approval.
 
