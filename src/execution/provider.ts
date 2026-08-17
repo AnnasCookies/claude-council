@@ -312,29 +312,200 @@ function healthFromResponse(response: SeatResponse): HealthResult {
   };
 }
 
+/**
+ * A vendor's wire dialect. Three families speak OpenAI-compatible chat completions; Anthropic's
+ * Messages API and Gemini's generateContent do not. Factoring the differences out keeps one
+ * request/verify/attribute path so the route-verification fix applies to every metered seat rather
+ * than being reimplemented, and forgotten, per vendor.
+ */
+interface HttpDialect {
+  /** Endpoint for a model. Gemini puts the model in the path, the others in the body. */
+  endpoint(model: string): string;
+  headers(credential: string): Record<string, string>;
+  payload(model: string, prompt: string): string;
+  /**
+   * Pull the responding model, the raw answer text and any usage the vendor reported. Returning
+   * `undefined` means the response did not carry verifiable model identity and text, which is a
+   * failed seat — never a seat with an assumed identity.
+   */
+  extract(body: unknown): { actualModel: string; rawAnswer: string; usage?: SeatUsage } | undefined;
+}
+
 interface HttpAdapterConfig {
-  family: Exclude<ProviderFamily, 'anthropic' | 'openai' | 'google'>;
+  family: ProviderFamily;
   credential: string;
-  endpoint: string;
   allowRegistryFallback: boolean;
+  dialect: HttpDialect;
 }
 
-function httpPayload(model: string, prompt: string): string {
-  return JSON.stringify({
-    model,
-    messages: [{ role: 'user', content: structuredPrompt(prompt) }],
-    max_tokens: 32768,
-  });
-}
+const AnthropicMessagesSchema = z.object({
+  model: z.string().min(1),
+  content: z.array(z.object({ type: z.string(), text: z.string().optional() })).min(1),
+  usage: z
+    .object({
+      input_tokens: z.number().int().nonnegative().optional(),
+      output_tokens: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+});
 
-function extractHttpAnswer(body: unknown): { actualModel: string; rawAnswer: string } | undefined {
-  const parsed = ChatCompletionSchema.safeParse(body);
-  if (!parsed.success) return undefined;
+const GeminiGenerateContentSchema = z.object({
+  modelVersion: z.string().min(1),
+  candidates: z
+    .array(
+      z.object({ content: z.object({ parts: z.array(z.object({ text: z.string() })).min(1) }) }),
+    )
+    .min(1),
+  usageMetadata: z
+    .object({
+      promptTokenCount: z.number().int().nonnegative().optional(),
+      candidatesTokenCount: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
+});
+
+const OpenAiUsageSchema = z.object({
+  prompt_tokens: z.number().int().nonnegative().optional(),
+  completion_tokens: z.number().int().nonnegative().optional(),
+});
+
+function tokenUsage(inputTokens?: number, outputTokens?: number): SeatUsage | undefined {
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
   return {
-    actualModel: parsed.data.model,
-    rawAnswer: parsed.data.choices[0]?.message.content ?? '',
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
   };
 }
+
+/**
+ * OpenAI-compatible chat completions, as spoken by xAI, DeepSeek and Moonshot.
+ *
+ * No `response_format` is sent. DeepSeek and Moonshot document only `{type:'json_object'}` and xAI
+ * documents `json_schema`, so a single blanket value would be wrong somewhere; and the three
+ * configured families currently reach the schema through the trusted prompt, which is tested and
+ * working. Adding native constrained decoding is a per-family change that needs a live call against
+ * that vendor to confirm, so it is deliberately not made blind.
+ */
+export const openAiCompatibleDialect = (endpoint: string): HttpDialect => ({
+  endpoint: () => endpoint,
+  headers: (credential) => ({
+    authorization: `Bearer ${credential}`,
+    'content-type': 'application/json',
+  }),
+  payload: (model, prompt) =>
+    JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: structuredPrompt(prompt) }],
+      max_tokens: 32768,
+    }),
+  extract: (body) => {
+    const parsed = ChatCompletionSchema.safeParse(body);
+    if (!parsed.success) return undefined;
+    const usage = OpenAiUsageSchema.safeParse(
+      typeof body === 'object' && body !== null && 'usage' in body
+        ? Reflect.get(body, 'usage')
+        : undefined,
+    );
+    return {
+      actualModel: parsed.data.model,
+      rawAnswer: parsed.data.choices[0]?.message.content ?? '',
+      ...(usage.success
+        ? (() => {
+            const totals = tokenUsage(usage.data.prompt_tokens, usage.data.completion_tokens);
+            return totals === undefined ? {} : { usage: totals };
+          })()
+        : {}),
+    };
+  },
+});
+
+/**
+ * Anthropic Messages API. Native structured output is requested through `output_config.format` with
+ * a JSON schema — verified against the documented cURL shape, including the `x-api-key` and
+ * `anthropic-version` headers — and the answer is still parsed and validated locally, because
+ * constrained decoding is a transport guarantee rather than semantic truth.
+ *
+ * `tools` is omitted rather than sent as an empty array. An earlier version sent `tools: []` on the
+ * theory that an omitted key might later default to something tool-bearing; that was speculation, it
+ * would break every existing integration if true, and an empty array risks a validation error on a
+ * request that cannot be live-tested here. No tools are requested, so none are granted.
+ */
+const anthropicMessagesDialect: HttpDialect = {
+  endpoint: () => 'https://api.anthropic.com/v1/messages',
+  headers: (credential) => ({
+    'x-api-key': credential,
+    'anthropic-version': '2023-06-01',
+    'content-type': 'application/json',
+  }),
+  payload: (model, prompt) =>
+    JSON.stringify({
+      model,
+      max_tokens: 32768,
+      messages: [{ role: 'user', content: structuredPrompt(prompt) }],
+      output_config: {
+        format: { type: 'json_schema', schema: JSON.parse(councilAnswerJsonSchema) },
+      },
+    }),
+  extract: (body) => {
+    const parsed = AnthropicMessagesSchema.safeParse(body);
+    if (!parsed.success) return undefined;
+    // Only text blocks may carry the answer. A response whose content is entirely non-text (a tool
+    // use, a refusal block) has no answer, so it fails rather than yielding an empty string that
+    // would later read as a malformed answer from a model that actually declined.
+    const text = parsed.data.content
+      .filter((block) => block.type === 'text' && block.text !== undefined)
+      .map((block) => block.text ?? '')
+      .join('');
+    if (!text) return undefined;
+    const usage = tokenUsage(parsed.data.usage?.input_tokens, parsed.data.usage?.output_tokens);
+    return {
+      actualModel: parsed.data.model,
+      rawAnswer: text,
+      ...(usage === undefined ? {} : { usage }),
+    };
+  },
+};
+
+/**
+ * Gemini generateContent. The model is named in the path, and identity comes back as
+ * `modelVersion`, which is what the shared path compares against the configured route.
+ */
+const geminiGenerateContentDialect: HttpDialect = {
+  endpoint: (model) =>
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+  headers: (credential) => ({
+    'x-goog-api-key': credential,
+    'content-type': 'application/json',
+  }),
+  payload: (_model, prompt) =>
+    JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: structuredPrompt(prompt) }] }],
+      generationConfig: {
+        // camelCase, not the Python SDK's snake_case. The canonical REST JSON representation of
+        // GenerationConfig is `{"responseMimeType": string, "responseJsonSchema": value, ...}`; the
+        // snake_case forms appear only in Python samples and are ignored on the wire, which would
+        // have silently disabled constrained decoding here rather than failing loudly.
+        // `responseSchema` is deprecated in favour of `responseJsonSchema`.
+        responseMimeType: 'application/json',
+        responseJsonSchema: JSON.parse(councilAnswerJsonSchema),
+      },
+    }),
+  extract: (body) => {
+    const parsed = GeminiGenerateContentSchema.safeParse(body);
+    if (!parsed.success) return undefined;
+    const text = (parsed.data.candidates[0]?.content.parts ?? []).map((part) => part.text).join('');
+    if (!text) return undefined;
+    const usage = tokenUsage(
+      parsed.data.usageMetadata?.promptTokenCount,
+      parsed.data.usageMetadata?.candidatesTokenCount,
+    );
+    return {
+      actualModel: parsed.data.modelVersion,
+      rawAnswer: text,
+      ...(usage === undefined ? {} : { usage }),
+    };
+  },
+};
 
 export function createHttpAdapter(
   config: HttpAdapterConfig,
@@ -371,10 +542,10 @@ export function createHttpAdapter(
       const invokeModel = (model: string) =>
         transport.request(
           {
-            url: config.endpoint,
+            url: config.dialect.endpoint(model),
             method: 'POST',
-            headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
-            body: httpPayload(model, request.prompt),
+            headers: config.dialect.headers(credential),
+            body: config.dialect.payload(model, request.prompt),
           },
           defaultRetryPolicy(request.context.timeoutMs),
         );
@@ -404,7 +575,7 @@ export function createHttpAdapter(
         );
       }
 
-      const extracted = extractHttpAnswer(providerResult.body);
+      const extracted = config.dialect.extract(providerResult.body);
       if (!extracted) {
         capture(
           request,
@@ -460,7 +631,10 @@ export function createHttpAdapter(
         observed,
         answer,
         latencyMs,
-        { credentialPath: 'api-key' },
+        {
+          credentialPath: 'api-key',
+          ...(extracted.usage === undefined ? {} : { usage: extracted.usage }),
+        },
       );
     },
     async probe(context) {
@@ -1756,10 +1930,8 @@ export interface XaiAdapterOptions {
   resolveExecutable?: (() => string | undefined) | undefined;
   modelOverride?: (() => string | undefined) | undefined;
   transportPreference?: 'http' | 'subscription-cli' | undefined;
+  billingMode?: BillingMode | undefined;
 }
-
-const xaiUnconfiguredReason =
-  'set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
 
 function withTransportResolution(
   adapter: ProviderAdapter,
@@ -1783,33 +1955,92 @@ function withTransportResolution(
   };
 }
 
-function createUnconfiguredXaiAdapter(): ProviderAdapter {
-  const family = 'xai' as const;
+/**
+ * How a seat is allowed to pay for itself.
+ *
+ * - `sub-first` — spend an already-paid subscription; fall back to a metered key only if no
+ *   subscription transport is available. The default, because the subscriptions are sunk cost.
+ * - `api-only` — metered key only. For customer work, where every call must be attributable and
+ *   chargeable; a subscription seat here would make the work unbillable and mix personal quota into
+ *   a client engagement.
+ * - `sub-only` — subscription only. Guarantees a run cannot incur metered spend.
+ *
+ * `api-only` and `sub-only` both fail closed to `unconfigured` rather than silently crossing to the
+ * other path. That is the point: a billing mode that can be quietly overridden is not a control.
+ */
+export const BillingModeSchema = z.enum(['sub-first', 'api-only', 'sub-only']);
+export type BillingMode = z.infer<typeof BillingModeSchema>;
+export const DEFAULT_BILLING_MODE: BillingMode = 'sub-first';
+
+interface DualCredentialSeat {
+  family: ProviderFamily;
+  /** Env var holding the metered key, named in operator-facing remediation text. */
+  credential: string;
+  /** How the subscription transport is obtained, for the same remediation text. */
+  subscriptionHint: string;
+  /**
+   * Operator-facing name of the subscription transport in mid-sentence form, e.g.
+   * "the grok subscription CLI". Kept per-family rather than generic: "the subscription transport is
+   * available" tells an operator nothing about which binary was found, and these strings are what
+   * `doctor` prints. Stored lower-case and capitalised only where it opens a sentence, so no message
+   * can read "No The grok subscription CLI resolved".
+   */
+  subscriptionLabel: string;
+  billingMode: BillingMode;
+  /**
+   * A soft preference for the metered path when a key is present. Distinct from
+   * `billingMode: 'api-only'`, which is a requirement: a preference falls back to the subscription
+   * when no key exists, a requirement fails closed. Conflating the two would silently turn an
+   * existing "prefer HTTPS" option into "refuse to run without a key".
+   */
+  preferApi?: boolean;
+  subscriptionAvailable: boolean;
+  apiKeyPresent: boolean;
+  subscription: () => ProviderAdapter;
+  api: () => ProviderAdapter;
+}
+
+function sentenceCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function unconfiguredReason(seat: DualCredentialSeat): string {
+  if (seat.billingMode === 'api-only') {
+    return `billing mode api-only requires ${seat.credential} in ~/.claude/council/providers.env`;
+  }
+  if (seat.billingMode === 'sub-only') {
+    return `billing mode sub-only requires ${seat.subscriptionHint}`;
+  }
+  return `set ${seat.credential} in ~/.claude/council/providers.env, or ${seat.subscriptionHint}`;
+}
+
+function createUnconfiguredSeatAdapter(seat: DualCredentialSeat): ProviderAdapter {
+  const reason = unconfiguredReason(seat);
   const transportResolution: ProviderTransportResolution = {
-    preferred: 'subscription-cli',
+    preferred: seat.billingMode === 'api-only' ? 'http' : 'subscription-cli',
     effective: null,
-    reason: xaiUnconfiguredReason,
+    reason,
   };
   const adapter: ProviderAdapter = {
-    family,
+    family: seat.family,
     transport: 'http',
     transportResolution,
     async availability(context) {
       return {
         status: 'unconfigured',
-        provider: family,
-        model: context.registry.xai.primary,
-        reason: xaiUnconfiguredReason,
+        provider: seat.family,
+        model: context.registry[seat.family].primary,
+        reason,
       };
     },
     async invoke(request) {
       return seatError(
         request,
-        family,
-        request.context.registry.xai.primary,
+        seat.family,
+        request.context.registry[seat.family].primary,
         'skipped',
-        'missing-xai-transport',
-        xaiUnconfiguredReason,
+        `missing-${seat.family}-transport`,
+        reason,
         0,
       );
     },
@@ -1817,7 +2048,7 @@ function createUnconfiguredXaiAdapter(): ProviderAdapter {
       return healthFromResponse(
         await adapter.invoke({
           context,
-          seatId: 'health-xai',
+          seatId: `health-${seat.family}`,
           role: 'health',
           prompt: healthPrompt,
         }),
@@ -1828,62 +2059,180 @@ function createUnconfiguredXaiAdapter(): ProviderAdapter {
 }
 
 /**
+ * Error codes for which a seat MAY retry down the other credential path.
+ *
+ * The complement of this set is the load-bearing half. `identity-unverified`,
+ * `unsafe-tool-isolation`, `invalid-structured-answer` and every policy or classification block are
+ * absent deliberately: retrying an integrity failure on a second billing path would let a
+ * misbehaving transport launder itself into a passing seat, which is strictly worse than a missing
+ * vote. A security failure is a stop, not a routing hint.
+ *
+ * Transport-shaped failures (`spawn-failed`, `timeout`, `network`, `rate-limit`, `server`) are absent
+ * for a different reason: the runner already retries those on the same seat, so admitting them here
+ * would spend money on a fault that the cheaper retry is about to clear.
+ */
+const CREDENTIAL_FALLBACK_CODES: Readonly<Record<string, true>> = {
+  'quota-exhausted': true,
+  'missing-credential': true,
+  'missing-executable': true,
+  'auth-expired': true,
+  'auth-missing': true,
+};
+
+function permitsCredentialFallback(response: SeatResponse): boolean {
+  if (response.status === 'ok') return false;
+  return CREDENTIAL_FALLBACK_CODES[response.error.code] === true;
+}
+
+/**
+ * Try one credential path, then the other, but only for failures that a different credential could
+ * actually fix.
+ *
+ * Only reachable under `sub-first`. `api-only` and `sub-only` are requirements rather than
+ * preferences, so crossing paths there would defeat the control that made them worth having.
+ */
+function withCredentialFallback(
+  primary: ProviderAdapter,
+  secondary: () => ProviderAdapter,
+  fallbackTransport: ModelTransport,
+): ProviderAdapter {
+  const adapter: ProviderAdapter = {
+    ...primary,
+    async invoke(request) {
+      const first = await primary.invoke(request);
+      if (!permitsCredentialFallback(first)) return first;
+      const second = await secondary().invoke(request);
+      if (second.status === 'ok') {
+        return {
+          ...second,
+          // The fallback is recorded on the response so a record shows the credential actually spent
+          // and the reason it changed. A silent substitution of a metered call for a subscription one
+          // is exactly what the billing mode exists to make visible.
+          credentialFallback: {
+            fromTransport: primary.transport,
+            toTransport: fallbackTransport,
+            reason: first.status === 'ok' ? 'unknown' : first.error.code,
+          },
+        };
+      }
+      return second;
+    },
+    async probe(context) {
+      return healthFromResponse(
+        await adapter.invoke({
+          context,
+          seatId: `health-${primary.family}`,
+          role: 'health',
+          prompt: healthPrompt,
+        }),
+      );
+    },
+  };
+  return adapter;
+}
+
+/**
+ * Resolve one seat's credential path once, at construction. Shared by every dual-credential family
+ * so precedence is defined in exactly one place — four copies of this would drift, and a seat that
+ * silently picked a different billing path than its neighbours is the failure this prevents.
+ */
+function resolveDualCredentialSeat(seat: DualCredentialSeat): ProviderAdapter {
+  if (seat.billingMode === 'api-only') {
+    return seat.apiKeyPresent
+      ? withTransportResolution(seat.api(), {
+          preferred: 'http',
+          effective: 'http',
+          reason: `Billing mode api-only: using the metered ${seat.credential}. This call is billable and attributable.`,
+        })
+      : createUnconfiguredSeatAdapter(seat);
+  }
+
+  if (seat.billingMode === 'sub-only') {
+    return seat.subscriptionAvailable
+      ? withTransportResolution(seat.subscription(), {
+          preferred: 'subscription-cli',
+          effective: 'subscription-cli',
+          reason: `Billing mode sub-only: using ${seat.subscriptionLabel}. Metered fallback is disabled${
+            seat.apiKeyPresent ? `, so ${seat.credential} was deliberately ignored` : ''
+          }.`,
+        })
+      : createUnconfiguredSeatAdapter(seat);
+  }
+
+  if (seat.preferApi === true && seat.apiKeyPresent) {
+    return withTransportResolution(seat.api(), {
+      preferred: 'http',
+      effective: 'http',
+      reason: `HTTPS was explicitly preferred and ${seat.credential} is set; ${seat.subscriptionLabel} was not used.`,
+    });
+  }
+
+  if (seat.subscriptionAvailable) {
+    // With a key also present the subscription seat gains a metered fallback, but only for failures
+    // a different credential could fix — quota, auth and a missing executable. Everything else,
+    // including every integrity failure, still fails the seat outright.
+    const subscription = seat.apiKeyPresent
+      ? withCredentialFallback(seat.subscription(), seat.api, 'http')
+      : seat.subscription();
+    return withTransportResolution(subscription, {
+      preferred: 'subscription-cli',
+      effective: 'subscription-cli',
+      reason: seat.apiKeyPresent
+        ? `${sentenceCase(seat.subscriptionLabel)} resolved on PATH and is preferred over the metered API key, which remains available if the subscription is exhausted or unauthenticated.`
+        : `${sentenceCase(seat.subscriptionLabel)} resolved on PATH.`,
+    });
+  }
+
+  if (seat.apiKeyPresent) {
+    return withTransportResolution(seat.api(), {
+      preferred: 'subscription-cli',
+      effective: 'http',
+      reason: `No ${seat.subscriptionLabel.replace(/^the /, '')} resolved on PATH; fell back to the metered ${seat.credential}. This call is billable.`,
+    });
+  }
+  return createUnconfiguredSeatAdapter(seat);
+}
+
+/**
  * Resolves xAI once at adapter construction, **subscription first**.
  *
  * The owner holds paid subscriptions for personal work and uses metered API keys for customer work
  * so usage stays attributable and chargeable. The default must therefore spend the subscription he
- * has already paid for, and treat the API key as the fallback — not the reverse. An explicit
- * `transportPreference` overrides the default in either direction.
+ * has already paid for, and treat the API key as the fallback — not the reverse.
+ *
+ * `transportPreference: 'http'` remains a soft preference: it selects the metered path when a key is
+ * present but still falls back to the CLI when one is not. `billingMode: 'api-only'` is the hard
+ * control and fails closed instead.
  */
 export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapter {
   const env = options.env ?? process.env;
   const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
-  const apiKeyPresent = Boolean(env.COUNCIL_XAI_API_KEY);
-  const httpAdapter = (): ProviderAdapter =>
-    createHttpAdapter(
-      {
-        family: 'xai',
-        credential: 'COUNCIL_XAI_API_KEY',
-        endpoint: 'https://api.x.ai/v1/chat/completions',
-        allowRegistryFallback: false,
-      },
-      options.httpTransport,
-    );
-  const cliAdapter = (resolved: string): ProviderAdapter =>
-    createXaiSubscriptionAdapter(
-      options.cliTransport,
-      () => resolved,
-      options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined),
-    );
-
-  if (options.transportPreference === 'http' && apiKeyPresent) {
-    return withTransportResolution(httpAdapter(), {
-      preferred: 'http',
-      effective: 'http',
-      reason:
-        'HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used.',
-    });
-  }
-
-  if (executable) {
-    return withTransportResolution(cliAdapter(executable), {
-      preferred: 'subscription-cli',
-      effective: 'subscription-cli',
-      reason: apiKeyPresent
-        ? 'The grok subscription CLI resolved on PATH and is preferred over the metered API key.'
-        : 'The grok subscription CLI resolved on PATH.',
-    });
-  }
-
-  if (apiKeyPresent) {
-    return withTransportResolution(httpAdapter(), {
-      preferred: 'subscription-cli',
-      effective: 'http',
-      reason:
-        'No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
-    });
-  }
-  return createUnconfiguredXaiAdapter();
+  return resolveDualCredentialSeat({
+    family: 'xai',
+    credential: 'COUNCIL_XAI_API_KEY',
+    subscriptionHint: 'install the grok CLI on PATH',
+    subscriptionLabel: 'the grok subscription CLI',
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    preferApi: options.transportPreference === 'http',
+    subscriptionAvailable: Boolean(executable),
+    apiKeyPresent: Boolean(env.COUNCIL_XAI_API_KEY),
+    subscription: () =>
+      createXaiSubscriptionAdapter(
+        options.cliTransport,
+        () => executable,
+        options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined),
+      ),
+    api: () =>
+      createHttpAdapter(
+        {
+          family: 'xai',
+          credential: 'COUNCIL_XAI_API_KEY',
+          dialect: openAiCompatibleDialect('https://api.x.ai/v1/chat/completions'),
+          allowRegistryFallback: false,
+        },
+        options.httpTransport,
+      ),
+  });
 }
 
 export function createAnthropicAdapter(
@@ -1950,6 +2299,13 @@ export function createAnthropicAdapter(
           '--no-session-persistence',
           '--tools',
           '',
+          // Constrain decoding to the council answer shape instead of asking for JSON in prose. The
+          // prose-only form was observed failing a real motion with `invalid-structured-answer` while
+          // the same seat passed the trivial health prompt, so the seat that always sits was the one
+          // most exposed. The local strict parse still runs: native constrained decoding is a
+          // transport guarantee, not semantic truth, and a non-conforming answer must still fail.
+          '--json-schema',
+          councilAnswerJsonSchema,
           '--output-format',
           'json',
         ],
@@ -1997,53 +2353,47 @@ export function createAnthropicAdapter(
           result.durationMs,
         );
       }
-      // `modelUsage` is keyed by every model the CLI billed for this turn. Exactly one key is the
-      // only shape that attributes an answer to a model: two or more means some other model also
-      // ran (a subagent, a compaction pass, a silent reroute) and nothing in the payload says which
-      // one wrote `result`. The previous code took `actualModels[0]` when the primary was absent
-      // and stamped it `verified` on route `primary`, which reported a model nobody selected as
-      // confirmed. Both shapes now fail closed.
-      const actualModels = Object.keys(parsed.data.modelUsage).sort();
-      const actualModel = actualModels[0];
-      if (actualModel === undefined) {
+      // `modelUsage` is keyed by every model the CLI billed for this turn, and more than one key is
+      // NORMAL: observed live from claude 2.x, a tool-free `-p --model claude-opus-5` run bills
+      // `claude-haiku-4-5-20251001` alongside `claude-opus-5`, because Claude Code uses a small model
+      // for its own background work. Treating multi-key usage as ambiguity would therefore break the
+      // one seat that always sits.
+      //
+      // Attribution comes from the configured route instead. Exactly one route member among the
+      // billed models identifies the responder. None means the answer came from a model nobody
+      // selected — the real defect, which previously passed as `verified` because the code fell back
+      // to `actualModels[0]`. More than one route member is genuinely ambiguous, since the primary
+      // and a declared fallback both running gives no way to say which produced `result`.
+      const billedModels = Object.keys(parsed.data.modelUsage).sort();
+      const routedModels = billedModels.filter(
+        (model) => observedRoute(route, model) !== undefined,
+      );
+      const actualModel = routedModels[0];
+      if (actualModel === undefined || routedModels.length !== 1) {
+        const detail =
+          billedModels.length === 0
+            ? 'claude output did not include model identity'
+            : routedModels.length === 0
+              ? 'claude billed no model from the configured route'
+              : 'claude billed more than one model from the configured route, so the responding model is not attributable';
         return seatError(
           request,
           family,
           route.primary,
           'failed',
           'identity-unverified',
-          'claude output did not include model identity',
-          result.durationMs,
-        );
-      }
-      if (actualModels.length > 1) {
-        return seatError(
-          request,
-          family,
-          route.primary,
-          'failed',
-          'identity-unverified',
-          `claude billed ${actualModels.length} models for one seat, so the responding model is not attributable`,
+          detail,
           result.durationMs,
           false,
-          { actualModel, modelIdentity: 'unverified' },
+          billedModels[0] === undefined
+            ? undefined
+            : { actualModel: billedModels[0], modelIdentity: 'unverified' },
           { requestedEffort: anthropicReasoningEffort, credentialPath: 'subscription' },
         );
       }
       const observed = observedRoute(route, actualModel);
       if (observed === undefined) {
-        return seatError(
-          request,
-          family,
-          route.primary,
-          'failed',
-          'identity-unverified',
-          'claude responded with a model outside the configured route',
-          result.durationMs,
-          false,
-          { actualModel, modelIdentity: 'unverified' },
-          { requestedEffort: anthropicReasoningEffort, credentialPath: 'subscription' },
-        );
+        throw new Error('Route membership was established but could not be resolved');
       }
       const answer = parseAnswer(request, family, parsed.data.result);
       if (!answer) {
@@ -2083,4 +2433,123 @@ export function createAnthropicAdapter(
     },
   };
   return adapter;
+}
+
+export interface DualCredentialAdapterOptions {
+  env?: Readonly<Record<string, string | undefined>> | undefined;
+  httpTransport?: HttpTransport | undefined;
+  cliTransport?: CliTransport | undefined;
+  resolveExecutable?: (() => string | undefined) | undefined;
+  billingMode?: BillingMode | undefined;
+}
+
+/**
+ * Anthropic with both credential paths: the claude CLI on a subscription, the Messages API on a
+ * metered key.
+ *
+ * The subscription path is not merely preferred but materially stronger: the CLI adapter binds the
+ * responding model from `modelUsage` and runs tool-free, whereas the API path can only bind what the
+ * response body states. Both now verify the responding model against the configured route before a
+ * seat counts, so neither can report a drifted model as confirmed — but the fallback exists for
+ * availability, not because the paths are equivalent.
+ */
+export function createAnthropicDualAdapter(
+  options: DualCredentialAdapterOptions = {},
+): ProviderAdapter {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? (() => Bun.which('claude') ?? undefined))();
+  return resolveDualCredentialSeat({
+    family: 'anthropic',
+    credential: 'COUNCIL_ANTHROPIC_API_KEY',
+    subscriptionHint: 'install the claude CLI on PATH',
+    subscriptionLabel: 'the claude subscription CLI',
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    // An executable that is not absolute is deliberately not treated as available: the CLI adapter
+    // refuses it as `unsafe-transport`, and counting it here would resolve to a seat that can only
+    // fail.
+    subscriptionAvailable: Boolean(executable && isAbsolute(executable)),
+    apiKeyPresent: Boolean(env.COUNCIL_ANTHROPIC_API_KEY),
+    subscription: () => createAnthropicAdapter(options.cliTransport, () => executable),
+    api: () =>
+      createHttpAdapter(
+        {
+          family: 'anthropic',
+          credential: 'COUNCIL_ANTHROPIC_API_KEY',
+          dialect: anthropicMessagesDialect,
+          allowRegistryFallback: false,
+        },
+        options.httpTransport,
+      ),
+  });
+}
+
+/**
+ * OpenAI with both credential paths: the codex CLI on a subscription, chat completions on a metered
+ * key.
+ *
+ * Codex is the only seat that attests its own reasoning effort, so the API path loses
+ * `observedEffort` as well as the CLI's init-frame isolation evidence. That loss is recorded rather
+ * than papered over: the API seat carries `requestedEffort` alone.
+ */
+export function createOpenAiDualAdapter(
+  options: DualCredentialAdapterOptions = {},
+): ProviderAdapter {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? (() => Bun.which('codex') ?? undefined))();
+  return resolveDualCredentialSeat({
+    family: 'openai',
+    credential: 'COUNCIL_OPENAI_API_KEY',
+    subscriptionHint: 'install the codex CLI on PATH and sign in',
+    subscriptionLabel: 'the codex subscription CLI',
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    subscriptionAvailable: Boolean(executable),
+    apiKeyPresent: Boolean(env.COUNCIL_OPENAI_API_KEY),
+    subscription: () => createOpenAiCodexAdapter(options.cliTransport, () => executable),
+    api: () =>
+      createHttpAdapter(
+        {
+          family: 'openai',
+          credential: 'COUNCIL_OPENAI_API_KEY',
+          dialect: openAiCompatibleDialect('https://api.openai.com/v1/chat/completions'),
+          allowRegistryFallback: false,
+        },
+        options.httpTransport,
+      ),
+  });
+}
+
+/**
+ * Google with both credential paths: the agy CLI on a subscription, generateContent on a metered
+ * key.
+ *
+ * Gemini reports identity as `modelVersion`, which is what the shared path compares against the
+ * configured route. That matters here more than elsewhere: Gemini aliases (`-latest`, dated
+ * snapshots) resolve server-side, so a configured alias that returns a dated version is a genuine
+ * route mismatch and fails closed rather than being accepted as the same model.
+ */
+export function createGoogleDualAdapter(
+  options: DualCredentialAdapterOptions = {},
+): ProviderAdapter {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? resolveAgyExecutable)();
+  return resolveDualCredentialSeat({
+    family: 'google',
+    credential: 'COUNCIL_GEMINI_API_KEY',
+    subscriptionHint: 'install the agy CLI on PATH',
+    subscriptionLabel: 'the agy subscription CLI',
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    subscriptionAvailable: Boolean(executable),
+    apiKeyPresent: Boolean(env.COUNCIL_GEMINI_API_KEY),
+    subscription: () => createGoogleSubscriptionAdapter(options.cliTransport, () => executable),
+    api: () =>
+      createHttpAdapter(
+        {
+          family: 'google',
+          credential: 'COUNCIL_GEMINI_API_KEY',
+          dialect: geminiGenerateContentDialect,
+          allowRegistryFallback: false,
+        },
+        options.httpTransport,
+      ),
+  });
 }

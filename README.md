@@ -60,6 +60,22 @@ bun --no-install dist/cli.js run --dry-run \
   --classification public \
   --motion "Choose an authentication architecture"
 
+# Record the chair's ruling on an executed run, and the resolution that follows from it.
+# A run never resolves itself; this is the only path from deliberation to a decision.
+bun --no-install dist/cli.js adjudicate \
+  --records-root ~/.claude/council \
+  --run-id run-abc123 \
+  --decision "Adopt the append-only record store." \
+  --rationale "Three families agreed on durability; the cost objection was noted and accepted." \
+  --authorised-by "council-chair" \
+  --dissent-acknowledged
+
+# Customer work: every seat on a metered key, nothing on a personal subscription
+bun --no-install dist/cli.js council \
+  --classification internal \
+  --billing api-only \
+  --motion "Which integration boundary should this client service expose?"
+
 # Live route diagnostics
 bun --no-install dist/cli.js doctor --json
 
@@ -104,30 +120,49 @@ The default command seat count is five and the standing `council` quorum remains
 
 ## Provider routes
 
-| Family    | Exact primary         | Same-family fallback    | Transport                       | Credential                                    |
-| --------- | --------------------- | ----------------------- | ------------------------------- | --------------------------------------------- |
-| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI             | local Claude subscription                     |
-| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`           | local OpenAI subscription                     |
-| xAI       | `grok-4.6`            | `grok-4.5`              | isolated `grok` CLI, else HTTPS | xAI subscription **or** `COUNCIL_XAI_API_KEY` |
-| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI        | local Google subscription                     |
-| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                           | `COUNCIL_DEEPSEEK_API_KEY`                    |
-| Moonshot  | `kimi-k3`             | none                    | HTTPS                           | `COUNCIL_MOONSHOT_API_KEY`                    |
+| Family    | Exact primary         | Same-family fallback    | Subscription transport   | Metered fallback            |
+| --------- | --------------------- | ----------------------- | ------------------------ | --------------------------- |
+| Anthropic | `claude-opus-5`       | none                    | isolated `claude` CLI    | `COUNCIL_ANTHROPIC_API_KEY` |
+| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`    | `COUNCIL_OPENAI_API_KEY`    |
+| xAI       | `grok-4.6`            | `grok-4.5`              | isolated `grok` CLI      | `COUNCIL_XAI_API_KEY`       |
+| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI | `COUNCIL_GEMINI_API_KEY`    |
+| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | none                     | `COUNCIL_DEEPSEEK_API_KEY`  |
+| Moonshot  | `kimi-k3`             | none                    | none                     | `COUNCIL_MOONSHOT_API_KEY`  |
 
-### xAI: subscription first, metered API as the fallback
+A family's identity is the same on both paths, so quorum still counts one vote per vendor. The
+credential decides who pays, not who spoke.
 
-xAI is the one family with two governed transports. The effective transport is resolved from
-observable facts and reported in `doctor` and `self-check`:
+### Billing: subscription first, metered API as the fallback
 
-1. A `grok` binary resolvable on `PATH` → isolated subscription CLI, using that subscription's
-   OAuth session and no API key. **This is the default**, because a subscription is already paid
-   for and a metered key is not.
-2. Otherwise `COUNCIL_XAI_API_KEY` present → HTTPS. The resolution reason says plainly that the call is
-   billable.
+Four families have two governed credential paths. The effective path is resolved from observable
+facts at construction, and reported per seat by `doctor`, `health`, `self-check` and `version`:
+
+1. A subscription transport available → use it. **This is the default**, because a subscription is
+   already paid for and a metered key is not.
+2. Otherwise the family's `COUNCIL_*_API_KEY` → HTTPS. The resolution reason says plainly that the
+   call is billable.
 3. Otherwise `unconfigured`, naming both options.
 
-There is currently **no CLI flag** to force the metered path; the preference is a programmatic
-adapter option only (`src/providers/index.ts:34`). Deliberate per-run selection arrives with the
-`--billing` mode described in the roadmap below.
+`--billing` selects the mode per run, and a project policy may pin one with a `billingMode` field.
+Precedence is flag, then policy, then default:
+
+| Mode        | Behaviour                                                                    |
+| ----------- | ---------------------------------------------------------------------------- |
+| `sub-first` | Default. Subscription, falling back to a metered key.                        |
+| `api-only`  | Metered key only. For customer work: every call attributable and chargeable. |
+| `sub-only`  | Subscription only. Guarantees a run cannot incur metered spend.              |
+
+`api-only` and `sub-only` fail closed to `unconfigured` rather than crossing to the other path. A
+billing mode that can be quietly overridden is not a control.
+
+**Mid-run fallback is bounded, and the boundary is a safety property.** Under `sub-first` a seat whose
+subscription is quota-exhausted, unauthenticated or missing its executable retries once on the
+metered path, and the response records `credentialFallback` so the substitution is visible in the
+archive. It does **not** fall back on `identity-unverified`, `unsafe-tool-isolation`,
+`invalid-structured-answer`, a model reroute, or any policy block: retrying an integrity failure down
+a second billing path would let a misbehaving transport launder itself into a passing seat, which is
+strictly worse than a missing vote. Transport faults are excluded too, because the runner already
+retries those on the same seat more cheaply.
 
 Switching requires no edit: install or remove the binary, add or remove the key.
 `ModelRoute.transport` plus `alternateTransports` in the registry — not adapter code — governs which
@@ -150,14 +185,22 @@ rejection of every tool-use event.
 
 ### Credentials
 
-Anthropic, OpenAI and Google use authenticated local subscription CLIs and never
-read `OPENAI_API_KEY` or `GEMINI_API_KEY`; a missing executable disables that
-seat rather than changing transport. The HTTPS keys are `COUNCIL_XAI_API_KEY`,
-`COUNCIL_DEEPSEEK_API_KEY` and `COUNCIL_MOONSHOT_API_KEY`. Export them in the launch
-environment, or let the maintained Claude facade load the same names from the
-machine-local, untracked `~/.claude/council/providers.env`. An unset credential
-disables only its own family. Failed, unavailable and identity-unverified seats
-remain visible in the structured result. Cross-provider fallback is prohibited.
+All six credentials are `COUNCIL_`-prefixed: `COUNCIL_ANTHROPIC_API_KEY`,
+`COUNCIL_OPENAI_API_KEY`, `COUNCIL_GEMINI_API_KEY`, `COUNCIL_XAI_API_KEY`,
+`COUNCIL_DEEPSEEK_API_KEY` and `COUNCIL_MOONSHOT_API_KEY`. Bare vendor names are
+ambient — any harness or SDK that loads the surrounding directory will claim and
+spend them — so the launcher rejects them rather than accepting them quietly.
+Export them in the launch environment, or let the maintained Claude facade load the
+same names from the machine-local, untracked `~/.claude/council/providers.env`.
+
+**Setting one of the four subscription families' keys does not start spending it.**
+Under the default `sub-first` mode the subscription CLI is preferred, and the key is
+reached only when that subscription is exhausted, unauthenticated or absent. Use
+`--billing api-only` when you want the metered path deliberately.
+
+An unset credential disables only its own family. Failed, unavailable and
+identity-unverified seats remain visible in the structured result. Cross-_provider_
+fallback is prohibited: a family may change credential path, never identity.
 
 ### Adopting a new model without a release
 

@@ -20,6 +20,9 @@ import {
   type RunManifest,
 } from './domain/schemas';
 import {
+  BillingModeSchema,
+  DEFAULT_BILLING_MODE,
+  type BillingMode,
   type ProviderAdapter,
   type ProviderContext,
   type ProviderDiagnostic,
@@ -103,6 +106,7 @@ const BOOLEAN_FLAGS = new Set([
   'no-dissent',
 ]);
 const COMMON_RUN_FLAGS = new Set([
+  'billing',
   'classification',
   'contested',
   'domain',
@@ -124,7 +128,7 @@ const COMMON_RUN_FLAGS = new Set([
   'timeout-ms',
 ]);
 const COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, 'min-families']);
-const REGISTRY_REPORT_FLAGS = new Set(['help', 'json', 'records-root', 'registry']);
+const REGISTRY_REPORT_FLAGS = new Set(['help', 'json', 'records-root', 'registry', 'billing']);
 const ADJUDICATE_FLAGS = new Set([
   'help',
   'json',
@@ -171,6 +175,7 @@ interface RunOptions {
   readonly minimumFamilies?: number;
   readonly reducedQuorumWarning?: string;
   readonly recordsRoot?: string;
+  readonly billingMode: BillingMode;
 }
 
 interface ConfiguredModelRegistry extends LoadedModelRegistry {
@@ -476,6 +481,32 @@ function commandDefaults(command: RunOptions['command']): {
   return { impact: 'medium', contested: false, rounds: 1 };
 }
 
+/**
+ * Precedence: explicit `--billing` beats a project policy pin, which beats the `sub-first` default.
+ *
+ * The flag wins so an operator can override a pin for one deliberate run, but the pin exists so a
+ * project's normal case does not depend on remembering the flag. A conflict is not an error: an
+ * operator typing `--billing` has said something more specific than the file did.
+ */
+function resolveBillingMode(
+  parsed: ParsedArguments,
+  policy: ProjectPolicy | undefined,
+): BillingMode {
+  const flag = oneFlag(parsed, 'billing');
+  if (flag !== undefined) return BillingModeSchema.parse(flag);
+  return policy?.billingMode ?? DEFAULT_BILLING_MODE;
+}
+
+/**
+ * `doctor`, `health`, `version` and `self-check` have no project policy in scope, so they honour
+ * `--billing` alone. Without this they would always describe the `sub-first` roster and could report a
+ * healthy subscription seat for a run that would actually take the metered path.
+ */
+function reportBillingMode(parsed: ParsedArguments): BillingMode {
+  const flag = oneFlag(parsed, 'billing');
+  return flag === undefined ? DEFAULT_BILLING_MODE : BillingModeSchema.parse(flag);
+}
+
 async function parseRunOptions(
   command: RunOptions['command'],
   parsed: ParsedArguments,
@@ -580,6 +611,7 @@ async function parseRunOptions(
     ...(refinementTrigger === undefined ? {} : { refinementTrigger }),
     timeoutMs: integerFlag(parsed, 'timeout-ms', DEFAULT_TIMEOUT_MS, 1, 3_600_000),
     ...(recordsRoot === undefined ? {} : { recordsRoot }),
+    billingMode: resolveBillingMode(parsed, policy),
   };
 }
 
@@ -908,7 +940,11 @@ async function runCouncilCommand(
   }
 
   const adapters =
-    environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
+    environment.adapters ??
+    createProviderRoster({
+      env: environment.env ?? process.env,
+      billingMode: options.billingMode,
+    });
   const diagnostics: ProviderDiagnostic[] = [];
   const context: ProviderContext = {
     registry,
@@ -1042,7 +1078,11 @@ async function providerContext(
 }> {
   const configured = await configuredModelRegistry(parsed, environment);
   const roster =
-    environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
+    environment.adapters ??
+    createProviderRoster({
+      env: environment.env ?? process.env,
+      billingMode: reportBillingMode(parsed),
+    });
   return {
     configured,
     roster,
@@ -1114,7 +1154,12 @@ async function healthCommand(
   const providerConfiguration = await providerContext(parsed, environment);
   const adapters = orderedAdapters(providerConfiguration.roster);
   if (command === 'doctor') {
-    const report = await doctor(adapters, providerConfiguration.context);
+    const report = await doctor(
+      adapters,
+      providerConfiguration.context,
+      (environment.now ?? (() => new Date().toISOString()))(),
+      reportBillingMode(parsed),
+    );
     return output(0, {
       ...report,
       engineIdentity: engineIdentity(providerConfiguration.configured, environment),
@@ -1478,7 +1523,11 @@ export async function runCliFacade(
         throw new Error('self-check accepts no positional arguments');
       const configured = await configuredModelRegistry(parsed, environment);
       const roster =
-        environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
+        environment.adapters ??
+        createProviderRoster({
+          env: environment.env ?? process.env,
+          billingMode: reportBillingMode(parsed),
+        });
       return output(0, {
         ok: true,
         schemaVersion: SCHEMA_VERSION,

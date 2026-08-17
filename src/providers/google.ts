@@ -1,12 +1,9 @@
 import {
-  createGoogleSubscriptionAdapter,
-  type CliTransport,
+  createGoogleDualAdapter,
+  type DualCredentialAdapterOptions,
   type ProviderAdapter,
 } from '../execution/provider';
 
-export function googleAdapter(
-  transport?: CliTransport,
-  resolveExecutable?: () => string | undefined,
-): ProviderAdapter {
-  return createGoogleSubscriptionAdapter(transport, resolveExecutable);
+export function googleAdapter(options: DualCredentialAdapterOptions = {}): ProviderAdapter {
+  return createGoogleDualAdapter(options);
 }

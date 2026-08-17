@@ -24,11 +24,17 @@ export const ProviderFamilySchema = z.enum([
 ]);
 export type ProviderFamily = z.infer<typeof ProviderFamilySchema>;
 
+/**
+ * `billingMode` lets a project pin how its seats are paid for. Customer work sets `api-only` so
+ * every call is attributable and chargeable, and the pin lives with the project rather than being
+ * retyped per invocation — a billing control that depends on remembering a flag is not a control.
+ */
 export const ProjectPolicySchema = z.strictObject({
   projectId: NonEmptyStringSchema,
   classification: DataClassificationSchema,
   allowedProviders: z.array(ProviderFamilySchema),
   providerCeilings: z.partialRecord(ProviderFamilySchema, DataClassificationSchema).optional(),
+  billingMode: z.enum(['sub-first', 'api-only', 'sub-only']).optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });
@@ -192,6 +198,18 @@ export const SeatUsageSchema = z.strictObject({
 export type SeatUsage = z.infer<typeof SeatUsageSchema>;
 
 /**
+ * Records that a seat's credential path changed mid-invocation, and why. Present only when a
+ * fallback actually fired, so its absence means the seat was served by the path that was selected at
+ * construction — never "we did not look".
+ */
+export const CredentialFallbackSchema = z.strictObject({
+  fromTransport: ModelTransportSchema,
+  toTransport: ModelTransportSchema,
+  reason: NonEmptyStringSchema,
+});
+export type CredentialFallback = z.infer<typeof CredentialFallbackSchema>;
+
+/**
  * Attribution common to every seat outcome. `requestedEffort` is what we asked for;
  * `observedEffort` is what the provider attested. They are separate fields precisely because only
  * one seat (Codex) currently attests it — an unattested request must never read as a confirmation,
@@ -201,6 +219,7 @@ const SeatAttributionShape = {
   requestedEffort: ReasoningEffortSchema.optional(),
   observedEffort: ReasoningEffortSchema.optional(),
   credentialPath: CredentialPathSchema.optional(),
+  credentialFallback: CredentialFallbackSchema.optional(),
   usage: SeatUsageSchema.optional(),
 };
 

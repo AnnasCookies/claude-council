@@ -1,11 +1,16 @@
-import { createHttpAdapter, type HttpTransport, type ProviderAdapter } from '../execution/provider';
+import {
+  createHttpAdapter,
+  openAiCompatibleDialect,
+  type HttpTransport,
+  type ProviderAdapter,
+} from '../execution/provider';
 
 export function deepseekAdapter(transport?: HttpTransport): ProviderAdapter {
   return createHttpAdapter(
     {
       family: 'deepseek',
       credential: 'COUNCIL_DEEPSEEK_API_KEY',
-      endpoint: 'https://api.deepseek.com/chat/completions',
+      dialect: openAiCompatibleDialect('https://api.deepseek.com/chat/completions'),
       allowRegistryFallback: true,
     },
     transport,

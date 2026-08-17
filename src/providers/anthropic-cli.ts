@@ -1,12 +1,9 @@
 import {
-  createAnthropicAdapter,
-  type CliTransport,
+  createAnthropicDualAdapter,
+  type DualCredentialAdapterOptions,
   type ProviderAdapter,
 } from '../execution/provider';
 
-export function anthropicAdapter(
-  transport?: CliTransport,
-  resolveExecutable?: () => string | undefined,
-): ProviderAdapter {
-  return createAnthropicAdapter(transport, resolveExecutable);
+export function anthropicAdapter(options: DualCredentialAdapterOptions = {}): ProviderAdapter {
+  return createAnthropicDualAdapter(options);
 }

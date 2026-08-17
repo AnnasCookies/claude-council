@@ -150,7 +150,7 @@ describe('engine version identity', () => {
         preferred: 'subscription-cli',
         effective: 'http',
         reason:
-          'No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
+          'No grok subscription CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
       });
     });
   });
