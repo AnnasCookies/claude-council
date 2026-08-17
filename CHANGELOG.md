@@ -4,6 +4,33 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## 2026.8.16
+
+### Changed
+
+- The self-hosted marketplace is renamed from `hex-plugins` to
+  `annascookies-plugins`, and its `owner` now names this fork's publisher
+  rather than the upstream author. `.claude-plugin/marketplace.json` does not
+  exist upstream — this fork added it — so the old name and owner were an
+  identity signal pointing at the wrong party: a manifest self-hosted from this
+  repository, publishing this repository's build, declared someone else as its
+  owner. That is misleading precisely when the question being asked is "whose
+  engine am I actually running?".
+
+  **MIT attribution is unchanged and must stay unchanged.** `LICENSE` still
+  reads `Copyright (c) 2025-2026 hex`, the `upstream` remote still points at
+  `hex/claude-council`, and `tests/release/repository-ownership.ts` still
+  enforces both. Copyright attribution and marketplace publisher identity are
+  different claims; only the latter was wrong.
+
+  **Breaking for installed clients.** The plugin id moves from
+  `claude-council@hex-plugins` to `claude-council@annascookies-plugins`.
+  Existing installs must uninstall the plugin, remove the old marketplace, add
+  the new one, reinstall and re-enable. The runtime shim matches on the
+  `claude-council@` prefix so the suffix does not affect resolution, but it
+  requires exactly one enabled install — so remove the old marketplace before
+  enabling the new one, never both at once.
+
 ## 2026.8.15
 
 ### Added

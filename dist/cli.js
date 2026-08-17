@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.8.15",
+  version: "2026.8.16",
   type: "module",
   engines: {
     bun: ">=1.3.14"
