@@ -1,9 +1,9 @@
 {
-  "name": "hex-plugins",
+  "name": "annascookies-plugins",
   "description": "Explicit standing-council workflows and their bundled runtime",
   "owner": {
-    "name": "hex",
-    "url": "https://github.com/hex"
+    "name": "AnnasCookies",
+    "url": "https://github.com/AnnasCookies"
   },
   "plugins": [
     {
