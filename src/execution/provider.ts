@@ -1646,7 +1646,7 @@ export interface XaiAdapterOptions {
 }
 
 const xaiUnconfiguredReason =
-  'set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
+  'set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
 
 function withTransportResolution(
   adapter: ProviderAdapter,
@@ -1725,12 +1725,12 @@ function createUnconfiguredXaiAdapter(): ProviderAdapter {
 export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapter {
   const env = options.env ?? process.env;
   const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
-  const apiKeyPresent = Boolean(env.XAI_API_KEY);
+  const apiKeyPresent = Boolean(env.COUNCIL_XAI_API_KEY);
   const httpAdapter = (): ProviderAdapter =>
     createHttpAdapter(
       {
         family: 'xai',
-        credential: 'XAI_API_KEY',
+        credential: 'COUNCIL_XAI_API_KEY',
         endpoint: 'https://api.x.ai/v1/chat/completions',
         allowRegistryFallback: false,
       },
@@ -1747,7 +1747,8 @@ export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapt
     return withTransportResolution(httpAdapter(), {
       preferred: 'http',
       effective: 'http',
-      reason: 'HTTPS was explicitly preferred and XAI_API_KEY is set; the grok CLI was not used.',
+      reason:
+        'HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used.',
     });
   }
 
@@ -1766,7 +1767,7 @@ export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapt
       preferred: 'subscription-cli',
       effective: 'http',
       reason:
-        'No grok CLI resolved on PATH; fell back to the metered XAI_API_KEY. This call is billable.',
+        'No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
     });
   }
   return createUnconfiguredXaiAdapter();

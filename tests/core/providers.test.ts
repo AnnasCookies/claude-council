@@ -440,17 +440,17 @@ describe('HTTP provider adapters', () => {
   test('xAI and Moonshot preserve exact family and actual response identity', async () => {
     const xaiTransport = new FakeHttp([okHttp(registry.xai.primary)]);
     const xaiResponse = await xaiAdapter({
-      env: { XAI_API_KEY: 'test-key' },
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
       httpTransport: xaiTransport,
       cliTransport: new FakeCli(okCli('')),
       resolveExecutable: () => undefined,
-    }).invoke(request(context({ XAI_API_KEY: 'test-key' })));
+    }).invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' })));
     expect(xaiResponse.status).toBe('ok');
     expect(xaiResponse.actualModel).toBe(registry.xai.primary);
 
     const moonshotTransport = new FakeHttp([okHttp('kimi-k3')]);
     const moonshotResponse = await moonshotAdapter(moonshotTransport).invoke(
-      request(context({ MOONSHOT_API_KEY: 'test-key' })),
+      request(context({ COUNCIL_MOONSHOT_API_KEY: 'test-key' })),
     );
     expect(moonshotResponse.status).toBe('ok');
     expect(moonshotResponse.actualModel).toBe('kimi-k3');
@@ -459,7 +459,7 @@ describe('HTTP provider adapters', () => {
   test('DeepSeek fallback remains the same family and is explicit', async () => {
     const transport = new FakeHttp([modelMissing(), okHttp('deepseek-v4-flash')]);
     const response = await deepseekAdapter(transport).invoke(
-      request(context({ DEEPSEEK_API_KEY: 'test-deepseek-key' })),
+      request(context({ COUNCIL_DEEPSEEK_API_KEY: 'test-deepseek-key' })),
     );
 
     expect(response.provider).toBe('deepseek');
@@ -482,11 +482,11 @@ describe('HTTP provider adapters', () => {
     const secret = ['sk', 'proj', 'abcdefghijklmnopqrstuvwxyz0123456789'].join('-');
     const transport = new FakeHttp([okHttp(registry.xai.primary, `not-json ${secret}`)]);
     const response = await xaiAdapter({
-      env: { XAI_API_KEY: 'test-key' },
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
       httpTransport: transport,
       cliTransport: new FakeCli(okCli('')),
       resolveExecutable: () => undefined,
-    }).invoke(request(context({ XAI_API_KEY: 'test-key' }, diagnostics)));
+    }).invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' }, diagnostics)));
 
     expect(response.status).toBe('failed');
     expect(diagnostics).toHaveLength(1);
@@ -500,13 +500,13 @@ describe('xAI automatic transport resolution', () => {
     const http = new FakeHttp([okHttp(registry.xai.primary), okHttp(registry.xai.primary)]);
     const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
     const adapter = xaiAdapter({
-      env: { XAI_API_KEY: 'test-key' },
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
       httpTransport: http,
       cliTransport: cli,
       resolveExecutable: () => process.execPath,
     });
 
-    const response = await adapter.invoke(request(context({ XAI_API_KEY: 'test-key' })));
+    const response = await adapter.invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' })));
 
     expect(adapter.transport).toBe('subscription-cli');
     expect(adapter.transportResolution).toEqual({
@@ -524,19 +524,19 @@ describe('xAI automatic transport resolution', () => {
     const http = new FakeHttp([okHttp(registry.xai.primary)]);
     const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
     const adapter = xaiAdapter({
-      env: { XAI_API_KEY: 'test-key' },
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
       httpTransport: http,
       cliTransport: cli,
       resolveExecutable: () => process.execPath,
       transportPreference: 'http',
     });
 
-    const response = await adapter.invoke(request(context({ XAI_API_KEY: 'test-key' })));
+    const response = await adapter.invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' })));
 
     expect(response.status).toBe('ok');
     expect(adapter.transport).toBe('http');
     expect(adapter.transportResolution?.reason).toBe(
-      'HTTPS was explicitly preferred and XAI_API_KEY is set; the grok CLI was not used.',
+      'HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used.',
     );
     expect(http.calls).toHaveLength(1);
     expect(cli.calls).toHaveLength(0);
@@ -620,7 +620,7 @@ describe('xAI automatic transport resolution', () => {
       resolveExecutable: () => undefined,
     });
     const expectedReason =
-      'set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
+      'set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
 
     expect(adapter.transportResolution).toEqual({
       preferred: 'subscription-cli',

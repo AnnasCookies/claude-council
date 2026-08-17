@@ -52,8 +52,12 @@ interface PatternDetector {
   readonly extractValue: (match: RegExpExecArray) => string | undefined;
 }
 
+// Detection, not authentication. This must keep matching the BARE vendor names because those are
+// the forms most likely to leak into pasted evidence, and it must also match the council's own
+// `COUNCIL_`-prefixed names. The prefix is non-capturing so the captured group stays the bare name
+// and the kind mapping below is unaffected.
 const PROVIDER_ASSIGNMENT_PATTERN =
-  /(?:^|[\r\n,{])[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?["']?(ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY|GEMINI_API_KEY|DEEPSEEK_API_KEY|MOONSHOT_API_KEY|KIMI_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#;,}\]]+))/gim;
+  /(?:^|[\r\n,{])[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?["']?(?:COUNCIL_)?(ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY|GEMINI_API_KEY|DEEPSEEK_API_KEY|MOONSHOT_API_KEY|KIMI_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#;,}\]]+))/gim;
 
 const PROVIDER_ASSIGNMENT_KINDS: Readonly<Record<string, SecretKind>> = {
   ANTHROPIC_API_KEY: 'ANTHROPIC',

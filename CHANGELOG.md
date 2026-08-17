@@ -4,6 +4,44 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## 2026.8.18
+
+### Changed
+
+- **Credential environment variables are now `COUNCIL_`-prefixed.** `XAI_API_KEY`,
+  `DEEPSEEK_API_KEY` and `MOONSHOT_API_KEY` become `COUNCIL_XAI_API_KEY`,
+  `COUNCIL_DEEPSEEK_API_KEY` and `COUNCIL_MOONSHOT_API_KEY`.
+
+  Bare vendor names are ambient. Any agent harness, SDK or application that loads
+  the surrounding directory will claim and spend them — which has already happened
+  once, when a key intended solely for localhost dev testing was picked up and used
+  for general-purpose inference by unrelated tooling. The prefix makes these keys
+  inert to everything except this council, so a council credential can sit in a
+  file without another tool billing it.
+
+  **Breaking.** A bare name in `~/.claude/council/providers.env` is now rejected
+  rather than silently accepted, with an error naming the replacement:
+  `Unsupported credential environment name: XAI_API_KEY — rename it to
+COUNCIL_XAI_API_KEY; bare vendor names are ignored so other tools cannot claim
+this key`. Failing closed is deliberate: quietly accepting the bare form would
+  preserve the exact hazard the prefix removes.
+
+  Anthropic, OpenAI and Google are unaffected — they authenticate through local
+  subscription CLIs and read no API key. When their metered fallbacks land they will
+  use `COUNCIL_ANTHROPIC_API_KEY`, `COUNCIL_OPENAI_API_KEY` and
+  `COUNCIL_GEMINI_API_KEY`.
+
+### Unchanged, deliberately
+
+- **The outbound secret scanner still detects both forms.** `src/policy/secrets.ts`
+  is detection, not authentication: it must keep matching bare `ANTHROPIC_API_KEY`,
+  `XAI_API_KEY` and friends, because those are the forms that leak into pasted
+  evidence, `.env` excerpts and shell transcripts. It now matches the
+  `COUNCIL_`-prefixed forms as well, via a non-capturing optional prefix so the
+  captured name — and therefore the secret-kind mapping — is unchanged. A test
+  asserts both forms are redacted so the bare coverage cannot be lost in a future
+  rename.
+
 ## 2026.8.17
 
 ### Fixed

@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.8.17",
+  version: "2026.8.18",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -16089,7 +16089,7 @@ var RedactionResultSchema = exports_external.strictObject({
   findings: exports_external.array(SecretFindingSchema),
   hardBlocked: exports_external.boolean()
 });
-var PROVIDER_ASSIGNMENT_PATTERN = /(?:^|[\r\n,{])[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?["']?(ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY|GEMINI_API_KEY|DEEPSEEK_API_KEY|MOONSHOT_API_KEY|KIMI_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#;,}\]]+))/gim;
+var PROVIDER_ASSIGNMENT_PATTERN = /(?:^|[\r\n,{])[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?["']?(?:COUNCIL_)?(ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY|GEMINI_API_KEY|DEEPSEEK_API_KEY|MOONSHOT_API_KEY|KIMI_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s#;,}\]]+))/gim;
 var PROVIDER_ASSIGNMENT_KINDS = {
   ANTHROPIC_API_KEY: "ANTHROPIC",
   OPENAI_API_KEY: "OPENAI",
@@ -17464,7 +17464,7 @@ ${structuredPrompt(prompt)}`;
     output: extractGrokOutput
   }, transport, resolveExecutable);
 }
-var xaiUnconfiguredReason = "set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH";
+var xaiUnconfiguredReason = "set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH";
 function withTransportResolution(adapter, transportResolution) {
   return {
     ...adapter,
@@ -17515,10 +17515,10 @@ function createUnconfiguredXaiAdapter() {
 function createXaiAdapter(options = {}) {
   const env = options.env ?? process.env;
   const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
-  const apiKeyPresent = Boolean(env.XAI_API_KEY);
+  const apiKeyPresent = Boolean(env.COUNCIL_XAI_API_KEY);
   const httpAdapter = () => createHttpAdapter({
     family: "xai",
-    credential: "XAI_API_KEY",
+    credential: "COUNCIL_XAI_API_KEY",
     endpoint: "https://api.x.ai/v1/chat/completions",
     allowRegistryFallback: false
   }, options.httpTransport);
@@ -17527,7 +17527,7 @@ function createXaiAdapter(options = {}) {
     return withTransportResolution(httpAdapter(), {
       preferred: "http",
       effective: "http",
-      reason: "HTTPS was explicitly preferred and XAI_API_KEY is set; the grok CLI was not used."
+      reason: "HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used."
     });
   }
   if (executable) {
@@ -17541,7 +17541,7 @@ function createXaiAdapter(options = {}) {
     return withTransportResolution(httpAdapter(), {
       preferred: "subscription-cli",
       effective: "http",
-      reason: "No grok CLI resolved on PATH; fell back to the metered XAI_API_KEY. This call is billable."
+      reason: "No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable."
     });
   }
   return createUnconfiguredXaiAdapter();
@@ -19321,7 +19321,7 @@ function anthropicAdapter(transport, resolveExecutable) {
 function deepseekAdapter(transport) {
   return createHttpAdapter({
     family: "deepseek",
-    credential: "DEEPSEEK_API_KEY",
+    credential: "COUNCIL_DEEPSEEK_API_KEY",
     endpoint: "https://api.deepseek.com/chat/completions",
     allowRegistryFallback: true
   }, transport);
@@ -19336,7 +19336,7 @@ function googleAdapter(transport, resolveExecutable) {
 function moonshotAdapter(transport) {
   return createHttpAdapter({
     family: "moonshot",
-    credential: "MOONSHOT_API_KEY",
+    credential: "COUNCIL_MOONSHOT_API_KEY",
     endpoint: "https://api.moonshot.ai/v1/chat/completions",
     allowRegistryFallback: false
   }, transport);

@@ -22,7 +22,7 @@ const NOW = '2026-07-28T12:00:00.000Z';
 const REDUCED_QUORUM_WARNING =
   'REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.';
 const AUTO_REDUCED_QUORUM_WARNING =
-  'REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: xai — missing key (missing XAI_API_KEY); deepseek — identity-unverified (provider response did not expose actual model identity).';
+  'REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: xai — missing key (missing COUNCIL_XAI_API_KEY); deepseek — identity-unverified (provider response did not expose actual model identity).';
 
 interface FixtureProviderState {
   readonly availability?: Availability['status'];
@@ -439,7 +439,7 @@ describe('public CLI facade', () => {
         providerStates: {
           xai: {
             availability: 'unconfigured',
-            availabilityReason: 'missing XAI_API_KEY',
+            availabilityReason: 'missing COUNCIL_XAI_API_KEY',
           },
           deepseek: {
             health: 'identity-unverified',
@@ -482,7 +482,7 @@ describe('public CLI facade', () => {
       ]);
       expect(payload.preflight.selectedProviders).toEqual(['anthropic', 'openai', 'google']);
       expect(payload.preflight.unavailableProviders).toEqual([
-        { provider: 'xai', reason: 'missing key', detail: 'missing XAI_API_KEY' },
+        { provider: 'xai', reason: 'missing key', detail: 'missing COUNCIL_XAI_API_KEY' },
         {
           provider: 'deepseek',
           reason: 'identity-unverified',
@@ -588,7 +588,7 @@ describe('public CLI facade', () => {
       providerStates: {
         xai: {
           availability: 'unconfigured',
-          availabilityReason: 'missing XAI_API_KEY',
+          availabilityReason: 'missing COUNCIL_XAI_API_KEY',
         },
         google: {
           health: 'down',
@@ -621,7 +621,7 @@ describe('public CLI facade', () => {
     );
     expect(payload.preflight.selectedProviders).toEqual(['anthropic', 'openai']);
     expect(payload.preflight.unavailableProviders).toEqual([
-      { provider: 'xai', reason: 'missing key', detail: 'missing XAI_API_KEY' },
+      { provider: 'xai', reason: 'missing key', detail: 'missing COUNCIL_XAI_API_KEY' },
       { provider: 'google', reason: 'unhealthy', detail: 'health check timed out' },
       {
         provider: 'deepseek',

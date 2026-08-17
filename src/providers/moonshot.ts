@@ -4,7 +4,7 @@ export function moonshotAdapter(transport?: HttpTransport): ProviderAdapter {
   return createHttpAdapter(
     {
       family: 'moonshot',
-      credential: 'MOONSHOT_API_KEY',
+      credential: 'COUNCIL_MOONSHOT_API_KEY',
       endpoint: 'https://api.moonshot.ai/v1/chat/completions',
       allowRegistryFallback: false,
     },
