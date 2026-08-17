@@ -4,6 +4,56 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## 2026.8.17
+
+### Fixed
+
+- **The Grok subscription seat could never have worked.** The adapter was shipped
+  fixture-tested only; live testing against a real `grok 1.0.4` binary found two
+  defects. The permission check was inverted — the parser required
+  `permissionMode: "default"`, the most permissive mode, and rejected `plan`, the
+  read-only one. The adapter now passes `--permission-mode plan` and the parser
+  requires it. Separately, the init assertions demanded `tools: []`,
+  `mcp_servers: []` and `skills: []`; a real session advertises **83 built-in
+  tools, 190 skills and 1 MCP server**, so every subscription session would have
+  been rejected as an isolation violation.
+- `--tools <impossible-id>` never restricted anything meaningful — measured, it
+  removed 3 of 83 built-ins, so its code comment claimed a guard it did not
+  provide. Replaced with `--disallowed-tools` listing the mutating and
+  side-effecting built-ins, which genuinely shrinks the surface (83 → 70).
+- Grok's OAuth credentials and its MCP/skill configuration share `~/.grok`, so the
+  HOME-isolation used for Antigravity would strip the subscription auth along with
+  the tool surface, and grok has no `--ignore-user-config` equivalent. The posture
+  is therefore explicit and documented: **advertised capability is tolerated, tool
+  use is rejected.** This is a weaker init-time guarantee than the Codex and
+  Antigravity adapters have. What still protects the seat is the required `plan`
+  mode, the read-only sandbox, the isolated working directory, the bound
+  responding-model identity, and rejection of every tool-use event.
+- Test fixtures are now bound to a real observed init frame rather than to an
+  assumption, so the parser cannot drift back to a shape grok does not emit.
+  `apiKeySource: "oauth"` was verified correct and left unchanged — `~/.grok/auth.json`
+  reports `auth_mode: "oidc"`, but that is a different surface and does not appear
+  in the stream.
+
+### Changed
+
+- **xAI resolves the subscription CLI first, and the metered API key second.** It
+  previously preferred HTTPS whenever `XAI_API_KEY` was set, which spends metered
+  credit while a paid subscription sits idle. The registry's declared preference is
+  inverted to match (`transport: "subscription-cli"`, `alternateTransports: ["http"]`),
+  and when the API path is used the resolution reason states plainly that the call
+  is billable.
+
+### Known gaps
+
+- The subscription CLI path is **not yet live-verified end to end**: probing it
+  exhausted the account's Grok Build allowance. Resolution, argv and parsing are
+  verified; a full seat invocation is not.
+- Only xAI has two credential paths. Anthropic, OpenAI and Google remain
+  subscription-only, and a `--billing sub-first|api-only|sub-only` selector, runtime
+  quota fallback between paths, and per-seat billing attribution in records are all
+  still to come. Until then there is no CLI flag to force a metered path.
+
 ## 2026.8.16
 
 ### Changed

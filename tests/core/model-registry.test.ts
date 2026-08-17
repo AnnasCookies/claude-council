@@ -54,7 +54,7 @@ describe('model registry', () => {
       const registry = await loadModelRegistry(path);
 
       expect(registry.xai).toEqual({ ...builtIn.xai, primary: 'grok-5' });
-      expect(registry.xai.alternateTransports).toEqual(['subscription-cli']);
+      expect(registry.xai.alternateTransports).toEqual(['http']);
       expect(registry.anthropic).toEqual(builtIn.anthropic);
       expect(registry.openai).toEqual(builtIn.openai);
       expect(registry.google).toEqual(builtIn.google);
