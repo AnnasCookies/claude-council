@@ -4,7 +4,7 @@ export function deepseekAdapter(transport?: HttpTransport): ProviderAdapter {
   return createHttpAdapter(
     {
       family: 'deepseek',
-      credential: 'DEEPSEEK_API_KEY',
+      credential: 'COUNCIL_DEEPSEEK_API_KEY',
       endpoint: 'https://api.deepseek.com/chat/completions',
       allowRegistryFallback: true,
     },

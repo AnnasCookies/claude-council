@@ -133,7 +133,7 @@ describe('engine version identity', () => {
       const output = parseOutput(
         await runCliFacade(
           ['self-check', '--json', '--records-root', recordsRoot, '--registry', explicitPath],
-          { cwd: directory, env: { HOME: home, XAI_API_KEY: 'test-key' } },
+          { cwd: directory, env: { HOME: home, COUNCIL_XAI_API_KEY: 'test-key' } },
         ),
       );
       const selfCheck = SelfCheckOutputSchema.parse(output);
@@ -150,7 +150,7 @@ describe('engine version identity', () => {
         preferred: 'subscription-cli',
         effective: 'http',
         reason:
-          'No grok CLI resolved on PATH; fell back to the metered XAI_API_KEY. This call is billable.',
+          'No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
       });
     });
   });

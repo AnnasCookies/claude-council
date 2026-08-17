@@ -104,14 +104,14 @@ The default command seat count is five and the standing `council` quorum remains
 
 ## Provider routes
 
-| Family    | Exact primary         | Same-family fallback    | Transport                       | Credential                            |
-| --------- | --------------------- | ----------------------- | ------------------------------- | ------------------------------------- |
-| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI             | local Claude subscription             |
-| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`           | local OpenAI subscription             |
-| xAI       | `grok-4.6`            | `grok-4.5`              | isolated `grok` CLI, else HTTPS | xAI subscription **or** `XAI_API_KEY` |
-| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI        | local Google subscription             |
-| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                           | `DEEPSEEK_API_KEY`                    |
-| Moonshot  | `kimi-k3`             | none                    | HTTPS                           | `MOONSHOT_API_KEY`                    |
+| Family    | Exact primary         | Same-family fallback    | Transport                       | Credential                                    |
+| --------- | --------------------- | ----------------------- | ------------------------------- | --------------------------------------------- |
+| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI             | local Claude subscription                     |
+| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`           | local OpenAI subscription                     |
+| xAI       | `grok-4.6`            | `grok-4.5`              | isolated `grok` CLI, else HTTPS | xAI subscription **or** `COUNCIL_XAI_API_KEY` |
+| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI        | local Google subscription                     |
+| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                           | `COUNCIL_DEEPSEEK_API_KEY`                    |
+| Moonshot  | `kimi-k3`             | none                    | HTTPS                           | `COUNCIL_MOONSHOT_API_KEY`                    |
 
 ### xAI: subscription first, metered API as the fallback
 
@@ -121,7 +121,7 @@ observable facts and reported in `doctor` and `self-check`:
 1. A `grok` binary resolvable on `PATH` → isolated subscription CLI, using that subscription's
    OAuth session and no API key. **This is the default**, because a subscription is already paid
    for and a metered key is not.
-2. Otherwise `XAI_API_KEY` present → HTTPS. The resolution reason says plainly that the call is
+2. Otherwise `COUNCIL_XAI_API_KEY` present → HTTPS. The resolution reason says plainly that the call is
    billable.
 3. Otherwise `unconfigured`, naming both options.
 
@@ -152,8 +152,8 @@ rejection of every tool-use event.
 
 Anthropic, OpenAI and Google use authenticated local subscription CLIs and never
 read `OPENAI_API_KEY` or `GEMINI_API_KEY`; a missing executable disables that
-seat rather than changing transport. The HTTPS keys are `XAI_API_KEY`,
-`DEEPSEEK_API_KEY` and `MOONSHOT_API_KEY`. Export them in the launch
+seat rather than changing transport. The HTTPS keys are `COUNCIL_XAI_API_KEY`,
+`COUNCIL_DEEPSEEK_API_KEY` and `COUNCIL_MOONSHOT_API_KEY`. Export them in the launch
 environment, or let the maintained Claude facade load the same names from the
 machine-local, untracked `~/.claude/council/providers.env`. An unset credential
 disables only its own family. Failed, unavailable and identity-unverified seats

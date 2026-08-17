@@ -123,12 +123,12 @@ describe('secret scanning and redaction', () => {
       {
         kind: 'DEEPSEEK',
         value: `sk-${'d'.repeat(48)}`,
-        text: (value) => `DEEPSEEK_API_KEY="${value}"`,
+        text: (value) => `COUNCIL_DEEPSEEK_API_KEY="${value}"`,
       },
       {
         kind: 'MOONSHOT',
         value: `sk-${'m'.repeat(48)}`,
-        text: (value) => `MOONSHOT_API_KEY: '${value}'`,
+        text: (value) => `COUNCIL_MOONSHOT_API_KEY: '${value}'`,
       },
     ];
 
@@ -139,6 +139,23 @@ describe('secret scanning and redaction', () => {
         providerCase.kind,
       );
     }
+  });
+
+  test('detects both bare vendor credential names and the council-prefixed forms', () => {
+    // The council authenticates only with COUNCIL_-prefixed names, but the outbound scanner must
+    // keep catching the bare vendor names: those are the forms that leak into pasted evidence,
+    // .env excerpts and shell transcripts, and they are what other tooling would claim and spend.
+    const bare = `sk-${'b'.repeat(48)}`;
+    expectSecretRedacted(`DEEPSEEK_API_KEY="${bare}"`, bare, 'DEEPSEEK');
+
+    const prefixed = `sk-${'p'.repeat(48)}`;
+    expectSecretRedacted(`COUNCIL_DEEPSEEK_API_KEY="${prefixed}"`, prefixed, 'DEEPSEEK');
+
+    const exported = `xai-${'e'.repeat(40)}`;
+    expectSecretRedacted(`export COUNCIL_XAI_API_KEY=${exported}`, exported, 'XAI');
+
+    const anthropic = `sk-ant-${'a'.repeat(40)}`;
+    expectSecretRedacted(`ANTHROPIC_API_KEY=${anthropic}`, anthropic, 'ANTHROPIC');
   });
 
   test('resolves overlapping detections once and keeps the most specific provider kind', () => {

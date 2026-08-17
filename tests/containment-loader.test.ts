@@ -88,7 +88,7 @@ test('[AC-SEC-001] the real Claude plugin loader makes no council provider reque
     'GROK_API_KEY',
     'OPENAI_API_KEY',
     'PERPLEXITY_API_KEY',
-    'XAI_API_KEY',
+    'COUNCIL_XAI_API_KEY',
   ]) {
     delete environment[key];
   }
