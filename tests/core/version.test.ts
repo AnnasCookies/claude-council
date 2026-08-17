@@ -76,7 +76,7 @@ describe('engine version identity', () => {
         stateRoot: resolve(directory, 'records'),
         routes: {
           xai: {
-            alternateTransports: ['subscription-cli'],
+            alternateTransports: ['http'],
           },
         },
         registryProvenance: {
@@ -149,7 +149,8 @@ describe('engine version identity', () => {
       expect(selfCheck.transportResolutions.xai).toEqual({
         preferred: 'subscription-cli',
         effective: 'http',
-        reason: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
+        reason:
+          'No grok CLI resolved on PATH; fell back to the metered XAI_API_KEY. This call is billable.',
       });
     });
   });
@@ -182,7 +183,7 @@ describe('engine version identity', () => {
         overrideSha256: createHash('sha256').update(overrideContents).digest('hex'),
         routes: { xai: 'override' },
       });
-      expect(manifest.routes.xai.alternateTransports).toEqual(['subscription-cli']);
+      expect(manifest.routes.xai.alternateTransports).toEqual(['http']);
     });
   });
 
@@ -206,7 +207,7 @@ describe('engine version identity', () => {
         stateRoot: null,
         routes: {
           xai: {
-            alternateTransports: ['subscription-cli'],
+            alternateTransports: ['http'],
           },
         },
         registryProvenance: {

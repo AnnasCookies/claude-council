@@ -160,7 +160,7 @@ describe('health baselines', () => {
       throw new Error('Expected both route-health records');
     }
 
-    expect(xai.route.alternateTransports).toEqual(['subscription-cli']);
+    expect(xai.route.alternateTransports).toEqual(['http']);
     expect(anthropic.route).not.toHaveProperty('alternateTransports');
   });
 

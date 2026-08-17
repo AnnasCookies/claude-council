@@ -263,6 +263,7 @@ interface GrokOutputOptions {
   omitInitModel?: boolean;
   contentBlocks?: readonly unknown[];
   apiKeySource?: 'oauth' | 'user';
+  permissionMode?: string;
 }
 
 function grokMessagesOutput(
@@ -278,11 +279,13 @@ function grokMessagesOutput(
     apiKeySource: options.apiKeySource ?? 'oauth',
     ...(options.omitInitModel ? {} : { model }),
     cwd: ownedDirectory,
-    permissionMode: 'default',
-    tools: [],
-    slash_commands: [],
-    mcp_servers: [],
-    skills: [],
+    // Bound to a real grok 1.0.4 init frame observed 2026-08-17: plan mode, and a large advertised
+    // capability surface that no flag can empty because auth and MCP config share ~/.grok.
+    permissionMode: options.permissionMode ?? 'plan',
+    tools: ['read_file', 'grep', 'list_dir'],
+    slash_commands: ['/help'],
+    mcp_servers: [{ name: 'bc', status: 'connected' }],
+    skills: ['some-skill'],
     uuid: 'grok-init-1',
   };
   const assistant = {
@@ -493,7 +496,7 @@ describe('HTTP provider adapters', () => {
 });
 
 describe('xAI automatic transport resolution', () => {
-  test('prefers HTTPS when both the API key and grok executable are present', async () => {
+  test('prefers the paid subscription CLI when both the API key and grok executable are present', async () => {
     const http = new FakeHttp([okHttp(registry.xai.primary), okHttp(registry.xai.primary)]);
     const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
     const adapter = xaiAdapter({
@@ -505,29 +508,19 @@ describe('xAI automatic transport resolution', () => {
 
     const response = await adapter.invoke(request(context({ XAI_API_KEY: 'test-key' })));
 
-    expect(adapter.transport).toBe('http');
+    expect(adapter.transport).toBe('subscription-cli');
     expect(adapter.transportResolution).toEqual({
-      preferred: 'http',
-      effective: 'http',
-      reason: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
+      preferred: 'subscription-cli',
+      effective: 'subscription-cli',
+      reason:
+        'The grok subscription CLI resolved on PATH and is preferred over the metered API key.',
     });
     expect(response.status).toBe('ok');
-    const report = await doctor(
-      [adapter],
-      context({ XAI_API_KEY: 'test-key' }),
-      '2026-08-14T00:00:00.000Z',
-    );
-    expect(report.diagnostics[0]).toMatchObject({
-      provider: 'xai',
-      transport: 'http',
-      status: 'healthy',
-      detail: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
-    });
-    expect(http.calls).toHaveLength(2);
-    expect(cli.calls).toHaveLength(0);
+    // The metered key must not be spent while a paid subscription is available.
+    expect(http.calls).toHaveLength(0);
   });
 
-  test('allows an explicit subscription preference when both transports are configured', async () => {
+  test('honours an explicit HTTPS preference so customer work stays billable', async () => {
     const http = new FakeHttp([okHttp(registry.xai.primary)]);
     const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
     const adapter = xaiAdapter({
@@ -535,18 +528,18 @@ describe('xAI automatic transport resolution', () => {
       httpTransport: http,
       cliTransport: cli,
       resolveExecutable: () => process.execPath,
-      transportPreference: 'subscription-cli',
+      transportPreference: 'http',
     });
 
     const response = await adapter.invoke(request(context({ XAI_API_KEY: 'test-key' })));
 
     expect(response.status).toBe('ok');
-    expect(adapter.transport).toBe('subscription-cli');
+    expect(adapter.transport).toBe('http');
     expect(adapter.transportResolution?.reason).toBe(
-      'The subscription CLI was explicitly preferred and grok resolved on PATH; HTTPS was not used.',
+      'HTTPS was explicitly preferred and XAI_API_KEY is set; the grok CLI was not used.',
     );
-    expect(cli.calls).toHaveLength(1);
-    expect(http.calls).toHaveLength(0);
+    expect(http.calls).toHaveLength(1);
+    expect(cli.calls).toHaveLength(0);
   });
 
   test('selects the subscription CLI when only an absolute grok executable is present', async () => {
@@ -563,9 +556,9 @@ describe('xAI automatic transport resolution', () => {
 
     expect(adapter.transport).toBe('subscription-cli');
     expect(adapter.transportResolution).toEqual({
-      preferred: 'http',
+      preferred: 'subscription-cli',
       effective: 'subscription-cli',
-      reason: 'XAI_API_KEY is not set; resolved the grok subscription CLI on PATH.',
+      reason: 'The grok subscription CLI resolved on PATH.',
     });
     expect(response.status).toBe('ok');
     expect(response.actualModel).toBe(registry.xai.primary);
@@ -585,12 +578,14 @@ describe('xAI automatic transport resolution', () => {
       'streaming-messages-json',
       '--sandbox',
       'read-only',
+      '--permission-mode',
+      'plan',
       '--no-plan',
       '--no-subagents',
       '--no-memory',
       '--disable-web-search',
-      '--tools',
-      '__claude_council_no_tools__',
+      '--disallowed-tools',
+      'run_terminal_command,write,search_replace,use_tool,search_tool,workflow,monitor,scheduler_create,scheduler_delete,scheduler_list,image_gen,image_edit,image_to_video,reference_to_video',
       '--max-turns',
       '1',
       '--verbatim',
@@ -628,7 +623,7 @@ describe('xAI automatic transport resolution', () => {
       'set XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH';
 
     expect(adapter.transportResolution).toEqual({
-      preferred: 'http',
+      preferred: 'subscription-cli',
       effective: null,
       reason: expectedReason,
     });
@@ -666,7 +661,7 @@ describe('xAI automatic transport resolution', () => {
       status: 'healthy',
       actualModel: registry.xai.primary,
       identity: 'verified',
-      detail: 'XAI_API_KEY is not set; resolved the grok subscription CLI on PATH.',
+      detail: 'The grok subscription CLI resolved on PATH.',
     });
   });
 

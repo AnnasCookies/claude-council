@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.8.16",
+  version: "2026.8.17",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -16888,10 +16888,10 @@ var GrokInitEventSchema = exports_external.object({
   apiKeySource: exports_external.literal("oauth"),
   model: exports_external.string().min(1),
   cwd: exports_external.string().min(1),
-  permissionMode: exports_external.literal("default"),
-  tools: exports_external.array(exports_external.string()).length(0),
-  mcp_servers: exports_external.array(exports_external.unknown()).length(0),
-  skills: exports_external.array(exports_external.string()).length(0)
+  permissionMode: exports_external.literal("plan"),
+  tools: exports_external.array(exports_external.string()),
+  mcp_servers: exports_external.array(exports_external.unknown()),
+  skills: exports_external.array(exports_external.string())
 });
 var GrokContentBlockSchema = exports_external.discriminatedUnion("type", [
   exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }),
@@ -17117,7 +17117,7 @@ function grokInitViolatesIsolation(value, workingDirectory) {
   if (!isRecord(value))
     return false;
   const cwd = typeof value.cwd === "string" ? value.cwd : undefined;
-  return Array.isArray(value.tools) && value.tools.length > 0 || Array.isArray(value.mcp_servers) && value.mcp_servers.length > 0 || typeof value.permissionMode === "string" && value.permissionMode !== "default" || cwd !== undefined && (workingDirectory === undefined || !isAbsolute2(cwd) || canonicalPath(cwd) !== canonicalPath(workingDirectory));
+  return typeof value.permissionMode === "string" && value.permissionMode !== "plan" || cwd !== undefined && (workingDirectory === undefined || !isAbsolute2(cwd) || canonicalPath(cwd) !== canonicalPath(workingDirectory));
 }
 function extractGrokOutput(stdout, workingDirectory) {
   let state = "await-init";
@@ -17407,6 +17407,22 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
 function resolveGrokExecutable() {
   return Bun.which("grok") ?? undefined;
 }
+var GROK_DISALLOWED_TOOLS = [
+  "run_terminal_command",
+  "write",
+  "search_replace",
+  "use_tool",
+  "search_tool",
+  "workflow",
+  "monitor",
+  "scheduler_create",
+  "scheduler_delete",
+  "scheduler_list",
+  "image_gen",
+  "image_edit",
+  "image_to_video",
+  "reference_to_video"
+];
 function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveGrokExecutable, modelOverride = () => process.env.GROK_CLI_MODEL?.trim() || undefined) {
   return createSubscriptionCliAdapter({
     family: "xai",
@@ -17426,12 +17442,14 @@ ${structuredPrompt(prompt)}`;
           "streaming-messages-json",
           "--sandbox",
           "read-only",
+          "--permission-mode",
+          "plan",
           "--no-plan",
           "--no-subagents",
           "--no-memory",
           "--disable-web-search",
-          "--tools",
-          "__claude_council_no_tools__",
+          "--disallowed-tools",
+          GROK_DISALLOWED_TOOLS.join(","),
           "--max-turns",
           "1",
           "--verbatim",
@@ -17464,7 +17482,7 @@ function withTransportResolution(adapter, transportResolution) {
 function createUnconfiguredXaiAdapter() {
   const family = "xai";
   const transportResolution = {
-    preferred: "http",
+    preferred: "subscription-cli",
     effective: null,
     reason: xaiUnconfiguredReason
   };
@@ -17496,36 +17514,34 @@ function createUnconfiguredXaiAdapter() {
 }
 function createXaiAdapter(options = {}) {
   const env = options.env ?? process.env;
-  if (env.XAI_API_KEY && options.transportPreference !== "subscription-cli") {
-    return withTransportResolution(createHttpAdapter({
-      family: "xai",
-      credential: "XAI_API_KEY",
-      endpoint: "https://api.x.ai/v1/chat/completions",
-      allowRegistryFallback: false
-    }, options.httpTransport), {
-      preferred: "http",
-      effective: "http",
-      reason: "XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI."
-    });
-  }
   const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
-  if (executable) {
-    return withTransportResolution(createXaiSubscriptionAdapter(options.cliTransport, () => executable, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined)), {
-      preferred: "http",
-      effective: "subscription-cli",
-      reason: env.XAI_API_KEY && options.transportPreference === "subscription-cli" ? "The subscription CLI was explicitly preferred and grok resolved on PATH; HTTPS was not used." : "XAI_API_KEY is not set; resolved the grok subscription CLI on PATH."
-    });
-  }
-  if (env.XAI_API_KEY) {
-    return withTransportResolution(createHttpAdapter({
-      family: "xai",
-      credential: "XAI_API_KEY",
-      endpoint: "https://api.x.ai/v1/chat/completions",
-      allowRegistryFallback: false
-    }, options.httpTransport), {
+  const apiKeyPresent = Boolean(env.XAI_API_KEY);
+  const httpAdapter = () => createHttpAdapter({
+    family: "xai",
+    credential: "XAI_API_KEY",
+    endpoint: "https://api.x.ai/v1/chat/completions",
+    allowRegistryFallback: false
+  }, options.httpTransport);
+  const cliAdapter = (resolved) => createXaiSubscriptionAdapter(options.cliTransport, () => resolved, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined));
+  if (options.transportPreference === "http" && apiKeyPresent) {
+    return withTransportResolution(httpAdapter(), {
       preferred: "http",
       effective: "http",
-      reason: "The subscription CLI was explicitly preferred but grok was not found on PATH; resolved HTTPS because XAI_API_KEY is set."
+      reason: "HTTPS was explicitly preferred and XAI_API_KEY is set; the grok CLI was not used."
+    });
+  }
+  if (executable) {
+    return withTransportResolution(cliAdapter(executable), {
+      preferred: "subscription-cli",
+      effective: "subscription-cli",
+      reason: apiKeyPresent ? "The grok subscription CLI resolved on PATH and is preferred over the metered API key." : "The grok subscription CLI resolved on PATH."
+    });
+  }
+  if (apiKeyPresent) {
+    return withTransportResolution(httpAdapter(), {
+      preferred: "subscription-cli",
+      effective: "http",
+      reason: "No grok CLI resolved on PATH; fell back to the metered XAI_API_KEY. This call is billable."
     });
   }
   return createUnconfiguredXaiAdapter();
@@ -18398,8 +18414,8 @@ var registry_default = {
   xai: {
     primary: "grok-4.6",
     fallbacks: ["grok-4.5"],
-    transport: "http",
-    alternateTransports: ["subscription-cli"]
+    transport: "subscription-cli",
+    alternateTransports: ["http"]
   },
   google: {
     primary: "gemini-3.1-pro-high",

@@ -21,7 +21,7 @@ The prebuilt `dist/cli.js` bundle is the only runtime entry point. Cached instal
 
 ```bash
 claude plugin marketplace add /path/to/claude-council --scope user
-claude plugin install claude-council@hex-plugins --scope user
+claude plugin install claude-council@annascookies-plugins --scope user
 claude plugin validate /path/to/claude-council
 ```
 
@@ -104,31 +104,49 @@ The default command seat count is five and the standing `council` quorum remains
 
 ## Provider routes
 
-| Family    | Exact primary         | Same-family fallback    | Transport                        | Credential                            |
-| --------- | --------------------- | ----------------------- | -------------------------------- | ------------------------------------- |
-| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI              | local Claude subscription             |
-| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`            | local OpenAI subscription             |
-| xAI       | `grok-4.6`            | `grok-4.5`              | HTTPS **or** isolated `grok` CLI | `XAI_API_KEY` **or** xAI subscription |
-| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI         | local Google subscription             |
-| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                            | `DEEPSEEK_API_KEY`                    |
-| Moonshot  | `kimi-k3`             | none                    | HTTPS                            | `MOONSHOT_API_KEY`                    |
+| Family    | Exact primary         | Same-family fallback    | Transport                       | Credential                            |
+| --------- | --------------------- | ----------------------- | ------------------------------- | ------------------------------------- |
+| Anthropic | `claude-opus-5`       | none                    | isolated Claude CLI             | local Claude subscription             |
+| OpenAI    | `gpt-5.6-sol`         | none                    | isolated `codex exec`           | local OpenAI subscription             |
+| xAI       | `grok-4.6`            | `grok-4.5`              | isolated `grok` CLI, else HTTPS | xAI subscription **or** `XAI_API_KEY` |
+| Google    | `gemini-3.1-pro-high` | `gemini-3.6-flash-high` | isolated Antigravity CLI        | local Google subscription             |
+| DeepSeek  | `deepseek-v4-pro`     | `deepseek-v4-flash`     | HTTPS                           | `DEEPSEEK_API_KEY`                    |
+| Moonshot  | `kimi-k3`             | none                    | HTTPS                           | `MOONSHOT_API_KEY`                    |
 
-### xAI: either transport, no configuration change
+### xAI: subscription first, metered API as the fallback
 
-xAI is the one family with two governed transports. The effective transport is
-resolved from observable facts and reported in `doctor` and `self-check`:
+xAI is the one family with two governed transports. The effective transport is resolved from
+observable facts and reported in `doctor` and `self-check`:
 
-1. `XAI_API_KEY` present → HTTPS.
-2. Otherwise a `grok` binary resolvable on `PATH` → isolated subscription CLI,
-   which uses that subscription's OAuth session and no API key.
+1. A `grok` binary resolvable on `PATH` → isolated subscription CLI, using that subscription's
+   OAuth session and no API key. **This is the default**, because a subscription is already paid
+   for and a metered key is not.
+2. Otherwise `XAI_API_KEY` present → HTTPS. The resolution reason says plainly that the call is
+   billable.
 3. Otherwise `unconfigured`, naming both options.
 
-Switching between them requires no edit: add or remove the key, or install or
-remove the binary. `ModelRoute.alternateTransports` in the registry — not adapter
-code — governs which transports a family may use, and the runner and health probe
-still reject anything outside that set. The Grok parser demands subscription
-evidence, one consistent model and session identity across every frame, and no
-tool activity; anything else is `identity-unverified` or `unsafe-tool-isolation`.
+There is currently **no CLI flag** to force the metered path; the preference is a programmatic
+adapter option only (`src/providers/index.ts:34`). Deliberate per-run selection arrives with the
+`--billing` mode described in the roadmap below.
+
+Switching requires no edit: install or remove the binary, add or remove the key.
+`ModelRoute.transport` plus `alternateTransports` in the registry — not adapter code — governs which
+transports a family may use, and the runner and health probe still reject anything outside that set.
+
+The Grok parser requires the read-only `plan` permission mode, one consistent model and session
+identity across the init, assistant and `modelUsage` frames, and no tool-use event anywhere in the
+stream; anything else is `identity-unverified` or `unsafe-tool-isolation`.
+
+One honest caveat, measured on `grok 1.0.4`: grok reads its OAuth credentials and its MCP/skill
+configuration from the same `~/.grok` directory, so the HOME-isolation trick used for Antigravity
+would strip the subscription auth along with the tool surface. A real session therefore advertises a
+large capability set (83 built-in tools, 190 skills, 1 MCP server) that no flag can empty:
+`--tools` with an impossible id removed only 3 entries, and there is no `--ignore-user-config`
+equivalent. `--disallowed-tools` does genuinely shrink it (83 → 70) and is applied. The posture is
+therefore **advertised capability tolerated, tool use rejected** — a weaker init-time guarantee than
+the Codex and Antigravity adapters have. What still protects the seat is the required `plan` mode,
+the read-only sandbox, the isolated working directory, the bound responding-model identity, and
+rejection of every tool-use event.
 
 ### Credentials
 
@@ -171,10 +189,12 @@ run manifest records the registry provenance actually used.
 - Repository and web material is untrusted evidence, never control instructions.
 - One normalised evidence pack is supplied identically to every seat.
 - High-confidence credentials, bearer tokens, private keys and session cookies hard-block before transmission.
-- Claude and OpenAI seats are tool-free. OpenAI also runs in a dedicated OMP
-  profile with all ambient configuration discovery disabled. AGY runs in an
-  ephemeral home and may read only its staged `council-prompt.txt`; malformed,
-  additional or unowned tool events fail closed.
+- Claude, OpenAI, Google and xAI seats are tool-free or tool-restricted. Codex runs
+  `--sandbox read-only --ephemeral` with ambient configuration, web, shell and browser access
+  disabled. AGY runs in an ephemeral home and may read only its staged `council-prompt.txt`. Grok
+  runs in the read-only `plan` permission mode with the mutating built-ins removed; it cannot be
+  fully config-isolated without losing its subscription auth, so any tool-use event fails the seat
+  closed instead. Malformed, additional or unowned tool events fail closed everywhere.
 - Provider responses and diagnostics are redacted before output or persistence.
 - Ordinary quorum requires three distinct verified provider families. Significant quorum defaults to four, including the explicitly categorised contrarian seat, plus at least three verified rebuttals. `council --min-families 3` is the only explicit reduction: it preserves the contrarian requirement and marks the run as weaker than the standing default throughout its manifest, output and session record.
 - At explicit three-seat coverage, lens precedence is domain, risk and contrarian. Maintainer coverage yields; conditional systems coverage also yields when relevant. Four-or-more-seat selection is unchanged.

@@ -516,6 +516,23 @@ const AgyResultEventSchema = z.object({
     structured_output: z.record(z.string(), z.unknown()),
   }),
 });
+/**
+ * Bound to a real `grok 1.0.4` init frame observed on 2026-08-17, not to an assumption.
+ *
+ * Grok reads its OAuth credentials and its MCP/skill configuration from the same `~/.grok`
+ * directory, so the isolation trick used for AGY — giving the child its own HOME — would strip the
+ * subscription auth along with the tool surface. A real session therefore advertises a large
+ * capability set (measured: 83 built-in tools, 190 skills, 1 MCP server) that no flag can empty:
+ * `--tools` governs built-in tools only and removed just 3, and grok has no `--ignore-user-config`
+ * equivalent. `--disallowed-tools` does genuinely shrink the built-in surface and is applied.
+ *
+ * The posture is therefore ADVERTISED CAPABILITY IS TOLERATED, TOOL USE IS REJECTED: the read-only
+ * `plan` permission mode is required here, and any actual tool, browser, MCP or subagent event in
+ * the stream is rejected downstream by the event state machine and `containsUnsafeToolNode`.
+ * This is a weaker init-time guarantee than the Codex and AGY adapters have. What still protects
+ * the seat is the required `plan` mode, the read-only sandbox, the isolated working directory, the
+ * bound responding-model identity, and rejection of every tool-use event.
+ */
 const GrokInitEventSchema = z.object({
   type: z.literal('system'),
   subtype: z.literal('init'),
@@ -523,10 +540,10 @@ const GrokInitEventSchema = z.object({
   apiKeySource: z.literal('oauth'),
   model: z.string().min(1),
   cwd: z.string().min(1),
-  permissionMode: z.literal('default'),
-  tools: z.array(z.string()).length(0),
-  mcp_servers: z.array(z.unknown()).length(0),
-  skills: z.array(z.string()).length(0),
+  permissionMode: z.literal('plan'),
+  tools: z.array(z.string()),
+  mcp_servers: z.array(z.unknown()),
+  skills: z.array(z.string()),
 });
 const GrokContentBlockSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string() }),
@@ -959,10 +976,11 @@ function grokReportedModel(value: unknown): string | undefined {
 function grokInitViolatesIsolation(value: unknown, workingDirectory: string | undefined): boolean {
   if (!isRecord(value)) return false;
   const cwd = typeof value.cwd === 'string' ? value.cwd : undefined;
+  // Advertised tools/MCP/skills are tolerated — see GrokInitEventSchema for why they cannot be
+  // emptied without also stripping the subscription auth. `plan` is the read-only permission mode
+  // and is required: `default` and every more permissive mode are isolation violations.
   return (
-    (Array.isArray(value.tools) && value.tools.length > 0) ||
-    (Array.isArray(value.mcp_servers) && value.mcp_servers.length > 0) ||
-    (typeof value.permissionMode === 'string' && value.permissionMode !== 'default') ||
+    (typeof value.permissionMode === 'string' && value.permissionMode !== 'plan') ||
     (cwd !== undefined &&
       (workingDirectory === undefined ||
         !isAbsolute(cwd) ||
@@ -1535,6 +1553,29 @@ function resolveGrokExecutable(): string | undefined {
 }
 
 /**
+ * Built-in grok tools removed explicitly. Measured on 1.0.4: passing these to
+ * `--disallowed-tools` reduced the advertised built-in surface from 83 to 70. The remainder are
+ * read-only or inert for a single-turn, sandboxed, plan-mode deliberation seat, and any actual use
+ * of any tool is rejected by the stream validator regardless.
+ */
+const GROK_DISALLOWED_TOOLS = [
+  'run_terminal_command',
+  'write',
+  'search_replace',
+  'use_tool',
+  'search_tool',
+  'workflow',
+  'monitor',
+  'scheduler_create',
+  'scheduler_delete',
+  'scheduler_list',
+  'image_gen',
+  'image_edit',
+  'image_to_video',
+  'reference_to_video',
+] as const;
+
+/**
  * Grok's Messages stream exposes the response model in its CLI-owned init, assistant and
  * model-usage frames. Plain and ordinary JSON output omit that identity and therefore cannot
  * satisfy the council's responding-model invariant.
@@ -1562,14 +1603,21 @@ export function createXaiSubscriptionAdapter(
             'streaming-messages-json',
             '--sandbox',
             'read-only',
+            // `plan` is grok's read-only permission mode and the parser requires the init frame to
+            // report it. Measured on 1.0.4: the init frame echoes `permissionMode: "plan"`.
+            '--permission-mode',
+            'plan',
             '--no-plan',
             '--no-subagents',
             '--no-memory',
             '--disable-web-search',
-            // Grok treats an empty --tools value as "unset"; a deliberately impossible tool id
-            // makes the allowlist non-empty while matching no built-in, hosted or MCP tool.
-            '--tools',
-            '__claude_council_no_tools__',
+            // Measured on 1.0.4: `--tools <impossible-id>` removed only 3 of 83 built-ins, so it
+            // was never the guard its previous comment claimed. `--disallowed-tools` genuinely
+            // shrinks the surface (83 -> 70), so remove the mutating and side-effecting built-ins
+            // explicitly. MCP and skill entries cannot be removed by any flag without also
+            // stripping the OAuth credentials — tool USE is rejected downstream instead.
+            '--disallowed-tools',
+            GROK_DISALLOWED_TOOLS.join(','),
             '--max-turns',
             '1',
             '--verbatim',
@@ -1625,7 +1673,7 @@ function withTransportResolution(
 function createUnconfiguredXaiAdapter(): ProviderAdapter {
   const family = 'xai' as const;
   const transportResolution: ProviderTransportResolution = {
-    preferred: 'http',
+    preferred: 'subscription-cli',
     effective: null,
     reason: xaiUnconfiguredReason,
   };
@@ -1666,64 +1714,60 @@ function createUnconfiguredXaiAdapter(): ProviderAdapter {
   return adapter;
 }
 
-/** Resolves xAI once at adapter construction: HTTPS first, then subscription CLI. */
+/**
+ * Resolves xAI once at adapter construction, **subscription first**.
+ *
+ * The owner holds paid subscriptions for personal work and uses metered API keys for customer work
+ * so usage stays attributable and chargeable. The default must therefore spend the subscription he
+ * has already paid for, and treat the API key as the fallback — not the reverse. An explicit
+ * `transportPreference` overrides the default in either direction.
+ */
 export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapter {
   const env = options.env ?? process.env;
-  if (env.XAI_API_KEY && options.transportPreference !== 'subscription-cli') {
-    return withTransportResolution(
-      createHttpAdapter(
-        {
-          family: 'xai',
-          credential: 'XAI_API_KEY',
-          endpoint: 'https://api.x.ai/v1/chat/completions',
-          allowRegistryFallback: false,
-        },
-        options.httpTransport,
-      ),
+  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
+  const apiKeyPresent = Boolean(env.XAI_API_KEY);
+  const httpAdapter = (): ProviderAdapter =>
+    createHttpAdapter(
       {
-        preferred: 'http',
-        effective: 'http',
-        reason: 'XAI_API_KEY is set; resolved HTTPS and did not use the grok CLI.',
+        family: 'xai',
+        credential: 'XAI_API_KEY',
+        endpoint: 'https://api.x.ai/v1/chat/completions',
+        allowRegistryFallback: false,
       },
+      options.httpTransport,
     );
+  const cliAdapter = (resolved: string): ProviderAdapter =>
+    createXaiSubscriptionAdapter(
+      options.cliTransport,
+      () => resolved,
+      options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined),
+    );
+
+  if (options.transportPreference === 'http' && apiKeyPresent) {
+    return withTransportResolution(httpAdapter(), {
+      preferred: 'http',
+      effective: 'http',
+      reason: 'HTTPS was explicitly preferred and XAI_API_KEY is set; the grok CLI was not used.',
+    });
   }
 
-  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
   if (executable) {
-    return withTransportResolution(
-      createXaiSubscriptionAdapter(
-        options.cliTransport,
-        () => executable,
-        options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined),
-      ),
-      {
-        preferred: 'http',
-        effective: 'subscription-cli',
-        reason:
-          env.XAI_API_KEY && options.transportPreference === 'subscription-cli'
-            ? 'The subscription CLI was explicitly preferred and grok resolved on PATH; HTTPS was not used.'
-            : 'XAI_API_KEY is not set; resolved the grok subscription CLI on PATH.',
-      },
-    );
+    return withTransportResolution(cliAdapter(executable), {
+      preferred: 'subscription-cli',
+      effective: 'subscription-cli',
+      reason: apiKeyPresent
+        ? 'The grok subscription CLI resolved on PATH and is preferred over the metered API key.'
+        : 'The grok subscription CLI resolved on PATH.',
+    });
   }
-  if (env.XAI_API_KEY) {
-    return withTransportResolution(
-      createHttpAdapter(
-        {
-          family: 'xai',
-          credential: 'XAI_API_KEY',
-          endpoint: 'https://api.x.ai/v1/chat/completions',
-          allowRegistryFallback: false,
-        },
-        options.httpTransport,
-      ),
-      {
-        preferred: 'http',
-        effective: 'http',
-        reason:
-          'The subscription CLI was explicitly preferred but grok was not found on PATH; resolved HTTPS because XAI_API_KEY is set.',
-      },
-    );
+
+  if (apiKeyPresent) {
+    return withTransportResolution(httpAdapter(), {
+      preferred: 'subscription-cli',
+      effective: 'http',
+      reason:
+        'No grok CLI resolved on PATH; fell back to the metered XAI_API_KEY. This call is billable.',
+    });
   }
   return createUnconfiguredXaiAdapter();
 }

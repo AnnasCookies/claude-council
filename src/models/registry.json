@@ -12,8 +12,8 @@
   "xai": {
     "primary": "grok-4.6",
     "fallbacks": ["grok-4.5"],
-    "transport": "http",
-    "alternateTransports": ["subscription-cli"]
+    "transport": "subscription-cli",
+    "alternateTransports": ["http"]
   },
   "google": {
     "primary": "gemini-3.1-pro-high",
