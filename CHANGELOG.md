@@ -4,6 +4,18 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## 2026.8.20
+
+### Fixed
+
+- **`result` reported a ruled motion as unruled.** A session's `decisionState` is the state at write
+  time and is deliberately never mutated, so after a chair ruled it still read
+  `awaiting-adjudication`. Reporting only that field told an auditor the opposite of the truth — the
+  precise failure mode the adjudication work exists to prevent. `result` now also returns a
+  `decision` block with the state derived from the archive, plus the `rulingId` and `resolutionId` so
+  the ruling itself can be read. The persisted field is unchanged and still reported, because the
+  write-time value is part of the audit trail.
+
 ## 2026.8.19
 
 ### Changed

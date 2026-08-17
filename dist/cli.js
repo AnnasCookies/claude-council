@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.8.19",
+  version: "2026.8.20",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -22438,7 +22438,21 @@ async function storedSessionCommand(command, args) {
       reason: `Persisted session state '${session.status}' is terminal`
     });
   }
-  return output(0, { schemaVersion: SCHEMA_VERSION, session });
+  const store = CouncilStore.open(root);
+  const states = await store.readDecisionStates(scope, scope === "project" ? safeStorageId(oneFlag(parsed, "project-id"), "Project id") : undefined);
+  const current = states.find((candidate) => candidate.runId === runId);
+  return output(0, {
+    schemaVersion: SCHEMA_VERSION,
+    session,
+    ...current === undefined ? {} : {
+      decision: {
+        state: current.decisionState,
+        dataAvailability: current.dataAvailability,
+        ...current.rulingId === undefined ? {} : { rulingId: current.rulingId },
+        ...current.resolutionId === undefined ? {} : { resolutionId: current.resolutionId }
+      }
+    }
+  });
 }
 async function migrationCommand(args, environment) {
   const parsed = parseArguments(args, new Set(["help", "json", "output", "plan", "root", "rules", "source"]));

@@ -1230,7 +1230,32 @@ async function storedSessionCommand(
       reason: `Persisted session state '${session.status}' is terminal`,
     });
   }
-  return output(0, { schemaVersion: SCHEMA_VERSION, session });
+  // The session's own `decisionState` is the state at write time and is never mutated, so after a
+  // chair rules it still reads `awaiting-adjudication`. Reporting that alone would tell an auditor a
+  // ruled motion is unruled. The current state is derived from the archive instead, and the ruling
+  // and resolution ids are named so the ruling can be read.
+  const store = CouncilStore.open(root);
+  const states = await store.readDecisionStates(
+    scope,
+    scope === 'project'
+      ? safeStorageId(oneFlag(parsed, 'project-id') as string, 'Project id')
+      : undefined,
+  );
+  const current = states.find((candidate) => candidate.runId === runId);
+  return output(0, {
+    schemaVersion: SCHEMA_VERSION,
+    session,
+    ...(current === undefined
+      ? {}
+      : {
+          decision: {
+            state: current.decisionState,
+            dataAvailability: current.dataAvailability,
+            ...(current.rulingId === undefined ? {} : { rulingId: current.rulingId }),
+            ...(current.resolutionId === undefined ? {} : { resolutionId: current.resolutionId }),
+          },
+        }),
+  });
 }
 
 async function migrationCommand(

@@ -1,6 +1,6 @@
 {
   "name": "claude-council",
-  "version": "2026.8.19",
+  "version": "2026.8.20",
   "description": "Explicit standing multi-model councils with scoped records, fail-closed data routing, dynamic lenses and provider-family quorum",
   "author": {
     "name": "AnnasCookies",

@@ -940,6 +940,70 @@ describe('public CLI facade', () => {
     }
   });
 
+  test('result reports the derived decision state, not the stale persisted one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-cli-result-state-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true, {
+        recommendation: 'Proceed with the bounded change.',
+      });
+      const common = ['--records-root', root, '--run-id', 'run-derived-state'];
+      await runCliFacade(
+        [
+          'run',
+          '--scope',
+          'general',
+          '--classification',
+          'public',
+          '--providers',
+          'anthropic,openai,xai,google',
+          ...common,
+          '--motion-id',
+          'motion-derived-state',
+          '--motion',
+          'Check that a ruled motion stops reading as unruled',
+        ],
+        fixture.environment,
+      );
+
+      const before = JSON.parse(
+        (await runCliFacade(['result', '--scope', 'general', ...common], fixture.environment))
+          .stdout,
+      );
+      expect(before.session.decisionState).toBe('awaiting-adjudication');
+      expect(before.decision.state).toBe('awaiting-adjudication');
+      expect(before.decision.rulingId).toBeUndefined();
+
+      await runCliFacade(
+        [
+          'adjudicate',
+          ...common,
+          '--decision',
+          'Adopt it.',
+          '--rationale',
+          'The panel was unanimous and the chair agrees on the evidence.',
+          '--authorised-by',
+          'council-chair',
+          '--no-dissent',
+        ],
+        fixture.environment,
+      );
+
+      const after = JSON.parse(
+        (await runCliFacade(['result', '--scope', 'general', ...common], fixture.environment))
+          .stdout,
+      );
+      // The persisted field is immutable and still says awaiting; the derived state must not.
+      // Reporting only the persisted value would tell an auditor a ruled motion is unruled.
+      expect(after.session.decisionState).toBe('awaiting-adjudication');
+      expect(after.decision.state).toBe('adjudicated');
+      expect(after.decision.rulingId).toBeDefined();
+      expect(after.decision.resolutionId).toBeDefined();
+      expect(after.decision.dataAvailability).toBe('captured');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('adjudicate refuses a run with no quorum outcome to rule on', async () => {
     const root = await mkdtemp(join(tmpdir(), 'council-cli-adjudicate-blocked-'));
     try {
