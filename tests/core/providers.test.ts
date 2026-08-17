@@ -382,9 +382,10 @@ beforeEach(async () => {
 function context(
   env: Record<string, string | undefined>,
   diagnostics: ProviderDiagnostic[] = [],
+  registryOverride: Partial<ModelRegistry> = {},
 ): ProviderContext {
   return {
-    registry,
+    registry: { ...registry, ...registryOverride },
     env,
     cwd: 'C:/private/project-root',
     timeoutMs: 1_000,
@@ -468,6 +469,32 @@ describe('HTTP provider adapters', () => {
     expect(response.route).toBe('same-provider-fallback');
   });
 
+  test('rejects an HTTPS seat whose response model is outside the configured route', async () => {
+    const transport = new FakeHttp([okHttp('deepseek-experimental-preview')]);
+    const response = await deepseekAdapter(transport).invoke(
+      request(context({ COUNCIL_DEEPSEEK_API_KEY: 'test-deepseek-key' })),
+    );
+
+    // `body.model` was extracted and recorded but never compared, so a server-side reroute produced
+    // a 'verified' seat for a model outside the route. It is now an integrity failure.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('HTTP route drift unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.retryable).toBe(false);
+    expect(response.actualModel).toBe('deepseek-experimental-preview');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('attributes a successful HTTPS seat to the metered credential path', async () => {
+    const transport = new FakeHttp([okHttp('deepseek-v4-pro')]);
+    const response = await deepseekAdapter(transport).invoke(
+      request(context({ COUNCIL_DEEPSEEK_API_KEY: 'test-deepseek-key' })),
+    );
+
+    expect(response.status).toBe('ok');
+    expect(response.credentialPath).toBe('api-key');
+  });
+
   test('missing credentials skip rather than substitute another family', async () => {
     for (const adapter of [deepseekAdapter, moonshotAdapter]) {
       const response = await adapter(new FakeHttp([])).invoke(request(context({})));
@@ -513,10 +540,94 @@ describe('xAI automatic transport resolution', () => {
       preferred: 'subscription-cli',
       effective: 'subscription-cli',
       reason:
-        'The grok subscription CLI resolved on PATH and is preferred over the metered API key.',
+        'The grok subscription CLI resolved on PATH and is preferred over the metered API key, which remains available if the subscription is exhausted or unauthenticated.',
     });
     expect(response.status).toBe('ok');
     // The metered key must not be spent while a paid subscription is available.
+    expect(http.calls).toHaveLength(0);
+  });
+
+  test('falls back to the metered key when the subscription is quota-exhausted', async () => {
+    const cli = new FakeCli({
+      status: 'failed',
+      executable: process.execPath,
+      exitCode: 1,
+      stdout: '',
+      stderr: "ERROR: You've hit your usage limit. Try again at Aug 20th, 2026 9:52 AM.",
+      durationMs: 5,
+      treeTerminated: false,
+      errorCode: 'non-zero-exit',
+    });
+    const http = new FakeHttp([okHttp(registry.xai.primary)]);
+    const response = await xaiAdapter({
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
+      httpTransport: http,
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' })));
+
+    expect(response.status).toBe('ok');
+    expect(response.credentialPath).toBe('api-key');
+    expect(response.credentialFallback).toEqual({
+      fromTransport: 'subscription-cli',
+      toTransport: 'http',
+      reason: 'quota-exhausted',
+    });
+    expect(http.calls).toHaveLength(1);
+  });
+
+  test('never falls back to the metered key after an integrity failure', async () => {
+    // A drifted model on the subscription path must fail the seat. Retrying it on a second billing
+    // path would let a misbehaving transport launder itself into a passing vote, which is worse than
+    // a missing one.
+    const cli = new FakeCli(okCli(grokMessagesOutput('grok-unapproved')));
+    const http = new FakeHttp([okHttp(registry.xai.primary)]);
+    const response = await xaiAdapter({
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
+      httpTransport: http,
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' })));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('integrity failure unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.credentialFallback).toBeUndefined();
+    // The decisive assertion: the metered path was never called.
+    expect(http.calls).toHaveLength(0);
+  });
+
+  test('api-only refuses to use an available subscription CLI', async () => {
+    const cli = new FakeCli(okCli(grokMessagesOutput(registry.xai.primary)));
+    const adapter = xaiAdapter({
+      env: {},
+      httpTransport: new FakeHttp([]),
+      cliTransport: cli,
+      resolveExecutable: () => process.execPath,
+      billingMode: 'api-only',
+    });
+    const response = await adapter.invoke(request(context({})));
+
+    expect(response.status).toBe('skipped');
+    if (response.status === 'ok') throw new Error('api-only unexpectedly used the subscription');
+    expect(adapter.transportResolution?.effective).toBeNull();
+    expect(response.error.message).toMatch(/api-only requires COUNCIL_XAI_API_KEY/i);
+    expect(cli.calls).toHaveLength(0);
+  });
+
+  test('sub-only refuses to spend a metered key even when one is set', async () => {
+    const http = new FakeHttp([okHttp(registry.xai.primary)]);
+    const adapter = xaiAdapter({
+      env: { COUNCIL_XAI_API_KEY: 'test-key' },
+      httpTransport: http,
+      cliTransport: new FakeCli(okCli('')),
+      resolveExecutable: () => undefined,
+      billingMode: 'sub-only',
+    });
+    const response = await adapter.invoke(request(context({ COUNCIL_XAI_API_KEY: 'test-key' })));
+
+    expect(response.status).toBe('skipped');
+    expect(adapter.transportResolution?.effective).toBeNull();
     expect(http.calls).toHaveLength(0);
   });
 
@@ -536,7 +647,7 @@ describe('xAI automatic transport resolution', () => {
     expect(response.status).toBe('ok');
     expect(adapter.transport).toBe('http');
     expect(adapter.transportResolution?.reason).toBe(
-      'HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used.',
+      'HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok subscription CLI was not used.',
     );
     expect(http.calls).toHaveLength(1);
     expect(cli.calls).toHaveLength(0);
@@ -782,7 +893,10 @@ describe('xAI automatic transport resolution', () => {
 describe('Subscription CLI provider adapters', () => {
   test('OpenAI builds a direct Codex invocation with the isolated prompt and answer schema', async () => {
     const transport = new FakeCli(codexCli('gpt-5.6-sol'));
-    await openaiAdapter(transport, () => process.execPath).invoke(request(context({})));
+    await openaiAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     const call = transport.calls[0];
     const args = call?.args.map((argument) =>
@@ -863,10 +977,10 @@ describe('Subscription CLI provider adapters', () => {
   });
 
   test('OpenAI accepts a structured Codex answer with verified runtime identity', async () => {
-    const response = await openaiAdapter(
-      new FakeCli(codexCli('gpt-5.6-sol')),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli(codexCli('gpt-5.6-sol')),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     if (response.status !== 'ok') throw new Error('well-formed Codex response failed');
     expect(response.actualModel).toBe('gpt-5.6-sol');
@@ -877,7 +991,10 @@ describe('Subscription CLI provider adapters', () => {
 
   test('OpenAI parses a captured multi-message Codex 0.147.0 response', async () => {
     const fixture = await capturedCodexCli();
-    const response = await openaiAdapter(new FakeCli(fixture), () => process.execPath).invoke({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli(fixture),
+      resolveExecutable: () => process.execPath,
+    }).invoke({
       ...request(context({})),
       prompt: capturedCodexPrompt,
     });
@@ -890,13 +1007,13 @@ describe('Subscription CLI provider adapters', () => {
 
   test('OpenAI rejects Codex when the observed reasoning effort is lower than requested', async () => {
     const fixture = codexCli('gpt-5.6-sol');
-    const response = await openaiAdapter(
-      new FakeCli({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
         ...fixture,
         stderr: fixture.stderr.replace('reasoning effort: xhigh', 'reasoning effort: none'),
       }),
-      () => process.execPath,
-    ).invoke(request(context({})));
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('downgraded Codex effort succeeded');
@@ -906,10 +1023,10 @@ describe('Subscription CLI provider adapters', () => {
   });
 
   test('OpenAI reports malformed Codex identity as unverified', async () => {
-    const response = await openaiAdapter(
-      new FakeCli(codexCli(undefined)),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli(codexCli(undefined)),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('identity-less Codex response succeeded');
@@ -934,13 +1051,13 @@ describe('Subscription CLI provider adapters', () => {
       headerShapedMotion,
     );
     const fixture = codexCli('gpt-5.6-sol');
-    const response = await openaiAdapter(
-      new FakeCli({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
         ...fixture,
         stderr: fixture.stderr.replace(stagedCouncilPrompt, boundPrompt),
       }),
-      () => process.execPath,
-    ).invoke({
+      resolveExecutable: () => process.execPath,
+    }).invoke({
       ...request(context({})),
       prompt: headerShapedMotion,
     });
@@ -952,10 +1069,10 @@ describe('Subscription CLI provider adapters', () => {
       ...JSON.parse(answer),
       recommendation: 'Assessment in progress.',
     });
-    const response = await openaiAdapter(
-      new FakeCli(codexCli('gpt-5.6-sol', answer, ['codex', interimAnswer])),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli(codexCli('gpt-5.6-sol', answer, ['codex', interimAnswer])),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     if (response.status !== 'ok') throw new Error('interim Codex answer rejected');
     expect(response.answer).toBe(answer);
@@ -964,16 +1081,16 @@ describe('Subscription CLI provider adapters', () => {
 
   test('OpenAI rejects a rendered final answer that differs from stdout', async () => {
     const fixture = codexCli('gpt-5.6-sol');
-    const response = await openaiAdapter(
-      new FakeCli({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
         ...fixture,
         stdout: JSON.stringify({
           ...JSON.parse(answer),
           recommendation: 'Different stdout answer.',
         }),
       }),
-      () => process.execPath,
-    ).invoke(request(context({})));
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('unbound Codex stdout succeeded');
@@ -982,28 +1099,28 @@ describe('Subscription CLI provider adapters', () => {
 
   test('OpenAI accepts a warning before the unique renderer identity header', async () => {
     const fixture = codexCli('gpt-5.6-sol');
-    const response = await openaiAdapter(
-      new FakeCli({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
         ...fixture,
         stderr: `WARNING: unable to create optional PATH aliases\n${fixture.stderr}`,
       }),
-      () => process.execPath,
-    ).invoke(request(context({})));
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
   });
 
   test('OpenAI rejects a Codex tool trace even when it precedes the first answer', async () => {
-    const response = await openaiAdapter(
-      new FakeCli(
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli(
         codexCli('gpt-5.6-sol', answer, [
           'exec',
           'powershell -Command Get-Location',
           'succeeded in 10ms:',
         ]),
       ),
-      () => process.execPath,
-    ).invoke(request(context({})));
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('tool-bearing Codex response succeeded');
@@ -1016,13 +1133,13 @@ describe('Subscription CLI provider adapters', () => {
       'Evaluate the supplied evidence pack.',
       windowsMotion,
     );
-    const response = await openaiAdapter(
-      new FakeCli({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
         ...codexCli('gpt-5.6-sol'),
         stderr: codexCli('gpt-5.6-sol').stderr.replace(stagedCouncilPrompt, windowsPrompt),
       }),
-      () => process.execPath,
-    ).invoke({
+      resolveExecutable: () => process.execPath,
+    }).invoke({
       ...request(context({})),
       prompt: windowsMotion,
     });
@@ -1032,22 +1149,22 @@ describe('Subscription CLI provider adapters', () => {
 
   test('OpenAI accepts a pretty multiline answer with Windows output line endings', async () => {
     const prettyAnswer = JSON.stringify(JSON.parse(answer), null, 2);
-    const response = await openaiAdapter(
-      new FakeCli({
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
         ...codexCli('gpt-5.6-sol', prettyAnswer),
         stdout: prettyAnswer.replace(/\n/g, '\r\n'),
       }),
-      () => process.execPath,
-    ).invoke(request(context({})));
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
   });
 
   test('OpenAI rejects unrecognised text between the prompt and final answer', async () => {
-    const response = await openaiAdapter(
-      new FakeCli(codexCli('gpt-5.6-sol', answer, ['read_file: council-prompt.txt'])),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli(codexCli('gpt-5.6-sol', answer, ['read_file: council-prompt.txt'])),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('unrecognised Codex activity succeeded');
@@ -1063,10 +1180,10 @@ describe('Subscription CLI provider adapters', () => {
       ['hook: SessionStart'],
       ['model rerouted: gpt-5.6-sol -> gpt-5.6-mini'],
     ]) {
-      const response = await openaiAdapter(
-        new FakeCli(codexCli('gpt-5.6-sol', answer, activity)),
-        () => process.execPath,
-      ).invoke(request(context({})));
+      const response = await openaiAdapter({
+        cliTransport: new FakeCli(codexCli('gpt-5.6-sol', answer, activity)),
+        resolveExecutable: () => process.execPath,
+      }).invoke(request(context({})));
 
       expect(response.status).toBe('failed');
       if (response.status === 'ok') throw new Error('unsafe Codex transcript succeeded');
@@ -1190,9 +1307,10 @@ describe('Subscription CLI provider adapters', () => {
 
   test('Google uses AGY with one allowed prompt-file read in an isolated home', async () => {
     const transport = new FakeCli(okCli(agyOutput('gemini-3.1-pro-high')));
-    const response = await googleAdapter(transport, () => process.execPath).invoke(
-      request(context({})),
-    );
+    const response = await googleAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
     expect(response.actualModel).toBe('gemini-3.1-pro-high');
@@ -1230,10 +1348,10 @@ describe('Subscription CLI provider adapters', () => {
   });
 
   test('Google verifies the model identity in captured AGY stream-json output', async () => {
-    const response = await googleAdapter(
-      new FakeCli(okCli(await capturedAgyOutput())),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await googleAdapter({
+      cliTransport: new FakeCli(okCli(await capturedAgyOutput())),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
     expect(response.actualModel).toBe('gemini-3.1-pro-high');
@@ -1241,10 +1359,12 @@ describe('Subscription CLI provider adapters', () => {
   });
 
   test('Google verifies captured long-motion AGY stream-json output', async () => {
-    const response = await googleAdapter(
-      new FakeCli(okCli(await capturedAgyOutput('agy-stream-json-long-motion.jsonl'))),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await googleAdapter({
+      cliTransport: new FakeCli(
+        okCli(await capturedAgyOutput('agy-stream-json-long-motion.jsonl')),
+      ),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
     expect(response.actualModel).toBe('gemini-3.1-pro-high');
@@ -1257,7 +1377,10 @@ describe('Subscription CLI provider adapters', () => {
     const initEvent = JSON.parse(initLine) as { init: { model?: string } };
     delete initEvent.init.model;
     const withoutIdentity = [JSON.stringify(initEvent), ...remainingLines].join('\n');
-    const adapter = googleAdapter(new FakeCli(okCli(withoutIdentity)), () => process.execPath);
+    const adapter = googleAdapter({
+      cliTransport: new FakeCli(okCli(withoutIdentity)),
+      resolveExecutable: () => process.execPath,
+    });
     const response = await adapter.invoke(request(context({})));
     const report = await doctor([adapter], context({}), '2026-08-12T00:00:00.000Z');
 
@@ -1280,9 +1403,10 @@ describe('Subscription CLI provider adapters', () => {
   test('Google rejects a model identity that differs from the requested route', async () => {
     const actualModel = 'gemini-3.6-flash-high';
     const output = agyOutput(actualModel);
-    const response = await googleAdapter(new FakeCli(okCli(output)), () => process.execPath).invoke(
-      request(context({})),
-    );
+    const response = await googleAdapter({
+      cliTransport: new FakeCli(okCli(output)),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('rerouted AGY run succeeded');
@@ -1290,14 +1414,20 @@ describe('Subscription CLI provider adapters', () => {
     expect(response.actualModel).toBe(actualModel);
     expect(response.modelIdentity).toBe('unverified');
 
-    const health = await googleAdapter(new FakeCli(okCli(output)), () => process.execPath).probe(
-      context({}),
-    );
+    const health = await googleAdapter({
+      cliTransport: new FakeCli(okCli(output)),
+      resolveExecutable: () => process.execPath,
+    }).probe(context({}));
     expect(health.status).toBe('identity-unverified');
     expect(health.actualModel).toBe(actualModel);
 
     const report = await doctor(
-      [googleAdapter(new FakeCli(okCli(output)), () => process.execPath)],
+      [
+        googleAdapter({
+          cliTransport: new FakeCli(okCli(output)),
+          resolveExecutable: () => process.execPath,
+        }),
+      ],
       context({}),
       '2026-07-29T00:00:00.000Z',
     );
@@ -1306,10 +1436,10 @@ describe('Subscription CLI provider adapters', () => {
   });
 
   test('Google retains verified identity when the answer schema is invalid', async () => {
-    const response = await googleAdapter(
-      new FakeCli(okCli(agyOutput('gemini-3.1-pro-high', 'not-json'))),
-      () => process.execPath,
-    ).invoke(request(context({})));
+    const response = await googleAdapter({
+      cliTransport: new FakeCli(okCli(agyOutput('gemini-3.1-pro-high', 'not-json'))),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('failed');
     if (response.status === 'ok') throw new Error('invalid answer unexpectedly succeeded');
@@ -1320,10 +1450,10 @@ describe('Subscription CLI provider adapters', () => {
 
     const report = await doctor(
       [
-        googleAdapter(
-          new FakeCli(okCli(agyOutput('gemini-3.1-pro-high', 'not-json'))),
-          () => process.execPath,
-        ),
+        googleAdapter({
+          cliTransport: new FakeCli(okCli(agyOutput('gemini-3.1-pro-high', 'not-json'))),
+          resolveExecutable: () => process.execPath,
+        }),
       ],
       context({}),
       '2026-07-29T00:00:00.000Z',
@@ -1344,9 +1474,10 @@ describe('Subscription CLI provider adapters', () => {
         },
       ],
     });
-    const response = await googleAdapter(new FakeCli(okCli(output)), () => process.execPath).invoke(
-      request(context({})),
-    );
+    const response = await googleAdapter({
+      cliTransport: new FakeCli(okCli(output)),
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
     expect(response.modelIdentity).toBe('verified');
@@ -1419,10 +1550,10 @@ describe('Subscription CLI provider adapters', () => {
     ] as const;
 
     for (const [output, errorCode] of cases) {
-      const response = await googleAdapter(
-        new FakeCli(okCli(output)),
-        () => process.execPath,
-      ).invoke(request(context({})));
+      const response = await googleAdapter({
+        cliTransport: new FakeCli(okCli(output)),
+        resolveExecutable: () => process.execPath,
+      }).invoke(request(context({})));
       expect(response.status).toBe('failed');
       if (response.status === 'ok') throw new Error('invalid AGY stream unexpectedly succeeded');
       expect(response.error.code).toBe(errorCode);
@@ -1433,14 +1564,19 @@ describe('Subscription CLI provider adapters', () => {
     const unsafeOutput = agyOutput('gemini-3.1-pro-high', answer, {
       toolName: 'browser_get_dom',
     });
-    const health = await googleAdapter(
-      new FakeCli(okCli(unsafeOutput)),
-      () => process.execPath,
-    ).probe(context({}));
+    const health = await googleAdapter({
+      cliTransport: new FakeCli(okCli(unsafeOutput)),
+      resolveExecutable: () => process.execPath,
+    }).probe(context({}));
     expect(health.status).toBe('unsafe-transport');
 
     const report = await doctor(
-      [googleAdapter(new FakeCli(okCli(unsafeOutput)), () => process.execPath)],
+      [
+        googleAdapter({
+          cliTransport: new FakeCli(okCli(unsafeOutput)),
+          resolveExecutable: () => process.execPath,
+        }),
+      ],
       context({}),
       '2026-07-29T00:00:00.000Z',
     );
@@ -1473,13 +1609,19 @@ describe('Subscription CLI provider adapters', () => {
       exitCode: null,
       errorCode: 'repository-executable',
     };
-    const health = await openaiAdapter(new FakeCli(rejectedCli), () => process.execPath).probe(
-      context({}),
-    );
+    const health = await openaiAdapter({
+      cliTransport: new FakeCli(rejectedCli),
+      resolveExecutable: () => process.execPath,
+    }).probe(context({}));
     expect(health.status).toBe('unsafe-transport');
 
     const report = await doctor(
-      [openaiAdapter(new FakeCli(rejectedCli), () => process.execPath)],
+      [
+        openaiAdapter({
+          cliTransport: new FakeCli(rejectedCli),
+          resolveExecutable: () => process.execPath,
+        }),
+      ],
       context({}),
       '2026-07-29T00:00:00.000Z',
     );
@@ -1489,8 +1631,14 @@ describe('Subscription CLI provider adapters', () => {
 
   test('missing subscription executables skip instead of falling back to API keys', async () => {
     const adapters = [
-      openaiAdapter(new FakeCli(okCli('')), () => undefined),
-      googleAdapter(new FakeCli(okCli('')), () => undefined),
+      openaiAdapter({
+        cliTransport: new FakeCli(okCli('')),
+        resolveExecutable: () => undefined,
+      }),
+      googleAdapter({
+        cliTransport: new FakeCli(okCli('')),
+        resolveExecutable: () => undefined,
+      }),
     ];
     for (const adapter of adapters) {
       const response = await adapter.invoke(
@@ -1498,8 +1646,150 @@ describe('Subscription CLI provider adapters', () => {
       );
       expect(response.status).toBe('skipped');
       if (response.status === 'ok') throw new Error('missing executable unexpectedly succeeded');
-      expect(response.error.code).toBe('missing-executable');
+      expect(response.error.code).toMatch(
+        /^missing-(executable|anthropic-transport|openai-transport|google-transport|xai-transport)$/,
+      );
     }
+  });
+});
+
+describe('metered API wire shapes', () => {
+  // These pin the request each vendor actually documents. They exist because the first version of
+  // the Gemini dialect sent the Python SDK's snake_case `response_mime_type` /
+  // `response_json_schema`, which the REST API ignores — constrained decoding would have been
+  // silently off with every fixture test still green.
+  test('Anthropic Messages uses output_config.format and the documented headers', async () => {
+    const http = new FakeHttp([
+      {
+        status: 'ok',
+        attempts: 1,
+        statusCode: 200,
+        body: {
+          model: 'claude-opus-5',
+          content: [{ type: 'text', text: answer }],
+          usage: { input_tokens: 120, output_tokens: 45 },
+        },
+        errorCode: null,
+        message: '',
+      },
+    ]);
+    const response = await anthropicAdapter({
+      env: { COUNCIL_ANTHROPIC_API_KEY: 'test-key' },
+      httpTransport: http,
+      resolveExecutable: () => undefined,
+      billingMode: 'api-only',
+    }).invoke(request(context({ COUNCIL_ANTHROPIC_API_KEY: 'test-key' })));
+
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe('claude-opus-5');
+    expect(response.credentialPath).toBe('api-key');
+    expect(response.usage).toEqual({ inputTokens: 120, outputTokens: 45 });
+
+    const call = http.calls[0];
+    expect(call?.request.url).toBe('https://api.anthropic.com/v1/messages');
+    expect(call?.request.headers?.['x-api-key']).toBe('test-key');
+    expect(call?.request.headers?.['anthropic-version']).toBe('2023-06-01');
+    const body = JSON.parse(String(call?.request.body));
+    expect(body.output_config.format.type).toBe('json_schema');
+    expect(body.output_config.format.schema.additionalProperties).toBe(false);
+    // Omitted, not an empty array: no tools requested means none granted.
+    expect('tools' in body).toBe(false);
+  });
+
+  test('Gemini generateContent uses camelCase generationConfig keys', async () => {
+    const http = new FakeHttp([
+      {
+        status: 'ok',
+        attempts: 1,
+        statusCode: 200,
+        body: {
+          modelVersion: 'gemini-3.1-pro-high',
+          candidates: [{ content: { parts: [{ text: answer }] } }],
+          usageMetadata: { promptTokenCount: 200, candidatesTokenCount: 60 },
+        },
+        errorCode: null,
+        message: '',
+      },
+    ]);
+    const response = await googleAdapter({
+      env: { COUNCIL_GEMINI_API_KEY: 'test-key' },
+      httpTransport: http,
+      resolveExecutable: () => undefined,
+      billingMode: 'api-only',
+    }).invoke(request(context({ COUNCIL_GEMINI_API_KEY: 'test-key' })));
+
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe('gemini-3.1-pro-high');
+    expect(response.usage).toEqual({ inputTokens: 200, outputTokens: 60 });
+
+    const call = http.calls[0];
+    // The model is named in the path, not the body.
+    expect(call?.request.url).toBe(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-high:generateContent',
+    );
+    expect(call?.request.headers?.['x-goog-api-key']).toBe('test-key');
+    const body = JSON.parse(String(call?.request.body));
+    expect(body.generationConfig.responseMimeType).toBe('application/json');
+    expect(body.generationConfig.responseJsonSchema.type).toBe('object');
+    // The snake_case forms are Python-SDK only and are ignored on the wire.
+    expect('response_mime_type' in body.generationConfig).toBe(false);
+    expect('response_json_schema' in body.generationConfig).toBe(false);
+  });
+
+  test('a metered Gemini seat outside the configured route still fails closed', async () => {
+    const http = new FakeHttp([
+      {
+        status: 'ok',
+        attempts: 1,
+        statusCode: 200,
+        body: {
+          modelVersion: 'gemini-3.9-experimental',
+          candidates: [{ content: { parts: [{ text: answer }] } }],
+        },
+        errorCode: null,
+        message: '',
+      },
+    ]);
+    const response = await googleAdapter({
+      env: { COUNCIL_GEMINI_API_KEY: 'test-key' },
+      httpTransport: http,
+      resolveExecutable: () => undefined,
+      billingMode: 'api-only',
+    }).invoke(request(context({ COUNCIL_GEMINI_API_KEY: 'test-key' })));
+
+    // Gemini resolves aliases server-side, so route drift on this path is realistic rather than
+    // hypothetical, and the metered path must verify identity exactly as the CLI path does.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('gemini route drift unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('an Anthropic response with no text block has no answer to accept', async () => {
+    const http = new FakeHttp([
+      {
+        status: 'ok',
+        attempts: 1,
+        statusCode: 200,
+        body: {
+          model: 'claude-opus-5',
+          content: [{ type: 'tool_use' }],
+        },
+        errorCode: null,
+        message: '',
+      },
+    ]);
+    const response = await anthropicAdapter({
+      env: { COUNCIL_ANTHROPIC_API_KEY: 'test-key' },
+      httpTransport: http,
+      resolveExecutable: () => undefined,
+      billingMode: 'api-only',
+    }).invoke(request(context({ COUNCIL_ANTHROPIC_API_KEY: 'test-key' })));
+
+    // An empty join would look like a malformed answer from a model that actually declined.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('text-free response unexpectedly succeeded');
+    expect(response.error.code).toBe('invalid-provider-response');
   });
 });
 
@@ -1515,9 +1805,10 @@ describe('Anthropic CLI adapter', () => {
       treeTerminated: false,
       errorCode: null,
     });
-    const response = await anthropicAdapter(transport, () => process.execPath).invoke(
-      request(context({})),
-    );
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
 
     expect(response.status).toBe('ok');
     expect(response.actualModel).toBe('claude-opus-5');
@@ -1535,6 +1826,185 @@ describe('Anthropic CLI adapter', () => {
     expect(transport.calls[0]?.cwd).not.toContain('C:/private/project-root');
   });
 
+  test('constrains decoding with the native council schema, not prose alone', async () => {
+    // Observed live: with prose-only instructions this seat failed a real motion with
+    // `invalid-structured-answer` while still passing the trivial health prompt, so the regression
+    // would have been invisible to `doctor`.
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({ result: answer, modelUsage: { 'claude-opus-5': {} } }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    const args = transport.calls[0]?.args ?? [];
+    const schemaIndex = args.indexOf('--json-schema');
+    expect(schemaIndex).toBeGreaterThanOrEqual(0);
+    const rawSchema = args[schemaIndex + 1];
+    // `args` may hold cwd-resolving thunks as well as literals; the schema must be a literal, and a
+    // thunk here would mean the schema was late-bound rather than fixed.
+    expect(typeof rawSchema).toBe('string');
+    const schema = JSON.parse(typeof rawSchema === 'string' ? rawSchema : '{}');
+    expect(Object.keys(schema.properties ?? {}).sort()).toEqual([
+      'assumptions',
+      'decisiveTest',
+      'evidence',
+      'recommendation',
+      'risks',
+      'uncertainty',
+    ]);
+  });
+
+  test('records the requested effort without claiming the provider attested it', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({ result: answer, modelUsage: { 'claude-opus-5': {} } }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(response.status).toBe('ok');
+    expect(transport.calls[0]?.args).toEqual(expect.arrayContaining(['--effort', 'max']));
+    expect(response.requestedEffort).toBe('max');
+    // The claude CLI reports no effort in its JSON, so echoing 'max' back would fabricate an
+    // attestation. Absence here is the honest answer.
+    expect(response.observedEffort).toBeUndefined();
+    expect(response.credentialPath).toBe('subscription');
+  });
+
+  test('rejects a responding model outside the configured route', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({ result: answer, modelUsage: { 'claude-haiku-9': {} } }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    // Previously this returned status 'ok' with modelIdentity 'verified' and route 'primary' for a
+    // model nobody selected, because the primary-absent branch fell back to the first key.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('route drift unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.retryable).toBe(false);
+    expect(response.actualModel).toBe('claude-haiku-9');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('accepts the auxiliary model the CLI really bills alongside the requested one', async () => {
+    // Observed live from claude 2.x: a tool-free `-p --model claude-opus-5` run bills
+    // `claude-haiku-4-5-20251001` as well, because Claude Code uses a small model for its own
+    // background work. An earlier version of this guard treated any multi-key `modelUsage` as
+    // unattributable, which made the one always-present seat fail on every real call.
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({
+        result: answer,
+        modelUsage: { 'claude-haiku-4-5-20251001': {}, 'claude-opus-5': {} },
+      }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe('claude-opus-5');
+    expect(response.route).toBe('primary');
+  });
+
+  test('rejects a turn that billed no model from the configured route', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({
+        result: answer,
+        modelUsage: { 'claude-haiku-4-5-20251001': {}, 'claude-sonnet-9': {} },
+      }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    // Auxiliary billing is fine; an answer with no configured model behind it is not.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('off-route usage unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.message).toMatch(/billed no model from the configured route/i);
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('rejects a turn that billed two models from the configured route', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({
+        result: answer,
+        modelUsage: { 'claude-opus-5': {}, 'claude-opus-5-mini': {} },
+      }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+      // A registry whose fallback is also billed makes the responder genuinely ambiguous.
+    }).invoke(
+      request(
+        context({}, undefined, {
+          anthropic: {
+            primary: 'claude-opus-5',
+            fallbacks: ['claude-opus-5-mini'],
+            transport: 'cli',
+          },
+        }),
+      ),
+    );
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('ambiguous route usage unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.message).toMatch(/more than one model from the configured route/i);
+  });
+
   test('sanitises CLI stderr before returning or retaining it', async () => {
     const diagnostics: ProviderDiagnostic[] = [];
     const secret = ['sk', 'proj', 'abcdefghijklmnopqrstuvwxyz0123456789'].join('-');
@@ -1549,9 +2019,10 @@ describe('Anthropic CLI adapter', () => {
       errorCode: 'non-zero-exit',
     });
 
-    const response = await anthropicAdapter(transport, () => process.execPath).invoke(
-      request(context({}, diagnostics)),
-    );
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({}, diagnostics)));
 
     expect(response.status).toBe('failed');
     expect(JSON.stringify(response)).not.toContain(secret);
@@ -1571,11 +2042,14 @@ describe('Anthropic CLI adapter', () => {
       treeTerminated: false,
       errorCode: 'executable-not-found',
     });
-    const response = await anthropicAdapter(transport, () => undefined).invoke(
-      request(context({})),
-    );
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => undefined,
+    }).invoke(request(context({})));
     expect(response.status).toBe('skipped');
     if (response.status === 'ok') throw new Error('missing executable unexpectedly succeeded');
-    expect(response.error.code).toBe('missing-executable');
+    expect(response.error.code).toMatch(
+      /^missing-(executable|anthropic-transport|openai-transport|google-transport|xai-transport)$/,
+    );
   });
 });

@@ -4,6 +4,107 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## 2026.8.19
+
+### Changed
+
+- **A council run no longer resolves itself.** `consensusRecommendation()` lower-cased each
+  family's `answer.recommendation`, compared the strings, and appended a ledger resolution
+  whenever they matched. That inverted three standing invariants at once — treat unanimity as a
+  prompt-quality warning, the panel informs rather than out-votes the chair, do not adjudicate as
+  consensus — and it inspected only the final round, so earlier dissent could not affect the
+  outcome. A shared answer schema and a shared prompt can induce identical short categorical
+  recommendations, which is a measurement artefact rather than agreement.
+
+  **Breaking.** Runs now report `decisionState: 'awaiting-adjudication'` and write no resolution.
+  Exit code 5 (`record-failure`) is retired: a run cannot fail at appending a resolution it no
+  longer appends. The `records` field changes shape from `{session, resolution}` to
+  `{session, decisionState, dataAvailability}`.
+
+- **New `adjudicate` command**, the only path from deliberation to a decision. It records a
+  `ChairRulingRecord` naming a human, their rationale, which seats they followed and which they set
+  aside, and whether dissent existed — `--dissent-acknowledged` or `--no-dissent`, neither
+  defaulted, because a chair who never considered the question should not produce a record implying
+  either answer. A degraded session additionally requires `--accept-degraded`. `ChairAcceptanceRecord`
+  already existed in the store with no command able to create one, so "chair acceptance is required"
+  was previously unsatisfiable.
+
+  The archive enforces the same rule structurally: `appendResolution` refuses a resolution that no
+  ruling backs, matched on run, motion and decision text.
+
+- **Every responding model is now verified before its seat counts.** Two paths stamped
+  `modelIdentity: 'verified'` without checking. Anthropic took the lexically first key from
+  `modelUsage` when the configured primary was absent and recorded it on route `primary`; the HTTPS
+  families extracted `body.model` and never compared it. Both now resolve the route first and fail
+  closed as non-retryable `identity-unverified`. Realised exposure was Anthropic — the seat that
+  always sits.
+
+  Live probing corrected the first version of this fix. A real `claude` run bills
+  `claude-haiku-4-5-20251001` alongside the requested `claude-opus-5`, because Claude Code uses a
+  small model for its own background work, so treating multi-model usage as ambiguity would have
+  broken that seat on every call. Attribution comes from finding exactly one configured route member
+  among the billed models instead.
+
+- **The Anthropic seat now constrains decoding with `--json-schema`** rather than asking for JSON in
+  prose. Observed live: the prose-only form failed a real motion with `invalid-structured-answer`
+  while still passing the trivial health prompt, so `doctor` could not have revealed it. The strict
+  local parse still runs — native constrained decoding is a transport guarantee, not semantic truth.
+
+### Added
+
+- **Dual credentials for Anthropic, OpenAI and Google**, joining xAI. Each family now has a
+  subscription transport and a metered API path (Anthropic Messages, OpenAI chat completions, Gemini
+  `generateContent`), behind one shared request/verify/attribute path so the route-verification fix
+  applies to every metered seat rather than being reimplemented per vendor. Family identity is
+  unchanged across both paths, so quorum still counts one vote per vendor.
+
+- **`--billing sub-first|api-only|sub-only`**, with a `billingMode` field on project policy.
+  Precedence is flag, then policy, then `sub-first`. `api-only` is for customer work, where every
+  call must be attributable and chargeable; `sub-only` guarantees a run cannot incur metered spend.
+  Both fail closed to `unconfigured` rather than crossing to the other path, because a billing mode
+  that can be quietly overridden is not a control.
+
+- **Bounded mid-run credential fallback.** Under `sub-first`, a seat whose subscription is
+  quota-exhausted, unauthenticated or missing its executable retries once on the metered path and
+  records `credentialFallback` so the substitution is visible in the archive. It never falls back on
+  `identity-unverified`, `unsafe-tool-isolation`, `invalid-structured-answer`, a model reroute or any
+  policy block: retrying an integrity failure down a second billing path would let a misbehaving
+  transport launder itself into a passing seat. Transport faults are excluded because the runner
+  already retries those on the same seat more cheaply.
+
+- **Versioned records with decision-level evidence.** `SessionRecord` persisted configuration but no
+  round responses, actual models, retries or usage, so the retained runs cannot support a
+  decision-level audit at all. Reads now accept legacy v1 records unchanged and report
+  `dataAvailability: 'unavailable'`; every new write is v2 with a required execution snapshot. Legacy
+  records are never back-filled — "never captured" must stay distinguishable from "captured and
+  empty", or a later evaluation scores missing evidence as a result.
+
+- **Seat attribution**: `requestedEffort`, `observedEffort`, `credentialPath` and `usage` on every
+  seat response, and therefore in every v2 record. Effort is deliberately two fields: only Codex
+  attests it, so the other seats carry the request alone rather than echoing it back as a
+  confirmation. This is not part of model identity.
+
+- **`doctor` reports the credential path per seat and the billing mode it ran under**, so a healthy
+  subscription seat is never read out of context.
+
+### Fixed
+
+- Session records stamped `startedAt` and `completedAt` with the same post-run timestamp, making
+  every session look instantaneous. The start is now captured before execution, and ordering is
+  enforced by schema.
+
+- The launcher's credential allowlist admits `COUNCIL_ANTHROPIC_API_KEY`,
+  `COUNCIL_OPENAI_API_KEY` and `COUNCIL_GEMINI_API_KEY`. This was deliberately held back until the
+  billing mode existed: admitting them earlier would have removed the boundary preventing a
+  subscription seat from silently becoming a metered one, and replaced it with nothing.
+
+### Removed
+
+- The abandoned 2026-07-27 Forge pipeline state. Its own blocker recorded that it could not absorb
+  the implementation that overtook it, its worktree no longer existed, and stages 2–5 never started.
+  `docs/forge/README.md` records what it was and how to restore it; the spec it was built against
+  stays.
+
 ## 2026.8.18
 
 ### Changed

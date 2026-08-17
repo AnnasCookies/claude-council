@@ -43,6 +43,13 @@ export type DoctorRemediation = z.infer<typeof DoctorRemediationSchema>;
 export const ProviderDiagnosticSchema = z.strictObject({
   provider: ProviderFamilySchema,
   transport: ModelTransportSchema,
+  /**
+   * Which credential a call on this seat would actually spend. `null` means neither path resolved, so
+   * the seat cannot run at all. Derived from the adapter's resolved transport rather than from the
+   * registry's declared preference, because the declared preference is what we want and this is what
+   * we would get.
+   */
+  credentialPath: z.enum(['subscription', 'api-key']).nullable(),
   resolution: RouteResolutionSchema,
   route: ModelRouteSchema,
   requestedModel: ModelIdentifierSchema,
@@ -61,6 +68,8 @@ export type ProviderDiagnostic = z.infer<typeof ProviderDiagnosticSchema>;
 export const DoctorReportSchema = z.strictObject({
   schemaVersion: z.literal(1),
   capturedAt: TimestampSchema,
+  /** The billing mode this report was produced under, so a healthy seat is never read out of context. */
+  billingMode: z.enum(['sub-first', 'api-only', 'sub-only']),
   status: DoctorStatusSchema,
   totalOutage: z.boolean(),
   diagnostics: z.array(ProviderDiagnosticSchema),
@@ -156,10 +165,24 @@ function reportStatus(diagnostics: readonly ProviderDiagnostic[]): DoctorStatus 
 }
 
 /** Runs live adapter diagnostics without retaining environment values or raw provider output. */
+/**
+ * Map a probed seat onto the credential that would pay for it. `subscription-cli` and the governed
+ * `cli` transports are subscription-funded; `http` is a metered key.
+ *
+ * An unconfigured seat reports `null` rather than being read off `transport`: the unconfigured
+ * adapter declares `http` as a placeholder, so trusting that field alone would report a metered
+ * credential path for a seat that has no credential at all.
+ */
+function credentialPath(probe: ProviderProbe): 'subscription' | 'api-key' | null {
+  if (probe.availability === 'unconfigured') return null;
+  return probe.transport === 'http' ? 'api-key' : 'subscription';
+}
+
 export async function doctor(
   adapters: readonly ProviderAdapter[],
   context: ProviderContext,
   capturedAt = new Date().toISOString(),
+  billingMode: 'sub-first' | 'api-only' | 'sub-only' = 'sub-first',
 ): Promise<DoctorReport> {
   const probes = await probeRoster(adapters, context);
   const baseline = snapshot(probes, context.registry, capturedAt);
@@ -181,6 +204,7 @@ export async function doctor(
     return ProviderDiagnosticSchema.parse({
       provider: health.provider,
       transport: probe.transport,
+      credentialPath: credentialPath(probe),
       resolution: routeResolution(probe),
       route: health.route,
       requestedModel: health.requestedModel,
@@ -200,6 +224,7 @@ export async function doctor(
   return DoctorReportSchema.parse({
     schemaVersion: 1,
     capturedAt: baseline.capturedAt,
+    billingMode,
     status,
     totalOutage: status === 'unavailable',
     diagnostics,

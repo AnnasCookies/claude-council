@@ -1,12 +1,9 @@
 import {
-  createOpenAiCodexAdapter,
-  type CliTransport,
+  createOpenAiDualAdapter,
+  type DualCredentialAdapterOptions,
   type ProviderAdapter,
 } from '../execution/provider';
 
-export function openaiAdapter(
-  transport?: CliTransport,
-  resolveExecutable?: () => string | undefined,
-): ProviderAdapter {
-  return createOpenAiCodexAdapter(transport, resolveExecutable);
+export function openaiAdapter(options: DualCredentialAdapterOptions = {}): ProviderAdapter {
+  return createOpenAiDualAdapter(options);
 }

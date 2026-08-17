@@ -769,7 +769,11 @@ describe('public CLI facade', () => {
 
       expect(result.exitCode).toBe(0);
       expect(payload.status).toBe('completed');
-      expect(payload.records).toEqual({ session: true, resolution: false });
+      expect(payload.records).toEqual({
+        session: true,
+        decisionState: 'awaiting-adjudication',
+        dataAvailability: 'captured',
+      });
       const session = JSON.parse(
         await Bun.file(
           join(root, 'general', 'sessions', 'run-refinement-single-survivor.json'),
@@ -821,7 +825,11 @@ describe('public CLI facade', () => {
       expect(result.exitCode).toBe(4);
       expect(payload.status).toBe('degraded');
       expect(payload.execution.outcome).toBe('degraded');
-      expect(payload.records).toEqual({ session: true, resolution: false });
+      expect(payload.records).toEqual({
+        session: true,
+        decisionState: 'awaiting-adjudication',
+        dataAvailability: 'captured',
+      });
       expect(session.status).toBe('degraded');
       expect(await Bun.file(join(root, 'general', 'resolutions')).exists()).toBe(false);
     } finally {
@@ -829,53 +837,194 @@ describe('public CLI facade', () => {
     }
   });
 
-  test('reports an already-resolved retry without discarding its completed execution', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'council-cli-resolution-retry-'));
+  test('a completed run records no resolution until a chair adjudicates it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-cli-adjudicate-'));
     try {
       const fixture = await fixtureEnvironment(undefined, true, {
         recommendation: 'Proceed with the bounded change.',
       });
-      const common = [
-        'run',
-        '--scope',
-        'general',
-        '--classification',
-        'public',
-        '--providers',
-        'anthropic,openai,xai,google',
-        '--records-root',
-        root,
-        '--motion-id',
-        'motion-resolution-retry',
-        '--motion',
-        'Choose the bounded retry policy',
-      ];
-      const first = await runCliFacade(
-        [...common, '--run-id', 'run-resolution-first'],
+      const run = await runCliFacade(
+        [
+          'run',
+          '--scope',
+          'general',
+          '--classification',
+          'public',
+          '--providers',
+          'anthropic,openai,xai,google',
+          '--records-root',
+          root,
+          '--motion-id',
+          'motion-adjudication',
+          '--motion',
+          'Choose the bounded retry policy',
+          '--run-id',
+          'run-adjudication',
+        ],
         fixture.environment,
       );
-      const retry = await runCliFacade(
-        [...common, '--run-id', 'run-resolution-retry'],
-        fixture.environment,
-      );
-      expect(first.stderr).toBe('');
-      expect(retry.stderr).toBe('');
-      const firstPayload = JSON.parse(first.stdout);
-      const retryPayload = JSON.parse(retry.stdout);
-
-      expect(first.exitCode).toBe(0);
-      expect(firstPayload.records).toEqual({ session: true, resolution: true });
-      expect(retry.exitCode).toBe(0);
-      expect(retryPayload.status).toBe('completed');
-      expect(retryPayload.execution.outcome).toBe('completed');
-      expect(retryPayload.records).toEqual({
+      expect(run.stderr).toBe('');
+      expect(run.exitCode).toBe(0);
+      const runPayload = JSON.parse(run.stdout);
+      expect(runPayload.records).toEqual({
         session: true,
-        resolution: false,
-        resolutionBlockReason: 'motion-already-resolved',
+        decisionState: 'awaiting-adjudication',
+        dataAvailability: 'captured',
       });
-      expect(
-        await Bun.file(join(root, 'general', 'sessions', 'run-resolution-retry.json')).exists(),
-      ).toBe(true);
+
+      // Unanimous seats used to be enough to write a ledger resolution. They are not.
+      expect(await Bun.file(join(root, 'general', 'resolutions')).exists()).toBe(false);
+
+      const adjudication = await runCliFacade(
+        [
+          'adjudicate',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-adjudication',
+          '--decision',
+          'Adopt the bounded retry policy.',
+          '--rationale',
+          'Three families agreed on the mechanism; the cost objection was noted and accepted.',
+          '--authorised-by',
+          'council-chair',
+          '--dissent-acknowledged',
+          '--followed-seats',
+          'anthropic-seat,openai-seat',
+          '--set-aside-seats',
+          'google-seat',
+        ],
+        fixture.environment,
+      );
+      expect(adjudication.stderr).toBe('');
+      expect(adjudication.exitCode).toBe(0);
+      const ruled = JSON.parse(adjudication.stdout);
+      expect(ruled.status).toBe('adjudicated');
+      expect(ruled.decisionState).toBe('adjudicated');
+      expect(ruled.dissentAcknowledged).toBe(true);
+      expect(ruled.dataAvailability).toBe('captured');
+
+      const ruling = JSON.parse(
+        await Bun.file(join(root, 'general', 'chair-rulings', `${ruled.rulingId}.json`)).text(),
+      );
+      expect(ruling.authorisedBy).toBe('council-chair');
+      expect(ruling.decision).toBe('Adopt the bounded retry policy.');
+      expect(ruling.followedSeats).toEqual(['anthropic-seat', 'openai-seat']);
+      expect(ruling.setAsideSeats).toEqual(['google-seat']);
+
+      const ledger = await Bun.file(join(root, 'general', 'ledger.md')).text();
+      expect(ledger).toContain('Adopt the bounded retry policy.');
+
+      // One ruling per run: a second attempt must be refused rather than silently overwriting.
+      const again = await runCliFacade(
+        [
+          'adjudicate',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-adjudication',
+          '--decision',
+          'Reverse the earlier ruling.',
+          '--rationale',
+          'Attempting to re-rule the same run.',
+          '--authorised-by',
+          'council-chair',
+          '--no-dissent',
+        ],
+        fixture.environment,
+      );
+      expect(again.exitCode).toBe(2);
+      expect(JSON.parse(again.stderr).message).toMatch(/already has a chair ruling/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('adjudicate refuses a run with no quorum outcome to rule on', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-cli-adjudicate-blocked-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true, {
+        failInvocation: (provider) => provider !== 'anthropic',
+      });
+      const run = await runCliFacade(
+        [
+          'council',
+          '--scope',
+          'general',
+          '--classification',
+          'public',
+          '--providers',
+          'anthropic,openai,xai,google',
+          '--rounds',
+          '2',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-blocked-adjudication',
+          '--motion-id',
+          'motion-blocked-adjudication',
+          '--motion',
+          'Review a motion that cannot reach quorum',
+        ],
+        fixture.environment,
+      );
+      const runPayload = JSON.parse(run.stdout);
+      expect(runPayload.status).toBe('blocked-quorum');
+      expect(runPayload.records).toEqual({
+        session: true,
+        decisionState: 'not-adjudicable',
+        dataAvailability: 'captured',
+      });
+
+      const attempt = await runCliFacade(
+        [
+          'adjudicate',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-blocked-adjudication',
+          '--decision',
+          'Proceed anyway.',
+          '--rationale',
+          'Trying to rule on a blocked run.',
+          '--authorised-by',
+          'council-chair',
+          '--no-dissent',
+        ],
+        fixture.environment,
+      );
+      expect(attempt.exitCode).toBe(2);
+      expect(JSON.parse(attempt.stderr).message).toMatch(/no quorum outcome to rule on/i);
+      expect(await Bun.file(join(root, 'general', 'resolutions')).exists()).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('adjudicate requires an explicit dissent statement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-cli-adjudicate-dissent-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const result = await runCliFacade(
+        [
+          'adjudicate',
+          '--records-root',
+          root,
+          '--run-id',
+          'run-anything',
+          '--decision',
+          'Adopt it.',
+          '--rationale',
+          'No dissent flag supplied.',
+          '--authorised-by',
+          'council-chair',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(2);
+      expect(JSON.parse(result.stderr).message).toMatch(
+        /exactly one of --dissent-acknowledged or --no-dissent/i,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

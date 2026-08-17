@@ -3,12 +3,15 @@ import { dirname, basename, join, resolve } from 'node:path';
 import { link, mkdir, open, readdir, rename, rm } from 'node:fs/promises';
 import { z } from 'zod';
 import { lock } from 'proper-lockfile';
+import { QuorumEvaluationSchema } from '../domain/quorum';
 import {
   CouncilScopeSchema,
   DataClassificationSchema,
   ProviderFamilySchema,
   QuorumPolicySchema,
   RefinementTriggerSchema,
+  SeatErrorSchema,
+  SeatResponseSchema,
 } from '../domain/schemas';
 import type { CouncilScope } from '../domain/schemas';
 import { AssignmentHistorySchema, type AssignmentHistory } from '../roles/allocator';
@@ -89,6 +92,74 @@ export const SessionProtocolSchema = z
   });
 export type SessionProtocol = z.infer<typeof SessionProtocolSchema>;
 
+/**
+ * Persisted round shape. Deliberately pinned here rather than imported from the runner: a record
+ * format must not change meaning because a runtime type was refactored. `tests/core/records.test.ts`
+ * asserts a real `RoundExecution` still parses as a `PersistedRound`, so drift is caught by a test
+ * instead of by a corrupted archive.
+ */
+export const PersistedSeatRetrySchema = z.strictObject({
+  seatId: NonEmptyStringSchema,
+  provider: ProviderFamilySchema,
+  role: NonEmptyStringSchema,
+  attempt: z.literal(2),
+  reason: z.strictObject({
+    status: z.enum(['failed', 'timed-out', 'cancelled']),
+    error: SeatErrorSchema,
+  }),
+});
+export type PersistedSeatRetry = z.infer<typeof PersistedSeatRetrySchema>;
+
+export const PersistedRoundSchema = z.strictObject({
+  round: z.number().int().min(1).max(3),
+  phase: z.enum(['analysis', 'rebuttal', 'refinement']),
+  responses: z.array(SeatResponseSchema).min(1),
+  retries: z.array(PersistedSeatRetrySchema),
+});
+export type PersistedRound = z.infer<typeof PersistedRoundSchema>;
+
+/**
+ * Everything needed to audit a decision rather than merely a configuration: what each seat actually
+ * said, which model actually answered, whether that identity verified, what was retried and why,
+ * and what the quorum evaluation concluded. Required on every v2 write.
+ */
+export const ExecutionSnapshotSchema = z.strictObject({
+  rounds: z.array(PersistedRoundSchema).min(1).max(3),
+  quorum: QuorumEvaluationSchema,
+  rebuttalObligation: z.strictObject({
+    minimumSuccessfulResponses: z.number().int().nonnegative(),
+    successfulResponses: z.number().int().nonnegative(),
+    satisfied: z.boolean(),
+  }),
+  synthesisEligible: z.boolean(),
+});
+export type ExecutionSnapshot = z.infer<typeof ExecutionSnapshotSchema>;
+
+/**
+ * Whether a record carries decision-level evidence. Legacy records predate the execution snapshot
+ * and are marked `unavailable` rather than being back-filled: "never captured" must stay
+ * distinguishable from "legitimately empty", or an evaluation built on this archive silently treats
+ * missing evidence as a negative result.
+ */
+export const DataAvailabilitySchema = z.enum(['unavailable', 'captured']);
+export type DataAvailability = z.infer<typeof DataAvailabilitySchema>;
+
+/**
+ * Decision state as persisted. Only two values are reachable at write time, because a run cannot
+ * adjudicate itself — that is the whole point of deleting textual auto-resolution. `adjudicated` is
+ * derived at read time from the presence of a chair ruling, so no record is ever mutated after the
+ * fact.
+ */
+export const PersistedDecisionStateSchema = z.enum(['awaiting-adjudication', 'not-adjudicable']);
+export type PersistedDecisionState = z.infer<typeof PersistedDecisionStateSchema>;
+
+export const DecisionStateSchema = z.enum([
+  'awaiting-adjudication',
+  'adjudicated',
+  'not-adjudicable',
+]);
+export type DecisionState = z.infer<typeof DecisionStateSchema>;
+
 const SessionRecordShape = {
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
@@ -103,65 +174,141 @@ const SessionRecordShape = {
   summary: NonEmptyStringSchema.optional(),
 };
 
-const GeneralSessionRecordSchema = z.strictObject({
+const CurrentSessionRecordShape = {
+  ...SessionRecordShape,
+  schemaVersion: z.literal(2),
+  decisionState: PersistedDecisionStateSchema,
+  execution: ExecutionSnapshotSchema,
+};
+
+const LegacyGeneralSessionRecordSchema = z.strictObject({
   ...SessionRecordShape,
   scope: z.literal('general'),
 });
 
-const ProjectSessionRecordSchema = z.strictObject({
+const LegacyProjectSessionRecordSchema = z.strictObject({
   ...SessionRecordShape,
   scope: z.literal('project'),
   projectId: StorageIdSchema,
   projectDisplayName: SingleLineStringSchema.optional(),
 });
 
-export const SessionRecordSchema = z
-  .discriminatedUnion('scope', [GeneralSessionRecordSchema, ProjectSessionRecordSchema])
-  .superRefine((record, context) => {
-    if (record.status === 'completed' && record.completedAt === undefined) {
+const CurrentGeneralSessionRecordSchema = z.strictObject({
+  ...CurrentSessionRecordShape,
+  scope: z.literal('general'),
+});
+
+const CurrentProjectSessionRecordSchema = z.strictObject({
+  ...CurrentSessionRecordShape,
+  scope: z.literal('project'),
+  projectId: StorageIdSchema,
+  projectDisplayName: SingleLineStringSchema.optional(),
+});
+
+function refineSessionRecord(
+  record: z.infer<typeof SessionRecordSchema>,
+  context: z.RefinementCtx,
+): void {
+  if (record.status === 'completed' && record.completedAt === undefined) {
+    context.addIssue({
+      code: 'custom',
+      path: ['completedAt'],
+      message: 'completed sessions require completedAt',
+    });
+  }
+  if (
+    record.completedAt !== undefined &&
+    Date.parse(record.completedAt) < Date.parse(record.startedAt)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['completedAt'],
+      message: 'completedAt must not precede startedAt',
+    });
+  }
+
+  const seatIds = new Set<string>();
+  const lensNames = new Set<string>();
+  for (const [index, assignment] of record.assignments.entries()) {
+    if (assignment.runId !== record.runId) {
       context.addIssue({
         code: 'custom',
-        path: ['completedAt'],
-        message: 'completed sessions require completedAt',
+        path: ['assignments', index, 'runId'],
+        message: 'session assignments must match the session runId',
       });
     }
-
-    const seatIds = new Set<string>();
-    const lensNames = new Set<string>();
-    for (const [index, assignment] of record.assignments.entries()) {
-      if (assignment.runId !== record.runId) {
-        context.addIssue({
-          code: 'custom',
-          path: ['assignments', index, 'runId'],
-          message: 'session assignments must match the session runId',
-        });
-      }
-      if (assignment.motionId !== record.motionId) {
-        context.addIssue({
-          code: 'custom',
-          path: ['assignments', index, 'motionId'],
-          message: 'session assignments must match the session motionId',
-        });
-      }
-      if (seatIds.has(assignment.seatId)) {
-        context.addIssue({
-          code: 'custom',
-          path: ['assignments', index, 'seatId'],
-          message: 'session assignments must use unique seats',
-        });
-      }
-      if (lensNames.has(assignment.lensName)) {
-        context.addIssue({
-          code: 'custom',
-          path: ['assignments', index, 'lensName'],
-          message: 'session assignments must use unique lenses',
-        });
-      }
-      seatIds.add(assignment.seatId);
-      lensNames.add(assignment.lensName);
+    if (assignment.motionId !== record.motionId) {
+      context.addIssue({
+        code: 'custom',
+        path: ['assignments', index, 'motionId'],
+        message: 'session assignments must match the session motionId',
+      });
     }
-  });
+    if (seatIds.has(assignment.seatId)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['assignments', index, 'seatId'],
+        message: 'session assignments must use unique seats',
+      });
+    }
+    if (lensNames.has(assignment.lensName)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['assignments', index, 'lensName'],
+        message: 'session assignments must use unique lenses',
+      });
+    }
+    seatIds.add(assignment.seatId);
+    lensNames.add(assignment.lensName);
+  }
+
+  if (!('schemaVersion' in record)) return;
+  // A blocked or failed run has nothing for a chair to rule on; anything that produced a quorum
+  // outcome is awaiting adjudication until a chair rules. Getting this backwards would either hide
+  // real decisions or invite rulings on runs that never reached a verdict.
+  const adjudicable = record.status === 'completed' || record.status === 'degraded';
+  const expected: PersistedDecisionState = adjudicable
+    ? 'awaiting-adjudication'
+    : 'not-adjudicable';
+  if (record.decisionState !== expected) {
+    context.addIssue({
+      code: 'custom',
+      path: ['decisionState'],
+      message: `sessions with status ${record.status} must persist decisionState ${expected}`,
+    });
+  }
+}
+
+/**
+ * Reads both record generations and writes only the current one. v2 is tried first: `strictObject`
+ * means a v2 payload cannot masquerade as legacy (its extra keys are rejected) and a legacy payload
+ * cannot masquerade as v2 (`schemaVersion` is missing), so the union cannot mis-classify.
+ */
+export const SessionRecordSchema = z
+  .union([
+    z.discriminatedUnion('scope', [
+      CurrentGeneralSessionRecordSchema,
+      CurrentProjectSessionRecordSchema,
+    ]),
+    z.discriminatedUnion('scope', [
+      LegacyGeneralSessionRecordSchema,
+      LegacyProjectSessionRecordSchema,
+    ]),
+  ])
+  .superRefine(refineSessionRecord);
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;
+
+export const CurrentSessionRecordSchema = z
+  .discriminatedUnion('scope', [
+    CurrentGeneralSessionRecordSchema,
+    CurrentProjectSessionRecordSchema,
+  ])
+  .superRefine(refineSessionRecord);
+export type CurrentSessionRecord = z.infer<typeof CurrentSessionRecordSchema>;
+
+export function sessionDataAvailability(record: SessionRecord): DataAvailability {
+  return 'schemaVersion' in record ? 'captured' : 'unavailable';
+}
 
 const ChairAcceptanceRecordShape = {
   acceptanceId: StorageIdSchema,
@@ -189,10 +336,56 @@ export const ChairAcceptanceRecordSchema = z.discriminatedUnion('scope', [
 ]);
 export type ChairAcceptanceRecord = z.infer<typeof ChairAcceptanceRecordSchema>;
 
+/**
+ * A named human's ruling on a motion. This is the only thing that may create a resolution: the
+ * panel informs the chair, it never out-votes them. `dissentAcknowledged` is required rather than
+ * defaulted because unanimity across a shared schema and prompt is a prompt-quality warning, so a
+ * chair recording a ruling must state positively whether dissent existed and was considered.
+ */
+const ChairRulingRecordShape = {
+  rulingId: StorageIdSchema,
+  runId: StorageIdSchema,
+  motionId: StorageIdSchema,
+  title: SingleLineStringSchema,
+  decision: NonEmptyStringSchema,
+  rationale: NonEmptyStringSchema,
+  authorisedBy: SingleLineStringSchema,
+  followedSeats: z.array(NonEmptyStringSchema),
+  setAsideSeats: z.array(NonEmptyStringSchema),
+  dissentAcknowledged: z.boolean(),
+  createdAt: TimestampSchema,
+};
+
+const GeneralChairRulingRecordSchema = z.strictObject({
+  ...ChairRulingRecordShape,
+  scope: z.literal('general'),
+});
+
+const ProjectChairRulingRecordSchema = z.strictObject({
+  ...ChairRulingRecordShape,
+  scope: z.literal('project'),
+  projectId: StorageIdSchema,
+});
+
+export const ChairRulingRecordSchema = z
+  .discriminatedUnion('scope', [GeneralChairRulingRecordSchema, ProjectChairRulingRecordSchema])
+  .superRefine((record, context) => {
+    const overlap = record.followedSeats.filter((seat) => record.setAsideSeats.includes(seat));
+    if (overlap.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['setAsideSeats'],
+        message: `a seat cannot be both followed and set aside: ${overlap.join(', ')}`,
+      });
+    }
+  });
+export type ChairRulingRecord = z.infer<typeof ChairRulingRecordSchema>;
+
 const ResolutionRecordShape = {
   resolutionId: StorageIdSchema,
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
+  rulingId: StorageIdSchema,
   title: SingleLineStringSchema,
   decision: NonEmptyStringSchema,
   createdAt: TimestampSchema,
@@ -218,6 +411,7 @@ export type ResolutionRecord = z.infer<typeof ResolutionRecordSchema>;
 interface PersistedScopeState {
   sessions: readonly SessionRecord[];
   chairAcceptances: readonly ChairAcceptanceRecord[];
+  chairRulings: readonly ChairRulingRecord[];
   resolutions: readonly ResolutionRecord[];
 }
 
@@ -385,12 +579,16 @@ async function validatePersistedScope(directory: string): Promise<PersistedScope
   const sessionPaths = await jsonFiles(join(directory, 'sessions'));
   const resolutionPaths = await jsonFiles(join(directory, 'resolutions'));
   const chairAcceptancePaths = await jsonFiles(join(directory, 'chair-acceptances'));
+  const chairRulingPaths = await jsonFiles(join(directory, 'chair-rulings'));
   const sessions: SessionRecord[] = [];
   const resolutions: ResolutionRecord[] = [];
   const chairAcceptances: ChairAcceptanceRecord[] = [];
+  const chairRulings: ChairRulingRecord[] = [];
   const runIds = new Set<string>();
   const resolutionIds = new Set<string>();
   const acceptanceIds = new Set<string>();
+  const rulingIds = new Set<string>();
+  const ruledRunIds = new Set<string>();
   const acceptedRunIds = new Set<string>();
   const resolvedMotionIds = new Set<string>();
   const motions = new Map<
@@ -443,6 +641,22 @@ async function validatePersistedScope(directory: string): Promise<PersistedScope
     chairAcceptances.push(acceptance);
   }
 
+  for (const path of chairRulingPaths) {
+    const ruling = await parsePersistedJson(path, ChairRulingRecordSchema, 'chair ruling');
+    if (fileStem(path) !== ruling.rulingId) {
+      throw new Error(`Persisted chair ruling filename does not match rulingId: ${path}`);
+    }
+    if (rulingIds.has(ruling.rulingId)) {
+      throw new Error(`Duplicate persisted chair ruling id: ${ruling.rulingId}`);
+    }
+    if (ruledRunIds.has(ruling.runId)) {
+      throw new Error(`Duplicate persisted chair ruling for run: ${ruling.runId}`);
+    }
+    rulingIds.add(ruling.rulingId);
+    ruledRunIds.add(ruling.runId);
+    chairRulings.push(ruling);
+  }
+
   for (const path of resolutionPaths) {
     const resolution = await parsePersistedJson(path, ResolutionRecordSchema, 'resolution');
     if (fileStem(path) !== resolution.resolutionId) {
@@ -476,6 +690,34 @@ async function validatePersistedScope(directory: string): Promise<PersistedScope
     }
   }
 
+  for (const ruling of chairRulings) {
+    const session = sessions.find((candidate) => candidate.runId === ruling.runId);
+    if (
+      !session ||
+      (session.status !== 'completed' && session.status !== 'degraded') ||
+      session.motionId !== ruling.motionId ||
+      session.scope !== ruling.scope ||
+      (session.scope === 'project' &&
+        ruling.scope === 'project' &&
+        session.projectId !== ruling.projectId)
+    ) {
+      throw new Error(
+        `Persisted chair ruling has no matching adjudicable session: ${ruling.rulingId}`,
+      );
+    }
+    if (
+      session.status === 'degraded' &&
+      !chairAcceptances.some(({ runId }) => runId === ruling.runId)
+    ) {
+      throw new Error(
+        `Persisted chair ruling on a degraded session requires a chair acceptance: ${ruling.rulingId}`,
+      );
+    }
+  }
+
+  // A resolution now requires a chair ruling that names the same motion and decision. This is the
+  // structural half of deleting textual auto-resolution: even if some future path tried to append a
+  // resolution directly, the archive itself refuses one that no human authorised.
   for (const resolution of resolutions) {
     const session = sessions.find((candidate) => candidate.runId === resolution.runId);
     if (
@@ -495,9 +737,20 @@ async function validatePersistedScope(directory: string): Promise<PersistedScope
         `Persisted resolution has no matching accepted session: ${resolution.resolutionId}`,
       );
     }
+    const ruling = chairRulings.find((candidate) => candidate.rulingId === resolution.rulingId);
+    if (
+      !ruling ||
+      ruling.runId !== resolution.runId ||
+      ruling.motionId !== resolution.motionId ||
+      ruling.decision !== resolution.decision
+    ) {
+      throw new Error(
+        `Persisted resolution is not backed by a matching chair ruling: ${resolution.resolutionId}`,
+      );
+    }
   }
 
-  return { sessions, chairAcceptances, resolutions };
+  return { sessions, chairAcceptances, chairRulings, resolutions };
 }
 
 function serialiseJson(value: unknown): string {
@@ -594,6 +847,37 @@ function renderLedgerEntry(record: ResolutionRecord): string {
   ].join('\n');
 }
 
+export function renderChairRulingMarkdown(record: ChairRulingRecord): string {
+  const lines = [
+    `# Chair ruling ${record.rulingId}`,
+    '',
+    `- Session: \`${record.runId}\``,
+    `- Motion ID: \`${record.motionId}\``,
+    `- Scope: \`${record.scope}\``,
+  ];
+  if (record.scope === 'project') lines.push(`- Project ID: \`${record.projectId}\``);
+  lines.push(
+    `- Authorised by: ${record.authorisedBy}`,
+    `- Dissent acknowledged: ${record.dissentAcknowledged ? 'yes' : 'no'}`,
+    record.followedSeats.length > 0
+      ? `- Seats followed: ${record.followedSeats.map((seat) => `\`${seat}\``).join(', ')}`
+      : '- Seats followed: none recorded',
+    record.setAsideSeats.length > 0
+      ? `- Seats set aside: ${record.setAsideSeats.map((seat) => `\`${seat}\``).join(', ')}`
+      : '- Seats set aside: none',
+    `- Created: ${record.createdAt}`,
+    '',
+    `## ${record.title}`,
+    '',
+    record.decision,
+    '',
+    '## Rationale',
+    '',
+    record.rationale,
+  );
+  return `${lines.join('\n')}\n`;
+}
+
 async function removeCommittedFile(path: string, originalError: unknown): Promise<void> {
   try {
     await rm(path, { force: true });
@@ -670,8 +954,8 @@ export class CouncilStore {
     return AssignmentHistorySchema.parse(state.sessions.flatMap(({ assignments }) => assignments));
   }
 
-  async writeSession(input: SessionRecord): Promise<void> {
-    const record = SessionRecordSchema.parse(input);
+  async writeSession(input: CurrentSessionRecord): Promise<void> {
+    const record = CurrentSessionRecordSchema.parse(input);
     const directory = scopeDirectory(
       this.root,
       CouncilScopeSchema.parse(record.scope),
@@ -718,7 +1002,7 @@ export class CouncilStore {
             } catch (error) {
               throw new Error('Session serialisation produced invalid JSON', { cause: error });
             }
-            SessionRecordSchema.parse(value);
+            CurrentSessionRecordSchema.parse(value);
           },
         });
       } catch (error) {
@@ -790,6 +1074,120 @@ export class CouncilStore {
     });
   }
 
+  /**
+   * Record a named human's ruling on a motion. This is the only route by which a motion acquires a
+   * decision: nothing in the execution path may write one. A degraded session must already carry a
+   * chair acceptance, so accepting a weak result and ruling on it stay two deliberate acts.
+   */
+  async appendChairRuling(input: ChairRulingRecord): Promise<void> {
+    const record = ChairRulingRecordSchema.parse(input);
+    const directory = scopeDirectory(
+      this.root,
+      CouncilScopeSchema.parse(record.scope),
+      record.scope === 'project' ? record.projectId : undefined,
+    );
+    await withScopeWriteLock(directory, async () => {
+      const state = await validatePersistedScope(directory);
+      const session = state.sessions.find((candidate) => candidate.runId === record.runId);
+      if (
+        !session ||
+        (session.status !== 'completed' && session.status !== 'degraded') ||
+        session.motionId !== record.motionId ||
+        session.scope !== record.scope ||
+        (session.scope === 'project' &&
+          record.scope === 'project' &&
+          session.projectId !== record.projectId)
+      ) {
+        throw new Error(`Chair ruling requires a matching adjudicable session: ${record.runId}`);
+      }
+      if (
+        session.status === 'degraded' &&
+        !state.chairAcceptances.some(({ runId }) => runId === record.runId)
+      ) {
+        throw new Error(
+          `Chair ruling on a degraded session requires a chair acceptance first: ${record.runId}`,
+        );
+      }
+      if (state.chairRulings.some(({ rulingId }) => rulingId === record.rulingId)) {
+        throw new Error(`Duplicate chair ruling id: ${record.rulingId}`);
+      }
+      if (state.chairRulings.some(({ runId }) => runId === record.runId)) {
+        throw new Error(`Session already has a chair ruling: ${record.runId}`);
+      }
+
+      const rulingsDirectory = join(directory, 'chair-rulings');
+      const jsonPath = join(rulingsDirectory, `${record.rulingId}.json`);
+      const markdownPath = join(rulingsDirectory, `${record.rulingId}.md`);
+      if ((await Bun.file(jsonPath).exists()) || (await Bun.file(markdownPath).exists())) {
+        throw new Error(`Duplicate chair ruling id: ${record.rulingId}`);
+      }
+
+      let markdownCommitted = false;
+      try {
+        await writeTextAtomically(markdownPath, renderChairRulingMarkdown(record), {
+          replace: false,
+        });
+        markdownCommitted = true;
+        await writeTextAtomically(jsonPath, serialiseJson(record), {
+          replace: false,
+          validate: (content) => {
+            let value: unknown;
+            try {
+              value = JSON.parse(content);
+            } catch (error) {
+              throw new Error('Chair ruling serialisation produced invalid JSON', { cause: error });
+            }
+            ChairRulingRecordSchema.parse(value);
+          },
+        });
+      } catch (error) {
+        if (markdownCommitted) await removeCommittedFile(markdownPath, error);
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Current decision state per session, derived rather than stored. `dataAvailability` reports
+   * whether the session carries decision-level evidence at all, so a caller can tell "the chair has
+   * not ruled" apart from "this record predates evidence capture and never can be audited".
+   */
+  async readDecisionStates(
+    scope: CouncilScope,
+    projectId?: string,
+  ): Promise<
+    readonly {
+      runId: string;
+      motionId: string;
+      status: SessionStatus;
+      decisionState: DecisionState;
+      dataAvailability: DataAvailability;
+      rulingId?: string;
+      resolutionId?: string;
+    }[]
+  > {
+    const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(scope), projectId);
+    const state = await validatePersistedScope(directory);
+    return state.sessions.map((session) => {
+      const ruling = state.chairRulings.find(({ runId }) => runId === session.runId);
+      const resolution = state.resolutions.find(({ runId }) => runId === session.runId);
+      const adjudicable = session.status === 'completed' || session.status === 'degraded';
+      return {
+        runId: session.runId,
+        motionId: session.motionId,
+        status: session.status,
+        decisionState: ruling
+          ? 'adjudicated'
+          : adjudicable
+            ? 'awaiting-adjudication'
+            : 'not-adjudicable',
+        dataAvailability: sessionDataAvailability(session),
+        ...(ruling === undefined ? {} : { rulingId: ruling.rulingId }),
+        ...(resolution === undefined ? {} : { resolutionId: resolution.resolutionId }),
+      };
+    });
+  }
+
   async appendResolution(input: ResolutionRecord): Promise<void> {
     const record = ResolutionRecordSchema.parse(input);
     const directory = scopeDirectory(
@@ -830,6 +1228,19 @@ export class CouncilStore {
       }
       if (state.resolutions.some((resolution) => resolution.resolutionId === record.resolutionId)) {
         throw new Error(`Duplicate resolution id: ${record.resolutionId}`);
+      }
+      // The load-bearing gate: a resolution must quote a chair ruling that names the same run,
+      // motion and decision text. Textual agreement between seats used to be enough to append one
+      // automatically, which let the panel out-vote the chair. Now nothing but a human ruling can.
+      const ruling = state.chairRulings.find(({ rulingId }) => rulingId === record.rulingId);
+      if (!ruling) {
+        throw new Error(`Resolution requires an existing chair ruling: ${record.rulingId}`);
+      }
+      if (ruling.runId !== record.runId || ruling.motionId !== record.motionId) {
+        throw new Error('Resolution does not match its chair ruling');
+      }
+      if (ruling.decision !== record.decision) {
+        throw new Error('Resolution decision does not match its chair ruling');
       }
 
       const resolutionsDirectory = join(directory, 'resolutions');

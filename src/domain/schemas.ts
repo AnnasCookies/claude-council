@@ -24,11 +24,17 @@ export const ProviderFamilySchema = z.enum([
 ]);
 export type ProviderFamily = z.infer<typeof ProviderFamilySchema>;
 
+/**
+ * `billingMode` lets a project pin how its seats are paid for. Customer work sets `api-only` so
+ * every call is attributable and chargeable, and the pin lives with the project rather than being
+ * retyped per invocation — a billing control that depends on remembering a flag is not a control.
+ */
 export const ProjectPolicySchema = z.strictObject({
   projectId: NonEmptyStringSchema,
   classification: DataClassificationSchema,
   allowedProviders: z.array(ProviderFamilySchema),
   providerCeilings: z.partialRecord(ProviderFamilySchema, DataClassificationSchema).optional(),
+  billingMode: z.enum(['sub-first', 'api-only', 'sub-only']).optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema,
 });
@@ -168,6 +174,55 @@ export type RunManifest = z.infer<typeof RunManifestSchema>;
 export const SeatRouteSchema = z.enum(['primary', 'same-provider-fallback']);
 export type SeatRoute = z.infer<typeof SeatRouteSchema>;
 
+/**
+ * Which credential paid for a seat. Family identity is deliberately independent of this: a vendor
+ * reached through a subscription CLI and the same vendor reached through a metered API key are one
+ * provider family and therefore one quorum vote. Recording the path is for billing attribution and
+ * for proving that a subscription seat was not silently substituted by a metered one.
+ */
+export const CredentialPathSchema = z.enum(['subscription', 'api-key']);
+export type CredentialPath = z.infer<typeof CredentialPathSchema>;
+
+/**
+ * Reasoning effort as a free-form vendor token rather than an enum: `max`, `xhigh`, `high` and
+ * `medium` are all real values across the seats, and the vendors add new ones without notice. An
+ * enum here would reject a seat for saying something true.
+ */
+export const ReasoningEffortSchema = z.string().trim().min(1).max(32);
+
+export const SeatUsageSchema = z.strictObject({
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  totalCostUsd: z.number().nonnegative().optional(),
+});
+export type SeatUsage = z.infer<typeof SeatUsageSchema>;
+
+/**
+ * Records that a seat's credential path changed mid-invocation, and why. Present only when a
+ * fallback actually fired, so its absence means the seat was served by the path that was selected at
+ * construction — never "we did not look".
+ */
+export const CredentialFallbackSchema = z.strictObject({
+  fromTransport: ModelTransportSchema,
+  toTransport: ModelTransportSchema,
+  reason: NonEmptyStringSchema,
+});
+export type CredentialFallback = z.infer<typeof CredentialFallbackSchema>;
+
+/**
+ * Attribution common to every seat outcome. `requestedEffort` is what we asked for;
+ * `observedEffort` is what the provider attested. They are separate fields precisely because only
+ * one seat (Codex) currently attests it — an unattested request must never read as a confirmation,
+ * and this is NOT part of model identity.
+ */
+const SeatAttributionShape = {
+  requestedEffort: ReasoningEffortSchema.optional(),
+  observedEffort: ReasoningEffortSchema.optional(),
+  credentialPath: CredentialPathSchema.optional(),
+  credentialFallback: CredentialFallbackSchema.optional(),
+  usage: SeatUsageSchema.optional(),
+};
+
 export const SeatErrorSchema = z.strictObject({
   code: NonEmptyStringSchema,
   message: NonEmptyStringSchema,
@@ -186,6 +241,7 @@ const SuccessfulSeatResponseSchema = z.strictObject({
   role: NonEmptyStringSchema,
   latencyMs: z.number().nonnegative(),
   answer: NonEmptyStringSchema,
+  ...SeatAttributionShape,
 });
 
 const FailedSeatResponseShape = {
@@ -198,6 +254,7 @@ const FailedSeatResponseShape = {
   role: NonEmptyStringSchema,
   latencyMs: z.number().nonnegative().optional(),
   error: SeatErrorSchema,
+  ...SeatAttributionShape,
 };
 
 const FailedSeatResponseSchema = z.strictObject({

@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.8.18",
+  version: "2026.8.19",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -15903,6 +15903,7 @@ var ProjectPolicySchema = exports_external.strictObject({
   classification: DataClassificationSchema,
   allowedProviders: exports_external.array(ProviderFamilySchema),
   providerCeilings: exports_external.partialRecord(ProviderFamilySchema, DataClassificationSchema).optional(),
+  billingMode: exports_external.enum(["sub-first", "api-only", "sub-only"]).optional(),
   createdAt: TimestampSchema,
   updatedAt: TimestampSchema
 });
@@ -16003,6 +16004,25 @@ var RunManifestSchema = exports_external.strictObject({
   evidenceReferences: exports_external.array(NonEmptyStringSchema)
 });
 var SeatRouteSchema = exports_external.enum(["primary", "same-provider-fallback"]);
+var CredentialPathSchema = exports_external.enum(["subscription", "api-key"]);
+var ReasoningEffortSchema = exports_external.string().trim().min(1).max(32);
+var SeatUsageSchema = exports_external.strictObject({
+  inputTokens: exports_external.number().int().nonnegative().optional(),
+  outputTokens: exports_external.number().int().nonnegative().optional(),
+  totalCostUsd: exports_external.number().nonnegative().optional()
+});
+var CredentialFallbackSchema = exports_external.strictObject({
+  fromTransport: ModelTransportSchema,
+  toTransport: ModelTransportSchema,
+  reason: NonEmptyStringSchema
+});
+var SeatAttributionShape = {
+  requestedEffort: ReasoningEffortSchema.optional(),
+  observedEffort: ReasoningEffortSchema.optional(),
+  credentialPath: CredentialPathSchema.optional(),
+  credentialFallback: CredentialFallbackSchema.optional(),
+  usage: SeatUsageSchema.optional()
+};
 var SeatErrorSchema = exports_external.strictObject({
   code: NonEmptyStringSchema,
   message: NonEmptyStringSchema,
@@ -16018,7 +16038,8 @@ var SuccessfulSeatResponseSchema = exports_external.strictObject({
   route: SeatRouteSchema,
   role: NonEmptyStringSchema,
   latencyMs: exports_external.number().nonnegative(),
-  answer: NonEmptyStringSchema
+  answer: NonEmptyStringSchema,
+  ...SeatAttributionShape
 });
 var FailedSeatResponseShape = {
   seatId: NonEmptyStringSchema,
@@ -16029,7 +16050,8 @@ var FailedSeatResponseShape = {
   route: SeatRouteSchema.optional(),
   role: NonEmptyStringSchema,
   latencyMs: exports_external.number().nonnegative().optional(),
-  error: SeatErrorSchema
+  error: SeatErrorSchema,
+  ...SeatAttributionShape
 };
 var FailedSeatResponseSchema = exports_external.strictObject({
   status: exports_external.literal("failed"),
@@ -16677,7 +16699,17 @@ function parseAnswer(request, family, rawAnswer, retainDiagnostic = true) {
   }
   return JSON.stringify(parsed.data);
 }
-function seatError(request, family, requestedModel, status, code, message, latencyMs, retryable = false, observedIdentity) {
+function attributionFields(attribution) {
+  if (attribution === undefined)
+    return {};
+  return {
+    ...attribution.requestedEffort === undefined ? {} : { requestedEffort: attribution.requestedEffort },
+    ...attribution.observedEffort === undefined ? {} : { observedEffort: attribution.observedEffort },
+    ...attribution.credentialPath === undefined ? {} : { credentialPath: attribution.credentialPath },
+    ...attribution.usage === undefined ? {} : { usage: attribution.usage }
+  };
+}
+function seatError(request, family, requestedModel, status, code, message, latencyMs, retryable = false, observedIdentity, attribution) {
   const actualModel = observedIdentity === undefined ? undefined : safeExternalMessage(observedIdentity.actualModel, "").slice(0, 128) || undefined;
   return {
     status,
@@ -16691,10 +16723,11 @@ function seatError(request, family, requestedModel, status, code, message, laten
     },
     role: request.role,
     latencyMs,
+    ...attributionFields(attribution),
     error: { code, message, retryable }
   };
 }
-function seatSuccess(request, family, requestedModel, actualModel, route, answer, latencyMs) {
+function seatSuccess(request, family, requestedModel, actualModel, route, answer, latencyMs, attribution) {
   return {
     status: "ok",
     seatId: request.seatId,
@@ -16705,6 +16738,7 @@ function seatSuccess(request, family, requestedModel, actualModel, route, answer
     route,
     role: request.role,
     latencyMs,
+    ...attributionFields(attribution),
     answer
   };
 }
@@ -16734,22 +16768,118 @@ function healthFromResponse(response) {
     reason: response.error.message
   };
 }
-function httpPayload(model, prompt) {
-  return JSON.stringify({
+var AnthropicMessagesSchema = exports_external.object({
+  model: exports_external.string().min(1),
+  content: exports_external.array(exports_external.object({ type: exports_external.string(), text: exports_external.string().optional() })).min(1),
+  usage: exports_external.object({
+    input_tokens: exports_external.number().int().nonnegative().optional(),
+    output_tokens: exports_external.number().int().nonnegative().optional()
+  }).optional()
+});
+var GeminiGenerateContentSchema = exports_external.object({
+  modelVersion: exports_external.string().min(1),
+  candidates: exports_external.array(exports_external.object({ content: exports_external.object({ parts: exports_external.array(exports_external.object({ text: exports_external.string() })).min(1) }) })).min(1),
+  usageMetadata: exports_external.object({
+    promptTokenCount: exports_external.number().int().nonnegative().optional(),
+    candidatesTokenCount: exports_external.number().int().nonnegative().optional()
+  }).optional()
+});
+var OpenAiUsageSchema = exports_external.object({
+  prompt_tokens: exports_external.number().int().nonnegative().optional(),
+  completion_tokens: exports_external.number().int().nonnegative().optional()
+});
+function tokenUsage(inputTokens, outputTokens) {
+  if (inputTokens === undefined && outputTokens === undefined)
+    return;
+  return {
+    ...inputTokens === undefined ? {} : { inputTokens },
+    ...outputTokens === undefined ? {} : { outputTokens }
+  };
+}
+var openAiCompatibleDialect = (endpoint) => ({
+  endpoint: () => endpoint,
+  headers: (credential) => ({
+    authorization: `Bearer ${credential}`,
+    "content-type": "application/json"
+  }),
+  payload: (model, prompt) => JSON.stringify({
     model,
     messages: [{ role: "user", content: structuredPrompt(prompt) }],
     max_tokens: 32768
-  });
-}
-function extractHttpAnswer(body) {
-  const parsed = ChatCompletionSchema.safeParse(body);
-  if (!parsed.success)
-    return;
-  return {
-    actualModel: parsed.data.model,
-    rawAnswer: parsed.data.choices[0]?.message.content ?? ""
-  };
-}
+  }),
+  extract: (body) => {
+    const parsed = ChatCompletionSchema.safeParse(body);
+    if (!parsed.success)
+      return;
+    const usage = OpenAiUsageSchema.safeParse(typeof body === "object" && body !== null && "usage" in body ? Reflect.get(body, "usage") : undefined);
+    return {
+      actualModel: parsed.data.model,
+      rawAnswer: parsed.data.choices[0]?.message.content ?? "",
+      ...usage.success ? (() => {
+        const totals = tokenUsage(usage.data.prompt_tokens, usage.data.completion_tokens);
+        return totals === undefined ? {} : { usage: totals };
+      })() : {}
+    };
+  }
+});
+var anthropicMessagesDialect = {
+  endpoint: () => "https://api.anthropic.com/v1/messages",
+  headers: (credential) => ({
+    "x-api-key": credential,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json"
+  }),
+  payload: (model, prompt) => JSON.stringify({
+    model,
+    max_tokens: 32768,
+    messages: [{ role: "user", content: structuredPrompt(prompt) }],
+    output_config: {
+      format: { type: "json_schema", schema: JSON.parse(councilAnswerJsonSchema) }
+    }
+  }),
+  extract: (body) => {
+    const parsed = AnthropicMessagesSchema.safeParse(body);
+    if (!parsed.success)
+      return;
+    const text = parsed.data.content.filter((block) => block.type === "text" && block.text !== undefined).map((block) => block.text ?? "").join("");
+    if (!text)
+      return;
+    const usage = tokenUsage(parsed.data.usage?.input_tokens, parsed.data.usage?.output_tokens);
+    return {
+      actualModel: parsed.data.model,
+      rawAnswer: text,
+      ...usage === undefined ? {} : { usage }
+    };
+  }
+};
+var geminiGenerateContentDialect = {
+  endpoint: (model) => `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+  headers: (credential) => ({
+    "x-goog-api-key": credential,
+    "content-type": "application/json"
+  }),
+  payload: (_model, prompt) => JSON.stringify({
+    contents: [{ role: "user", parts: [{ text: structuredPrompt(prompt) }] }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseJsonSchema: JSON.parse(councilAnswerJsonSchema)
+    }
+  }),
+  extract: (body) => {
+    const parsed = GeminiGenerateContentSchema.safeParse(body);
+    if (!parsed.success)
+      return;
+    const text = (parsed.data.candidates[0]?.content.parts ?? []).map((part) => part.text).join("");
+    if (!text)
+      return;
+    const usage = tokenUsage(parsed.data.usageMetadata?.promptTokenCount, parsed.data.usageMetadata?.candidatesTokenCount);
+    return {
+      actualModel: parsed.data.modelVersion,
+      rawAnswer: text,
+      ...usage === undefined ? {} : { usage }
+    };
+  }
+};
 function createHttpAdapter(config2, transport = nativeHttpTransport) {
   const route = (context) => context.registry[config2.family];
   const availability = async (context) => ({
@@ -16770,25 +16900,23 @@ function createHttpAdapter(config2, transport = nativeHttpTransport) {
         return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-credential", `missing ${config2.credential}`, 0);
       }
       const invokeModel = (model2) => transport.request({
-        url: config2.endpoint,
+        url: config2.dialect.endpoint(model2),
         method: "POST",
-        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
-        body: httpPayload(model2, request.prompt)
+        headers: config2.dialect.headers(credential),
+        body: config2.dialect.payload(model2, request.prompt)
       }, defaultRetryPolicy(request.context.timeoutMs));
       let model = configuredRoute.primary;
       let providerResult = await invokeModel(model);
-      let seatRoute = "primary";
       const fallback = configuredRoute.fallbacks[0];
       if (config2.allowRegistryFallback && providerResult.errorCode === "model-not-found" && fallback !== undefined) {
         model = fallback;
-        seatRoute = "same-provider-fallback";
         providerResult = await invokeModel(model);
       }
       const latencyMs = Date.now() - startedAt;
       if (providerResult.status !== "ok") {
         return seatError(request, config2.family, configuredRoute.primary, providerResult.status === "timed-out" ? "timed-out" : "failed", providerResult.errorCode ?? "provider-failed", safeExternalMessage(providerResult.message, "provider request failed"), latencyMs, ["network", "rate-limit", "server"].includes(providerResult.errorCode ?? ""));
       }
-      const extracted = extractHttpAnswer(providerResult.body);
+      const extracted = config2.dialect.extract(providerResult.body);
       if (!extracted) {
         capture(request, config2.family, "invalid-provider-response", serialiseUnknown(providerResult.body));
         return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-provider-response", "provider response did not contain verified model metadata and text", latencyMs);
@@ -16797,7 +16925,14 @@ function createHttpAdapter(config2, transport = nativeHttpTransport) {
       if (!answer) {
         return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", latencyMs);
       }
-      return seatSuccess(request, config2.family, configuredRoute.primary, extracted.actualModel, seatRoute, answer, latencyMs);
+      const observed = observedRoute(configuredRoute, extracted.actualModel);
+      if (observed === undefined) {
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", "provider responded with a model outside the configured route", latencyMs, false, { actualModel: extracted.actualModel, modelIdentity: "unverified" });
+      }
+      return seatSuccess(request, config2.family, configuredRoute.primary, extracted.actualModel, observed, answer, latencyMs, {
+        credentialPath: "api-key",
+        ...extracted.usage === undefined ? {} : { usage: extracted.usage }
+      });
     },
     async probe(context) {
       return healthFromResponse(await adapter.invoke({
@@ -16844,6 +16979,9 @@ var OmpAgentEndSchema = exports_external.object({
   type: exports_external.literal("agent_end"),
   messages: exports_external.array(OmpMessageSchema).min(1)
 });
+var anthropicReasoningEffort = "max";
+var agyReasoningEffort = "high";
+var grokReasoningEffort = "default";
 var codexReasoningEffort = "xhigh";
 var CodexIdentitySchema = exports_external.object({
   workdir: exports_external.string().min(1),
@@ -16916,7 +17054,8 @@ var GrokResultEventSchema = exports_external.object({
   result: exports_external.string().min(1),
   stop_reason: exports_external.literal("end_turn"),
   modelUsage: exports_external.record(exports_external.string().min(1), exports_external.unknown()),
-  session_id: exports_external.string().min(1)
+  session_id: exports_external.string().min(1),
+  total_cost_usd: exports_external.number().nonnegative().optional()
 });
 var councilAnswerJsonSchema = JSON.stringify({
   type: "object",
@@ -17008,7 +17147,14 @@ ${answerMarker}`).map((value) => value.trim());
   if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
     return parseFailure("identity-unverified", actualModel);
   }
-  return { status: "ok", actualModel: identity.data.model, rawAnswer };
+  const tokensUsed = Number.parseInt(tokenSuffix[1]?.replace(/,/g, "") ?? "", 10);
+  return {
+    status: "ok",
+    actualModel: identity.data.model,
+    rawAnswer,
+    observedEffort: identity.data["reasoning effort"],
+    ...Number.isSafeInteger(tokensUsed) && tokensUsed >= 0 ? { usage: { inputTokens: tokensUsed } } : {}
+  };
 }
 function containsUnsafeToolNode(value) {
   if (Array.isArray(value))
@@ -17124,6 +17270,7 @@ function extractGrokOutput(stdout, workingDirectory) {
   let sessionId;
   let actualModel;
   let rawAnswer;
+  let totalCostUsd;
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim())
       continue;
@@ -17175,12 +17322,18 @@ function extractGrokOutput(stdout, workingDirectory) {
       if (usageModels.length !== 1 || usageModels[0] !== actualModel) {
         return parseFailure("identity-unverified", actualModel);
       }
+      totalCostUsd = result.data.total_cost_usd;
       state = "closed";
       continue;
     }
     return parseFailure("identity-unverified", actualModel);
   }
-  return state === "closed" && actualModel !== undefined && rawAnswer !== undefined ? { status: "ok", actualModel, rawAnswer } : parseFailure("identity-unverified", actualModel);
+  return state === "closed" && actualModel !== undefined && rawAnswer !== undefined ? {
+    status: "ok",
+    actualModel,
+    rawAnswer,
+    ...totalCostUsd === undefined ? {} : { usage: { totalCostUsd } }
+  } : parseFailure("identity-unverified", actualModel);
 }
 function observedRoute(route, actualModel) {
   if (actualModel === route.primary)
@@ -17237,11 +17390,11 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
       const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt), configuredRoute.primary);
       if (output.status === "failed") {
         capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
-        return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" });
+        return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
       }
       const seatRoute = observedRoute(configuredRoute, output.actualModel);
       if (!seatRoute) {
-        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", `${config2.executableName} reported a model outside the approved route`, result.durationMs, false, { actualModel: output.actualModel, modelIdentity: "unverified" });
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", `${config2.executableName} reported a model outside the approved route`, result.durationMs, false, { actualModel: output.actualModel, modelIdentity: "unverified" }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
       }
       const answer = parseAnswer(request, config2.family, output.rawAnswer, false);
       if (!answer) {
@@ -17249,9 +17402,14 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
           actualModel: output.actualModel,
           modelIdentity: "verified",
           route: seatRoute
-        });
+        }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
       }
-      return seatSuccess(request, config2.family, configuredRoute.primary, output.actualModel, seatRoute, answer, result.durationMs);
+      return seatSuccess(request, config2.family, configuredRoute.primary, output.actualModel, seatRoute, answer, result.durationMs, {
+        requestedEffort: config2.requestedEffort,
+        ...output.observedEffort === undefined ? {} : { observedEffort: output.observedEffort },
+        credentialPath: "subscription",
+        ...output.usage === undefined ? {} : { usage: output.usage }
+      });
     },
     async probe(context) {
       return healthFromResponse(await adapter.invoke({
@@ -17284,6 +17442,7 @@ function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecuta
   return createSubscriptionCliAdapter({
     family: "openai",
     executableName: "codex",
+    requestedEffort: codexReasoningEffort,
     request: (executable, route, prompt, timeoutMs) => {
       const councilPrompt = structuredPrompt(prompt);
       return {
@@ -17367,6 +17526,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
   return createSubscriptionCliAdapter({
     family: "google",
     executableName: "agy",
+    requestedEffort: agyReasoningEffort,
     request: (executable, route, prompt, timeoutMs) => ({
       executable,
       args: [
@@ -17374,7 +17534,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
         "--mode",
         "plan",
         "--effort",
-        "high",
+        agyReasoningEffort,
         "--output-format",
         "stream-json",
         "--json-schema",
@@ -17427,6 +17587,7 @@ function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExe
   return createSubscriptionCliAdapter({
     family: "xai",
     executableName: "grok",
+    requestedEffort: grokReasoningEffort,
     request: (executable, _route, prompt, timeoutMs) => {
       const councilPrompt = `${grokInlineAnswerGuard}
 
@@ -17464,7 +17625,6 @@ ${structuredPrompt(prompt)}`;
     output: extractGrokOutput
   }, transport, resolveExecutable);
 }
-var xaiUnconfiguredReason = "set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH";
 function withTransportResolution(adapter, transportResolution) {
   return {
     ...adapter,
@@ -17479,32 +17639,46 @@ function withTransportResolution(adapter, transportResolution) {
     }
   };
 }
-function createUnconfiguredXaiAdapter() {
-  const family = "xai";
+var BillingModeSchema = exports_external.enum(["sub-first", "api-only", "sub-only"]);
+var DEFAULT_BILLING_MODE = "sub-first";
+function sentenceCase(value) {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+function unconfiguredReason(seat) {
+  if (seat.billingMode === "api-only") {
+    return `billing mode api-only requires ${seat.credential} in ~/.claude/council/providers.env`;
+  }
+  if (seat.billingMode === "sub-only") {
+    return `billing mode sub-only requires ${seat.subscriptionHint}`;
+  }
+  return `set ${seat.credential} in ~/.claude/council/providers.env, or ${seat.subscriptionHint}`;
+}
+function createUnconfiguredSeatAdapter(seat) {
+  const reason = unconfiguredReason(seat);
   const transportResolution = {
-    preferred: "subscription-cli",
+    preferred: seat.billingMode === "api-only" ? "http" : "subscription-cli",
     effective: null,
-    reason: xaiUnconfiguredReason
+    reason
   };
   const adapter = {
-    family,
+    family: seat.family,
     transport: "http",
     transportResolution,
     async availability(context) {
       return {
         status: "unconfigured",
-        provider: family,
-        model: context.registry.xai.primary,
-        reason: xaiUnconfiguredReason
+        provider: seat.family,
+        model: context.registry[seat.family].primary,
+        reason
       };
     },
     async invoke(request) {
-      return seatError(request, family, request.context.registry.xai.primary, "skipped", "missing-xai-transport", xaiUnconfiguredReason, 0);
+      return seatError(request, seat.family, request.context.registry[seat.family].primary, "skipped", `missing-${seat.family}-transport`, reason, 0);
     },
     async probe(context) {
       return healthFromResponse(await adapter.invoke({
         context,
-        seatId: "health-xai",
+        seatId: `health-${seat.family}`,
         role: "health",
         prompt: healthPrompt
       }));
@@ -17512,39 +17686,108 @@ function createUnconfiguredXaiAdapter() {
   };
   return adapter;
 }
+var CREDENTIAL_FALLBACK_CODES = {
+  "quota-exhausted": true,
+  "missing-credential": true,
+  "missing-executable": true,
+  "auth-expired": true,
+  "auth-missing": true
+};
+function permitsCredentialFallback(response) {
+  if (response.status === "ok")
+    return false;
+  return CREDENTIAL_FALLBACK_CODES[response.error.code] === true;
+}
+function withCredentialFallback(primary, secondary, fallbackTransport) {
+  const adapter = {
+    ...primary,
+    async invoke(request) {
+      const first = await primary.invoke(request);
+      if (!permitsCredentialFallback(first))
+        return first;
+      const second = await secondary().invoke(request);
+      if (second.status === "ok") {
+        return {
+          ...second,
+          credentialFallback: {
+            fromTransport: primary.transport,
+            toTransport: fallbackTransport,
+            reason: first.status === "ok" ? "unknown" : first.error.code
+          }
+        };
+      }
+      return second;
+    },
+    async probe(context) {
+      return healthFromResponse(await adapter.invoke({
+        context,
+        seatId: `health-${primary.family}`,
+        role: "health",
+        prompt: healthPrompt
+      }));
+    }
+  };
+  return adapter;
+}
+function resolveDualCredentialSeat(seat) {
+  if (seat.billingMode === "api-only") {
+    return seat.apiKeyPresent ? withTransportResolution(seat.api(), {
+      preferred: "http",
+      effective: "http",
+      reason: `Billing mode api-only: using the metered ${seat.credential}. This call is billable and attributable.`
+    }) : createUnconfiguredSeatAdapter(seat);
+  }
+  if (seat.billingMode === "sub-only") {
+    return seat.subscriptionAvailable ? withTransportResolution(seat.subscription(), {
+      preferred: "subscription-cli",
+      effective: "subscription-cli",
+      reason: `Billing mode sub-only: using ${seat.subscriptionLabel}. Metered fallback is disabled${seat.apiKeyPresent ? `, so ${seat.credential} was deliberately ignored` : ""}.`
+    }) : createUnconfiguredSeatAdapter(seat);
+  }
+  if (seat.preferApi === true && seat.apiKeyPresent) {
+    return withTransportResolution(seat.api(), {
+      preferred: "http",
+      effective: "http",
+      reason: `HTTPS was explicitly preferred and ${seat.credential} is set; ${seat.subscriptionLabel} was not used.`
+    });
+  }
+  if (seat.subscriptionAvailable) {
+    const subscription = seat.apiKeyPresent ? withCredentialFallback(seat.subscription(), seat.api, "http") : seat.subscription();
+    return withTransportResolution(subscription, {
+      preferred: "subscription-cli",
+      effective: "subscription-cli",
+      reason: seat.apiKeyPresent ? `${sentenceCase(seat.subscriptionLabel)} resolved on PATH and is preferred over the metered API key, which remains available if the subscription is exhausted or unauthenticated.` : `${sentenceCase(seat.subscriptionLabel)} resolved on PATH.`
+    });
+  }
+  if (seat.apiKeyPresent) {
+    return withTransportResolution(seat.api(), {
+      preferred: "subscription-cli",
+      effective: "http",
+      reason: `No ${seat.subscriptionLabel.replace(/^the /, "")} resolved on PATH; fell back to the metered ${seat.credential}. This call is billable.`
+    });
+  }
+  return createUnconfiguredSeatAdapter(seat);
+}
 function createXaiAdapter(options = {}) {
   const env = options.env ?? process.env;
   const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
-  const apiKeyPresent = Boolean(env.COUNCIL_XAI_API_KEY);
-  const httpAdapter = () => createHttpAdapter({
+  return resolveDualCredentialSeat({
     family: "xai",
     credential: "COUNCIL_XAI_API_KEY",
-    endpoint: "https://api.x.ai/v1/chat/completions",
-    allowRegistryFallback: false
-  }, options.httpTransport);
-  const cliAdapter = (resolved) => createXaiSubscriptionAdapter(options.cliTransport, () => resolved, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined));
-  if (options.transportPreference === "http" && apiKeyPresent) {
-    return withTransportResolution(httpAdapter(), {
-      preferred: "http",
-      effective: "http",
-      reason: "HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used."
-    });
-  }
-  if (executable) {
-    return withTransportResolution(cliAdapter(executable), {
-      preferred: "subscription-cli",
-      effective: "subscription-cli",
-      reason: apiKeyPresent ? "The grok subscription CLI resolved on PATH and is preferred over the metered API key." : "The grok subscription CLI resolved on PATH."
-    });
-  }
-  if (apiKeyPresent) {
-    return withTransportResolution(httpAdapter(), {
-      preferred: "subscription-cli",
-      effective: "http",
-      reason: "No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable."
-    });
-  }
-  return createUnconfiguredXaiAdapter();
+    subscriptionHint: "install the grok CLI on PATH",
+    subscriptionLabel: "the grok subscription CLI",
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    preferApi: options.transportPreference === "http",
+    subscriptionAvailable: Boolean(executable),
+    apiKeyPresent: Boolean(env.COUNCIL_XAI_API_KEY),
+    subscription: () => createXaiSubscriptionAdapter(options.cliTransport, () => executable, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined)),
+    api: () => createHttpAdapter({
+      family: "xai",
+      credential: "COUNCIL_XAI_API_KEY",
+      dialect: openAiCompatibleDialect("https://api.x.ai/v1/chat/completions"),
+      allowRegistryFallback: false
+    }, options.httpTransport)
+  });
 }
 function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("claude") ?? undefined) {
   const family = "anthropic";
@@ -17576,11 +17819,13 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
           "--model",
           route.primary,
           "--effort",
-          "max",
+          anthropicReasoningEffort,
           "--safe-mode",
           "--no-session-persistence",
           "--tools",
           "",
+          "--json-schema",
+          councilAnswerJsonSchema,
           "--output-format",
           "json"
         ],
@@ -17605,16 +17850,22 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
         capture(request, family, "invalid-provider-response", result.stdout);
         return seatError(request, family, route.primary, "failed", "identity-unverified", "claude output did not include model identity", result.durationMs);
       }
-      const actualModels = Object.keys(parsed.data.modelUsage).sort();
-      const actualModel = actualModels.includes(route.primary) ? route.primary : actualModels[0];
-      if (!actualModel) {
-        return seatError(request, family, route.primary, "failed", "identity-unverified", "claude output did not include model identity", result.durationMs);
+      const billedModels = Object.keys(parsed.data.modelUsage).sort();
+      const routedModels = billedModels.filter((model) => observedRoute(route, model) !== undefined);
+      const actualModel = routedModels[0];
+      if (actualModel === undefined || routedModels.length !== 1) {
+        const detail = billedModels.length === 0 ? "claude output did not include model identity" : routedModels.length === 0 ? "claude billed no model from the configured route" : "claude billed more than one model from the configured route, so the responding model is not attributable";
+        return seatError(request, family, route.primary, "failed", "identity-unverified", detail, result.durationMs, false, billedModels[0] === undefined ? undefined : { actualModel: billedModels[0], modelIdentity: "unverified" }, { requestedEffort: anthropicReasoningEffort, credentialPath: "subscription" });
+      }
+      const observed = observedRoute(route, actualModel);
+      if (observed === undefined) {
+        throw new Error("Route membership was established but could not be resolved");
       }
       const answer = parseAnswer(request, family, parsed.data.result);
       if (!answer) {
         return seatError(request, family, route.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", result.durationMs);
       }
-      return seatSuccess(request, family, route.primary, actualModel, "primary", answer, result.durationMs);
+      return seatSuccess(request, family, route.primary, actualModel, observed, answer, result.durationMs, { requestedEffort: anthropicReasoningEffort, credentialPath: "subscription" });
     },
     async probe(context) {
       return healthFromResponse(await adapter.invoke({
@@ -17626,6 +17877,66 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
     }
   };
   return adapter;
+}
+function createAnthropicDualAdapter(options = {}) {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? (() => Bun.which("claude") ?? undefined))();
+  return resolveDualCredentialSeat({
+    family: "anthropic",
+    credential: "COUNCIL_ANTHROPIC_API_KEY",
+    subscriptionHint: "install the claude CLI on PATH",
+    subscriptionLabel: "the claude subscription CLI",
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    subscriptionAvailable: Boolean(executable && isAbsolute2(executable)),
+    apiKeyPresent: Boolean(env.COUNCIL_ANTHROPIC_API_KEY),
+    subscription: () => createAnthropicAdapter(options.cliTransport, () => executable),
+    api: () => createHttpAdapter({
+      family: "anthropic",
+      credential: "COUNCIL_ANTHROPIC_API_KEY",
+      dialect: anthropicMessagesDialect,
+      allowRegistryFallback: false
+    }, options.httpTransport)
+  });
+}
+function createOpenAiDualAdapter(options = {}) {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? (() => Bun.which("codex") ?? undefined))();
+  return resolveDualCredentialSeat({
+    family: "openai",
+    credential: "COUNCIL_OPENAI_API_KEY",
+    subscriptionHint: "install the codex CLI on PATH and sign in",
+    subscriptionLabel: "the codex subscription CLI",
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    subscriptionAvailable: Boolean(executable),
+    apiKeyPresent: Boolean(env.COUNCIL_OPENAI_API_KEY),
+    subscription: () => createOpenAiCodexAdapter(options.cliTransport, () => executable),
+    api: () => createHttpAdapter({
+      family: "openai",
+      credential: "COUNCIL_OPENAI_API_KEY",
+      dialect: openAiCompatibleDialect("https://api.openai.com/v1/chat/completions"),
+      allowRegistryFallback: false
+    }, options.httpTransport)
+  });
+}
+function createGoogleDualAdapter(options = {}) {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? resolveAgyExecutable)();
+  return resolveDualCredentialSeat({
+    family: "google",
+    credential: "COUNCIL_GEMINI_API_KEY",
+    subscriptionHint: "install the agy CLI on PATH",
+    subscriptionLabel: "the agy subscription CLI",
+    billingMode: options.billingMode ?? DEFAULT_BILLING_MODE,
+    subscriptionAvailable: Boolean(executable),
+    apiKeyPresent: Boolean(env.COUNCIL_GEMINI_API_KEY),
+    subscription: () => createGoogleSubscriptionAdapter(options.cliTransport, () => executable),
+    api: () => createHttpAdapter({
+      family: "google",
+      credential: "COUNCIL_GEMINI_API_KEY",
+      dialect: geminiGenerateContentDialect,
+      allowRegistryFallback: false
+    }, options.httpTransport)
+  });
 }
 
 // src/domain/quorum.ts
@@ -18867,6 +19178,7 @@ var DoctorRemediationSchema = exports_external.strictObject({
 var ProviderDiagnosticSchema = exports_external.strictObject({
   provider: ProviderFamilySchema,
   transport: ModelTransportSchema,
+  credentialPath: exports_external.enum(["subscription", "api-key"]).nullable(),
   resolution: RouteResolutionSchema,
   route: ModelRouteSchema,
   requestedModel: ModelIdentifierSchema3,
@@ -18883,6 +19195,7 @@ var ProviderDiagnosticSchema = exports_external.strictObject({
 var DoctorReportSchema = exports_external.strictObject({
   schemaVersion: exports_external.literal(1),
   capturedAt: TimestampSchema3,
+  billingMode: exports_external.enum(["sub-first", "api-only", "sub-only"]),
   status: DoctorStatusSchema,
   totalOutage: exports_external.boolean(),
   diagnostics: exports_external.array(ProviderDiagnosticSchema),
@@ -18952,7 +19265,12 @@ function reportStatus(diagnostics) {
   }
   return "unavailable";
 }
-async function doctor(adapters, context, capturedAt = new Date().toISOString()) {
+function credentialPath(probe) {
+  if (probe.availability === "unconfigured")
+    return null;
+  return probe.transport === "http" ? "api-key" : "subscription";
+}
+async function doctor(adapters, context, capturedAt = new Date().toISOString(), billingMode = "sub-first") {
   const probes = await probeRoster(adapters, context);
   const baseline = snapshot(probes, context.registry, capturedAt);
   const probeByProvider = new Map(probes.map((probe) => [probe.provider, probe]));
@@ -18972,6 +19290,7 @@ async function doctor(adapters, context, capturedAt = new Date().toISOString()) 
     return ProviderDiagnosticSchema.parse({
       provider: health.provider,
       transport: probe.transport,
+      credentialPath: credentialPath(probe),
       resolution: routeResolution(probe),
       route: health.route,
       requestedModel: health.requestedModel,
@@ -18990,6 +19309,7 @@ async function doctor(adapters, context, capturedAt = new Date().toISOString()) 
   return DoctorReportSchema.parse({
     schemaVersion: 1,
     capturedAt: baseline.capturedAt,
+    billingMode,
     status,
     totalOutage: status === "unavailable",
     diagnostics,
@@ -19313,8 +19633,8 @@ function evaluateOutbound(request) {
 }
 
 // src/providers/anthropic-cli.ts
-function anthropicAdapter(transport, resolveExecutable) {
-  return createAnthropicAdapter(transport, resolveExecutable);
+function anthropicAdapter(options = {}) {
+  return createAnthropicDualAdapter(options);
 }
 
 // src/providers/deepseek.ts
@@ -19322,14 +19642,14 @@ function deepseekAdapter(transport) {
   return createHttpAdapter({
     family: "deepseek",
     credential: "COUNCIL_DEEPSEEK_API_KEY",
-    endpoint: "https://api.deepseek.com/chat/completions",
+    dialect: openAiCompatibleDialect("https://api.deepseek.com/chat/completions"),
     allowRegistryFallback: true
   }, transport);
 }
 
 // src/providers/google.ts
-function googleAdapter(transport, resolveExecutable) {
-  return createGoogleSubscriptionAdapter(transport, resolveExecutable);
+function googleAdapter(options = {}) {
+  return createGoogleDualAdapter(options);
 }
 
 // src/providers/moonshot.ts
@@ -19337,14 +19657,14 @@ function moonshotAdapter(transport) {
   return createHttpAdapter({
     family: "moonshot",
     credential: "COUNCIL_MOONSHOT_API_KEY",
-    endpoint: "https://api.moonshot.ai/v1/chat/completions",
+    dialect: openAiCompatibleDialect("https://api.moonshot.ai/v1/chat/completions"),
     allowRegistryFallback: false
   }, transport);
 }
 
 // src/providers/openai.ts
-function openaiAdapter(transport, resolveExecutable) {
-  return createOpenAiCodexAdapter(transport, resolveExecutable);
+function openaiAdapter(options = {}) {
+  return createOpenAiDualAdapter(options);
 }
 
 // src/providers/xai.ts
@@ -19354,18 +19674,38 @@ function xaiAdapter(options = {}) {
 
 // src/providers/index.ts
 function createProviderRoster(options = {}) {
+  const billingMode = options.billingMode ?? DEFAULT_BILLING_MODE;
   return {
-    anthropic: anthropicAdapter(options.cliTransport, options.resolveClaudeExecutable),
-    openai: openaiAdapter(options.cliTransport, options.resolveOpenAiExecutable),
+    anthropic: anthropicAdapter({
+      env: options.env,
+      httpTransport: options.httpTransport,
+      cliTransport: options.cliTransport,
+      resolveExecutable: options.resolveClaudeExecutable,
+      billingMode
+    }),
+    openai: openaiAdapter({
+      env: options.env,
+      httpTransport: options.httpTransport,
+      cliTransport: options.cliTransport,
+      resolveExecutable: options.resolveOpenAiExecutable,
+      billingMode
+    }),
     xai: xaiAdapter({
       env: options.env,
       httpTransport: options.httpTransport,
       cliTransport: options.cliTransport,
       resolveExecutable: options.resolveXaiExecutable,
       modelOverride: options.xaiModelOverride,
-      transportPreference: options.xaiTransportPreference
+      transportPreference: options.xaiTransportPreference,
+      billingMode
     }),
-    google: googleAdapter(options.cliTransport, options.resolveGoogleExecutable),
+    google: googleAdapter({
+      env: options.env,
+      httpTransport: options.httpTransport,
+      cliTransport: options.cliTransport,
+      resolveExecutable: options.resolveGoogleExecutable,
+      billingMode
+    }),
     deepseek: deepseekAdapter(options.httpTransport),
     moonshot: moonshotAdapter(options.httpTransport)
   };
@@ -19986,6 +20326,39 @@ var SessionProtocolSchema = exports_external.strictObject({
     });
   }
 });
+var PersistedSeatRetrySchema = exports_external.strictObject({
+  seatId: NonEmptyStringSchema3,
+  provider: ProviderFamilySchema,
+  role: NonEmptyStringSchema3,
+  attempt: exports_external.literal(2),
+  reason: exports_external.strictObject({
+    status: exports_external.enum(["failed", "timed-out", "cancelled"]),
+    error: SeatErrorSchema
+  })
+});
+var PersistedRoundSchema = exports_external.strictObject({
+  round: exports_external.number().int().min(1).max(3),
+  phase: exports_external.enum(["analysis", "rebuttal", "refinement"]),
+  responses: exports_external.array(SeatResponseSchema).min(1),
+  retries: exports_external.array(PersistedSeatRetrySchema)
+});
+var ExecutionSnapshotSchema = exports_external.strictObject({
+  rounds: exports_external.array(PersistedRoundSchema).min(1).max(3),
+  quorum: QuorumEvaluationSchema,
+  rebuttalObligation: exports_external.strictObject({
+    minimumSuccessfulResponses: exports_external.number().int().nonnegative(),
+    successfulResponses: exports_external.number().int().nonnegative(),
+    satisfied: exports_external.boolean()
+  }),
+  synthesisEligible: exports_external.boolean()
+});
+var DataAvailabilitySchema = exports_external.enum(["unavailable", "captured"]);
+var PersistedDecisionStateSchema = exports_external.enum(["awaiting-adjudication", "not-adjudicable"]);
+var DecisionStateSchema = exports_external.enum([
+  "awaiting-adjudication",
+  "adjudicated",
+  "not-adjudicable"
+]);
 var SessionRecordShape = {
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
@@ -19999,22 +20372,45 @@ var SessionRecordShape = {
   assignments: AssignmentHistorySchema.default([]),
   summary: NonEmptyStringSchema3.optional()
 };
-var GeneralSessionRecordSchema = exports_external.strictObject({
+var CurrentSessionRecordShape = {
+  ...SessionRecordShape,
+  schemaVersion: exports_external.literal(2),
+  decisionState: PersistedDecisionStateSchema,
+  execution: ExecutionSnapshotSchema
+};
+var LegacyGeneralSessionRecordSchema = exports_external.strictObject({
   ...SessionRecordShape,
   scope: exports_external.literal("general")
 });
-var ProjectSessionRecordSchema = exports_external.strictObject({
+var LegacyProjectSessionRecordSchema = exports_external.strictObject({
   ...SessionRecordShape,
   scope: exports_external.literal("project"),
   projectId: StorageIdSchema,
   projectDisplayName: SingleLineStringSchema.optional()
 });
-var SessionRecordSchema = exports_external.discriminatedUnion("scope", [GeneralSessionRecordSchema, ProjectSessionRecordSchema]).superRefine((record2, context) => {
+var CurrentGeneralSessionRecordSchema = exports_external.strictObject({
+  ...CurrentSessionRecordShape,
+  scope: exports_external.literal("general")
+});
+var CurrentProjectSessionRecordSchema = exports_external.strictObject({
+  ...CurrentSessionRecordShape,
+  scope: exports_external.literal("project"),
+  projectId: StorageIdSchema,
+  projectDisplayName: SingleLineStringSchema.optional()
+});
+function refineSessionRecord(record2, context) {
   if (record2.status === "completed" && record2.completedAt === undefined) {
     context.addIssue({
       code: "custom",
       path: ["completedAt"],
       message: "completed sessions require completedAt"
+    });
+  }
+  if (record2.completedAt !== undefined && Date.parse(record2.completedAt) < Date.parse(record2.startedAt)) {
+    context.addIssue({
+      code: "custom",
+      path: ["completedAt"],
+      message: "completedAt must not precede startedAt"
     });
   }
   const seatIds = new Set;
@@ -20051,7 +20447,35 @@ var SessionRecordSchema = exports_external.discriminatedUnion("scope", [GeneralS
     seatIds.add(assignment.seatId);
     lensNames.add(assignment.lensName);
   }
-});
+  if (!("schemaVersion" in record2))
+    return;
+  const adjudicable = record2.status === "completed" || record2.status === "degraded";
+  const expected = adjudicable ? "awaiting-adjudication" : "not-adjudicable";
+  if (record2.decisionState !== expected) {
+    context.addIssue({
+      code: "custom",
+      path: ["decisionState"],
+      message: `sessions with status ${record2.status} must persist decisionState ${expected}`
+    });
+  }
+}
+var SessionRecordSchema = exports_external.union([
+  exports_external.discriminatedUnion("scope", [
+    CurrentGeneralSessionRecordSchema,
+    CurrentProjectSessionRecordSchema
+  ]),
+  exports_external.discriminatedUnion("scope", [
+    LegacyGeneralSessionRecordSchema,
+    LegacyProjectSessionRecordSchema
+  ])
+]).superRefine(refineSessionRecord);
+var CurrentSessionRecordSchema = exports_external.discriminatedUnion("scope", [
+  CurrentGeneralSessionRecordSchema,
+  CurrentProjectSessionRecordSchema
+]).superRefine(refineSessionRecord);
+function sessionDataAvailability(record2) {
+  return "schemaVersion" in record2 ? "captured" : "unavailable";
+}
 var ChairAcceptanceRecordShape = {
   acceptanceId: StorageIdSchema,
   runId: StorageIdSchema,
@@ -20073,10 +20497,43 @@ var ChairAcceptanceRecordSchema = exports_external.discriminatedUnion("scope", [
   GeneralChairAcceptanceRecordSchema,
   ProjectChairAcceptanceRecordSchema
 ]);
+var ChairRulingRecordShape = {
+  rulingId: StorageIdSchema,
+  runId: StorageIdSchema,
+  motionId: StorageIdSchema,
+  title: SingleLineStringSchema,
+  decision: NonEmptyStringSchema3,
+  rationale: NonEmptyStringSchema3,
+  authorisedBy: SingleLineStringSchema,
+  followedSeats: exports_external.array(NonEmptyStringSchema3),
+  setAsideSeats: exports_external.array(NonEmptyStringSchema3),
+  dissentAcknowledged: exports_external.boolean(),
+  createdAt: TimestampSchema5
+};
+var GeneralChairRulingRecordSchema = exports_external.strictObject({
+  ...ChairRulingRecordShape,
+  scope: exports_external.literal("general")
+});
+var ProjectChairRulingRecordSchema = exports_external.strictObject({
+  ...ChairRulingRecordShape,
+  scope: exports_external.literal("project"),
+  projectId: StorageIdSchema
+});
+var ChairRulingRecordSchema = exports_external.discriminatedUnion("scope", [GeneralChairRulingRecordSchema, ProjectChairRulingRecordSchema]).superRefine((record2, context) => {
+  const overlap = record2.followedSeats.filter((seat) => record2.setAsideSeats.includes(seat));
+  if (overlap.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["setAsideSeats"],
+      message: `a seat cannot be both followed and set aside: ${overlap.join(", ")}`
+    });
+  }
+});
 var ResolutionRecordShape = {
   resolutionId: StorageIdSchema,
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
+  rulingId: StorageIdSchema,
   title: SingleLineStringSchema,
   decision: NonEmptyStringSchema3,
   createdAt: TimestampSchema5
@@ -20221,12 +20678,16 @@ async function validatePersistedScope(directory) {
   const sessionPaths = await jsonFiles(join4(directory, "sessions"));
   const resolutionPaths = await jsonFiles(join4(directory, "resolutions"));
   const chairAcceptancePaths = await jsonFiles(join4(directory, "chair-acceptances"));
+  const chairRulingPaths = await jsonFiles(join4(directory, "chair-rulings"));
   const sessions = [];
   const resolutions = [];
   const chairAcceptances = [];
+  const chairRulings = [];
   const runIds = new Set;
   const resolutionIds = new Set;
   const acceptanceIds = new Set;
+  const rulingIds = new Set;
+  const ruledRunIds = new Set;
   const acceptedRunIds = new Set;
   const resolvedMotionIds = new Set;
   const motions = new Map;
@@ -20265,6 +20726,21 @@ async function validatePersistedScope(directory) {
     acceptedRunIds.add(acceptance.runId);
     chairAcceptances.push(acceptance);
   }
+  for (const path of chairRulingPaths) {
+    const ruling = await parsePersistedJson(path, ChairRulingRecordSchema, "chair ruling");
+    if (fileStem(path) !== ruling.rulingId) {
+      throw new Error(`Persisted chair ruling filename does not match rulingId: ${path}`);
+    }
+    if (rulingIds.has(ruling.rulingId)) {
+      throw new Error(`Duplicate persisted chair ruling id: ${ruling.rulingId}`);
+    }
+    if (ruledRunIds.has(ruling.runId)) {
+      throw new Error(`Duplicate persisted chair ruling for run: ${ruling.runId}`);
+    }
+    rulingIds.add(ruling.rulingId);
+    ruledRunIds.add(ruling.runId);
+    chairRulings.push(ruling);
+  }
   for (const path of resolutionPaths) {
     const resolution = await parsePersistedJson(path, ResolutionRecordSchema, "resolution");
     if (fileStem(path) !== resolution.resolutionId) {
@@ -20286,13 +20762,26 @@ async function validatePersistedScope(directory) {
       throw new Error(`Persisted chair acceptance has no matching degraded session: ${acceptance.acceptanceId}`);
     }
   }
+  for (const ruling of chairRulings) {
+    const session = sessions.find((candidate) => candidate.runId === ruling.runId);
+    if (!session || session.status !== "completed" && session.status !== "degraded" || session.motionId !== ruling.motionId || session.scope !== ruling.scope || session.scope === "project" && ruling.scope === "project" && session.projectId !== ruling.projectId) {
+      throw new Error(`Persisted chair ruling has no matching adjudicable session: ${ruling.rulingId}`);
+    }
+    if (session.status === "degraded" && !chairAcceptances.some(({ runId }) => runId === ruling.runId)) {
+      throw new Error(`Persisted chair ruling on a degraded session requires a chair acceptance: ${ruling.rulingId}`);
+    }
+  }
   for (const resolution of resolutions) {
     const session = sessions.find((candidate) => candidate.runId === resolution.runId);
     if (!session || session.status !== "completed" && !(session.status === "degraded" && chairAcceptances.some(({ runId }) => runId === session.runId)) || session.motionId !== resolution.motionId || session.scope !== resolution.scope || session.scope === "project" && resolution.scope === "project" && session.projectId !== resolution.projectId) {
       throw new Error(`Persisted resolution has no matching accepted session: ${resolution.resolutionId}`);
     }
+    const ruling = chairRulings.find((candidate) => candidate.rulingId === resolution.rulingId);
+    if (!ruling || ruling.runId !== resolution.runId || ruling.motionId !== resolution.motionId || ruling.decision !== resolution.decision) {
+      throw new Error(`Persisted resolution is not backed by a matching chair ruling: ${resolution.resolutionId}`);
+    }
   }
-  return { sessions, chairAcceptances, resolutions };
+  return { sessions, chairAcceptances, chairRulings, resolutions };
 }
 function serialiseJson(value) {
   return `${JSON.stringify(value, null, 2)}
@@ -20372,6 +20861,21 @@ function renderLedgerEntry(record2) {
   ].join(`
 `);
 }
+function renderChairRulingMarkdown(record2) {
+  const lines = [
+    `# Chair ruling ${record2.rulingId}`,
+    "",
+    `- Session: \`${record2.runId}\``,
+    `- Motion ID: \`${record2.motionId}\``,
+    `- Scope: \`${record2.scope}\``
+  ];
+  if (record2.scope === "project")
+    lines.push(`- Project ID: \`${record2.projectId}\``);
+  lines.push(`- Authorised by: ${record2.authorisedBy}`, `- Dissent acknowledged: ${record2.dissentAcknowledged ? "yes" : "no"}`, record2.followedSeats.length > 0 ? `- Seats followed: ${record2.followedSeats.map((seat) => `\`${seat}\``).join(", ")}` : "- Seats followed: none recorded", record2.setAsideSeats.length > 0 ? `- Seats set aside: ${record2.setAsideSeats.map((seat) => `\`${seat}\``).join(", ")}` : "- Seats set aside: none", `- Created: ${record2.createdAt}`, "", `## ${record2.title}`, "", record2.decision, "", "## Rationale", "", record2.rationale);
+  return `${lines.join(`
+`)}
+`;
+}
 async function removeCommittedFile(path, originalError) {
   try {
     await rm2(path, { force: true });
@@ -20431,7 +20935,7 @@ class CouncilStore {
     return AssignmentHistorySchema.parse(state.sessions.flatMap(({ assignments }) => assignments));
   }
   async writeSession(input) {
-    const record2 = SessionRecordSchema.parse(input);
+    const record2 = CurrentSessionRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
     await withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
@@ -20469,7 +20973,7 @@ class CouncilStore {
             } catch (error51) {
               throw new Error("Session serialisation produced invalid JSON", { cause: error51 });
             }
-            SessionRecordSchema.parse(value);
+            CurrentSessionRecordSchema.parse(value);
           }
         });
       } catch (error51) {
@@ -20527,6 +21031,73 @@ class CouncilStore {
       }
     });
   }
+  async appendChairRuling(input) {
+    const record2 = ChairRulingRecordSchema.parse(input);
+    const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
+    await withScopeWriteLock(directory, async () => {
+      const state = await validatePersistedScope(directory);
+      const session = state.sessions.find((candidate) => candidate.runId === record2.runId);
+      if (!session || session.status !== "completed" && session.status !== "degraded" || session.motionId !== record2.motionId || session.scope !== record2.scope || session.scope === "project" && record2.scope === "project" && session.projectId !== record2.projectId) {
+        throw new Error(`Chair ruling requires a matching adjudicable session: ${record2.runId}`);
+      }
+      if (session.status === "degraded" && !state.chairAcceptances.some(({ runId }) => runId === record2.runId)) {
+        throw new Error(`Chair ruling on a degraded session requires a chair acceptance first: ${record2.runId}`);
+      }
+      if (state.chairRulings.some(({ rulingId }) => rulingId === record2.rulingId)) {
+        throw new Error(`Duplicate chair ruling id: ${record2.rulingId}`);
+      }
+      if (state.chairRulings.some(({ runId }) => runId === record2.runId)) {
+        throw new Error(`Session already has a chair ruling: ${record2.runId}`);
+      }
+      const rulingsDirectory = join4(directory, "chair-rulings");
+      const jsonPath = join4(rulingsDirectory, `${record2.rulingId}.json`);
+      const markdownPath = join4(rulingsDirectory, `${record2.rulingId}.md`);
+      if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
+        throw new Error(`Duplicate chair ruling id: ${record2.rulingId}`);
+      }
+      let markdownCommitted = false;
+      try {
+        await writeTextAtomically(markdownPath, renderChairRulingMarkdown(record2), {
+          replace: false
+        });
+        markdownCommitted = true;
+        await writeTextAtomically(jsonPath, serialiseJson(record2), {
+          replace: false,
+          validate: (content) => {
+            let value;
+            try {
+              value = JSON.parse(content);
+            } catch (error51) {
+              throw new Error("Chair ruling serialisation produced invalid JSON", { cause: error51 });
+            }
+            ChairRulingRecordSchema.parse(value);
+          }
+        });
+      } catch (error51) {
+        if (markdownCommitted)
+          await removeCommittedFile(markdownPath, error51);
+        throw error51;
+      }
+    });
+  }
+  async readDecisionStates(scope, projectId) {
+    const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(scope), projectId);
+    const state = await validatePersistedScope(directory);
+    return state.sessions.map((session) => {
+      const ruling = state.chairRulings.find(({ runId }) => runId === session.runId);
+      const resolution = state.resolutions.find(({ runId }) => runId === session.runId);
+      const adjudicable = session.status === "completed" || session.status === "degraded";
+      return {
+        runId: session.runId,
+        motionId: session.motionId,
+        status: session.status,
+        decisionState: ruling ? "adjudicated" : adjudicable ? "awaiting-adjudication" : "not-adjudicable",
+        dataAvailability: sessionDataAvailability(session),
+        ...ruling === undefined ? {} : { rulingId: ruling.rulingId },
+        ...resolution === undefined ? {} : { resolutionId: resolution.resolutionId }
+      };
+    });
+  }
   async appendResolution(input) {
     const record2 = ResolutionRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
@@ -20553,6 +21124,16 @@ class CouncilStore {
       }
       if (state.resolutions.some((resolution) => resolution.resolutionId === record2.resolutionId)) {
         throw new Error(`Duplicate resolution id: ${record2.resolutionId}`);
+      }
+      const ruling = state.chairRulings.find(({ rulingId }) => rulingId === record2.rulingId);
+      if (!ruling) {
+        throw new Error(`Resolution requires an existing chair ruling: ${record2.rulingId}`);
+      }
+      if (ruling.runId !== record2.runId || ruling.motionId !== record2.motionId) {
+        throw new Error("Resolution does not match its chair ruling");
+      }
+      if (ruling.decision !== record2.decision) {
+        throw new Error("Resolution decision does not match its chair ruling");
       }
       const resolutionsDirectory = join4(directory, "resolutions");
       const jsonPath = join4(resolutionsDirectory, `${record2.resolutionId}.json`);
@@ -21119,8 +21700,17 @@ var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_defa
 var EXECUTABLE_PATH = resolve6(import.meta.main ? Bun.main : import.meta.path);
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
-var BOOLEAN_FLAGS = new Set(["dry-run", "json", "contested", "help"]);
+var BOOLEAN_FLAGS = new Set([
+  "dry-run",
+  "json",
+  "contested",
+  "help",
+  "accept-degraded",
+  "dissent-acknowledged",
+  "no-dissent"
+]);
 var COMMON_RUN_FLAGS = new Set([
+  "billing",
   "classification",
   "contested",
   "domain",
@@ -21142,7 +21732,26 @@ var COMMON_RUN_FLAGS = new Set([
   "timeout-ms"
 ]);
 var COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, "min-families"]);
-var REGISTRY_REPORT_FLAGS = new Set(["help", "json", "records-root", "registry"]);
+var REGISTRY_REPORT_FLAGS = new Set(["help", "json", "records-root", "registry", "billing"]);
+var ADJUDICATE_FLAGS = new Set([
+  "help",
+  "json",
+  "records-root",
+  "scope",
+  "project-id",
+  "run-id",
+  "decision",
+  "rationale",
+  "authorised-by",
+  "followed-seats",
+  "set-aside-seats",
+  "dissent-acknowledged",
+  "no-dissent",
+  "accept-degraded",
+  "acceptance-rationale",
+  "ruling-id",
+  "resolution-id"
+]);
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -21326,6 +21935,16 @@ function commandDefaults(command) {
     return { impact: "medium", contested: false, rounds: 1 };
   return { impact: "medium", contested: false, rounds: 1 };
 }
+function resolveBillingMode(parsed, policy) {
+  const flag = oneFlag(parsed, "billing");
+  if (flag !== undefined)
+    return BillingModeSchema.parse(flag);
+  return policy?.billingMode ?? DEFAULT_BILLING_MODE;
+}
+function reportBillingMode(parsed) {
+  const flag = oneFlag(parsed, "billing");
+  return flag === undefined ? DEFAULT_BILLING_MODE : BillingModeSchema.parse(flag);
+}
 async function parseRunOptions(command, parsed, environment, registry2, recordsRoot) {
   if (parsed.positionals.length > 0)
     throw new Error("Run commands accept options only");
@@ -21397,7 +22016,8 @@ async function parseRunOptions(command, parsed, environment, registry2, recordsR
     ...minimumFamilies === undefined ? {} : { minimumFamilies },
     ...refinementTrigger === undefined ? {} : { refinementTrigger },
     timeoutMs: integerFlag(parsed, "timeout-ms", DEFAULT_TIMEOUT_MS, 1, 3600000),
-    ...recordsRoot === undefined ? {} : { recordsRoot }
+    ...recordsRoot === undefined ? {} : { recordsRoot },
+    billingMode: resolveBillingMode(parsed, policy)
   };
 }
 function quorumPolicy(options) {
@@ -21454,41 +22074,6 @@ function publicExecution(result) {
   const { motion: _motion, ...safeResult } = result;
   return safeResult;
 }
-function parseCouncilAnswer(value) {
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(value);
-  } catch {
-    return;
-  }
-  return CouncilAnswerSchema.safeParse(parsedJson).data;
-}
-function consensusRecommendation(result) {
-  const finalRound = result.rounds.at(-1);
-  if (finalRound === undefined)
-    return;
-  const recommendationsByFamily = new Map;
-  for (const response of finalRound.responses) {
-    if (response.status !== "ok")
-      continue;
-    const answer = parseCouncilAnswer(response.answer);
-    if (answer === undefined)
-      return;
-    const recommendation = answer.recommendation.trim();
-    const priorRecommendation = recommendationsByFamily.get(response.provider);
-    if (priorRecommendation !== undefined && priorRecommendation.toLocaleLowerCase() !== recommendation.toLocaleLowerCase()) {
-      return;
-    }
-    recommendationsByFamily.set(response.provider, recommendation);
-  }
-  if (recommendationsByFamily.size < result.quorum.minimumDistinctFamilies)
-    return;
-  const recommendations = [...recommendationsByFamily.values()];
-  const canonical = recommendations[0]?.toLocaleLowerCase();
-  if (canonical === undefined)
-    return;
-  return recommendations.every((recommendation) => recommendation.toLocaleLowerCase() === canonical) ? recommendations[0] : undefined;
-}
 async function loadAssignmentHistory(options, environment) {
   if (environment.assignmentHistory !== undefined) {
     return AssignmentHistorySchema.parse(environment.assignmentHistory);
@@ -21497,7 +22082,7 @@ async function loadAssignmentHistory(options, environment) {
     return [];
   return CouncilStore.open(options.recordsRoot).readAssignmentHistory(options.scope, { motionId: options.motionId, motion: options.motion }, options.projectId);
 }
-async function persistRun(options, decision, manifest, result, roleAssignments, now) {
+async function persistRun(options, decision, manifest, result, roleAssignments, startedAt, now) {
   if (options.recordsRoot === undefined)
     return;
   if (options.scope === "project" && options.projectId === undefined) {
@@ -21505,16 +22090,19 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
   }
   const store = CouncilStore.open(options.recordsRoot);
   const status = result.outcome;
-  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
+  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families; a chair ruling is required before this becomes a resolution.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance and a chair ruling are both required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
   const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
   const sessionSummary = reducedQuorumWarning === undefined ? outcomeSummary : `${reducedQuorumWarning} ${outcomeSummary}`;
+  const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
   const sessionBase = {
+    schemaVersion: 2,
     runId: options.runId,
     motionId: options.motionId,
     status,
     motion: options.motion,
-    startedAt: now,
+    startedAt,
     completedAt: now,
+    decisionState,
     policyDecision: {
       kind: decision.kind,
       classification: decision.effectiveClassification ?? options.classification,
@@ -21529,6 +22117,12 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
       ...result.refinementTrigger === undefined ? {} : { refinementTrigger: result.refinementTrigger },
       quorumPolicy: result.quorumPolicy
     },
+    execution: {
+      rounds: result.rounds,
+      quorum: result.quorum,
+      rebuttalObligation: result.rebuttalObligation,
+      synthesisEligible: result.synthesisEligible
+    },
     assignments: roleAssignments,
     summary: sessionSummary
   };
@@ -21538,30 +22132,7 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
     projectId: options.projectId
   };
   await store.writeSession(session);
-  const recommendation = consensusRecommendation(result);
-  if (status !== "completed" || recommendation === undefined) {
-    return { session: true, resolution: false };
-  }
-  const resolutionBase = {
-    resolutionId: deterministicId("resolution", options.command, options.motion, now),
-    runId: options.runId,
-    motionId: options.motionId,
-    title: options.motion.replace(/[\r\n]+/g, " ").trim().slice(0, 200),
-    decision: recommendation,
-    createdAt: now
-  };
-  try {
-    await store.appendResolution(options.scope === "general" ? { ...resolutionBase, scope: "general" } : {
-      ...resolutionBase,
-      scope: "project",
-      projectId: options.projectId
-    });
-    return { session: true, resolution: true };
-  } catch (error51) {
-    const message = error51 instanceof Error ? error51.message : "";
-    const resolutionBlockReason = /motion already has a resolution/i.test(message) ? "motion-already-resolved" : /duplicate resolution id/i.test(message) ? "resolution-id-conflict" : "resolution-append-failed";
-    return { session: true, resolution: false, resolutionBlockReason };
-  }
+  return { session: true, decisionState, dataAvailability: "captured" };
 }
 async function resolveCouncilProviders(options, adapters, context) {
   const candidateAdapters = options.providerFamilies.flatMap((provider) => {
@@ -21658,7 +22229,10 @@ async function runCouncilCommand(command, args, environment) {
       }
     });
   }
-  const adapters = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
+  const adapters = environment.adapters ?? createProviderRoster({
+    env: environment.env ?? process.env,
+    billingMode: options.billingMode
+  });
   const diagnostics = [];
   const context = {
     registry: registry2,
@@ -21716,6 +22290,7 @@ async function runCouncilCommand(command, args, environment) {
     redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
   };
   const runner = new CouncilRunner({ adapters, context });
+  const startedAt = (environment.now ?? (() => new Date().toISOString()))();
   const execution = await runner.run({
     runId: executionOptions.runId,
     motion: executionOptions.motion,
@@ -21725,10 +22300,9 @@ async function runCouncilCommand(command, args, environment) {
     ...executionOptions.refinementTrigger === undefined ? {} : { refinementTrigger: executionOptions.refinementTrigger }
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const records = await persistRun(executionOptions, policyDecision, manifest, execution, roleAssignments, now);
-  const resolutionPersistenceFailed = records?.resolutionBlockReason === "resolution-append-failed";
-  const status = resolutionPersistenceFailed ? "record-failure" : execution.outcome;
-  return output(resolutionPersistenceFailed ? 5 : status === "completed" ? 0 : 4, {
+  const records = await persistRun(executionOptions, policyDecision, manifest, execution, roleAssignments, startedAt, now);
+  const status = execution.outcome;
+  return output(status === "completed" ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     status,
@@ -21743,7 +22317,10 @@ async function runCouncilCommand(command, args, environment) {
 }
 async function providerContext(parsed, environment) {
   const configured = await configuredModelRegistry(parsed, environment);
-  const roster = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
+  const roster = environment.adapters ?? createProviderRoster({
+    env: environment.env ?? process.env,
+    billingMode: reportBillingMode(parsed)
+  });
   return {
     configured,
     roster,
@@ -21799,7 +22376,7 @@ async function healthCommand(command, args, environment) {
   const providerConfiguration = await providerContext(parsed, environment);
   const adapters = orderedAdapters(providerConfiguration.roster);
   if (command === "doctor") {
-    const report = await doctor(adapters, providerConfiguration.context);
+    const report = await doctor(adapters, providerConfiguration.context, (environment.now ?? (() => new Date().toISOString()))(), reportBillingMode(parsed));
     return output(0, {
       ...report,
       engineIdentity: engineIdentity(providerConfiguration.configured, environment)
@@ -21906,6 +22483,120 @@ async function migrationCommand(args, environment) {
   }
   throw new Error(`Unknown migrate-general action: ${action}`);
 }
+async function adjudicateCommand(args, environment) {
+  const parsed = parseArguments(args, ADJUDICATE_FLAGS);
+  if (hasFlag(parsed, "help")) {
+    return output(0, {
+      command: "adjudicate",
+      summary: "Record a chair ruling on an executed motion and append the resulting resolution.",
+      required: ["--run-id", "--decision", "--rationale", "--authorised-by", "--records-root"],
+      dissent: "Exactly one of --dissent-acknowledged or --no-dissent is required. A ruling must state whether the panel disagreed, because textual agreement across a shared schema is a prompt-quality signal rather than a mandate.",
+      degraded: "A degraded session additionally requires --accept-degraded with --acceptance-rationale.",
+      optional: ["--scope", "--project-id", "--followed-seats", "--set-aside-seats"]
+    });
+  }
+  const recordsRoot = oneFlag(parsed, "records-root");
+  if (recordsRoot === undefined)
+    throw new Error("adjudicate requires --records-root");
+  const scope = CouncilScopeSchema.parse(oneFlag(parsed, "scope") ?? "general");
+  const projectIdValue = oneFlag(parsed, "project-id");
+  if (scope === "general" && projectIdValue !== undefined) {
+    throw new Error("Project id requires --scope project");
+  }
+  if (scope === "project" && projectIdValue === undefined) {
+    throw new Error("Project scope requires --project-id");
+  }
+  const projectId = projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, "Project id");
+  const runIdValue = oneFlag(parsed, "run-id");
+  if (runIdValue === undefined)
+    throw new Error("adjudicate requires --run-id");
+  const runId = safeStorageId(runIdValue, "Run id");
+  const decision = oneFlag(parsed, "decision");
+  const rationale = oneFlag(parsed, "rationale");
+  const authorisedBy = oneFlag(parsed, "authorised-by");
+  if (decision === undefined || rationale === undefined || authorisedBy === undefined) {
+    throw new Error("adjudicate requires --decision, --rationale and --authorised-by");
+  }
+  const acknowledged = hasFlag(parsed, "dissent-acknowledged");
+  const noDissent = hasFlag(parsed, "no-dissent");
+  if (acknowledged === noDissent) {
+    throw new Error("adjudicate requires exactly one of --dissent-acknowledged or --no-dissent");
+  }
+  const seatList = (name) => {
+    const raw = parsed.flags.get(name);
+    if (raw === undefined)
+      return [];
+    const seats = raw.flatMap((value) => value.split(",")).map((value) => value.trim()).filter((value) => value.length > 0);
+    return [...new Set(seats)];
+  };
+  const store = CouncilStore.open(recordsRoot);
+  const states = await store.readDecisionStates(scope, projectId);
+  const state = states.find((candidate) => candidate.runId === runId);
+  if (state === undefined)
+    throw new Error(`No persisted session for run id: ${runId}`);
+  if (state.decisionState === "not-adjudicable") {
+    throw new Error(`Run ${runId} has status ${state.status}; there is no quorum outcome to rule on. Re-run the motion instead.`);
+  }
+  if (state.decisionState === "adjudicated") {
+    throw new Error(`Run ${runId} already has a chair ruling: ${state.rulingId}`);
+  }
+  const now = (environment.now ?? (() => new Date().toISOString()))();
+  const title = decision.replace(/[\r\n]+/g, " ").trim().slice(0, 200);
+  if (state.status === "degraded") {
+    const acceptanceRationale = oneFlag(parsed, "acceptance-rationale");
+    if (!hasFlag(parsed, "accept-degraded") || acceptanceRationale === undefined) {
+      throw new Error(`Run ${runId} is degraded; ruling on it requires --accept-degraded and --acceptance-rationale`);
+    }
+    const acceptanceBase = {
+      acceptanceId: deterministicId("acceptance", "adjudicate", runId, now),
+      runId,
+      motionId: state.motionId,
+      rationale: acceptanceRationale,
+      authorisedBy,
+      createdAt: now
+    };
+    await store.appendChairAcceptance(scope === "general" ? { ...acceptanceBase, scope: "general" } : { ...acceptanceBase, scope: "project", projectId });
+  }
+  const rulingId = safeStorageId(oneFlag(parsed, "ruling-id") ?? deterministicId("ruling", "adjudicate", runId, now), "Ruling id");
+  const rulingBase = {
+    rulingId,
+    runId,
+    motionId: state.motionId,
+    title,
+    decision,
+    rationale,
+    authorisedBy,
+    followedSeats: seatList("followed-seats"),
+    setAsideSeats: seatList("set-aside-seats"),
+    dissentAcknowledged: acknowledged,
+    createdAt: now
+  };
+  await store.appendChairRuling(scope === "general" ? { ...rulingBase, scope: "general" } : { ...rulingBase, scope: "project", projectId });
+  const resolutionId = safeStorageId(oneFlag(parsed, "resolution-id") ?? deterministicId("resolution", "adjudicate", runId, now), "Resolution id");
+  const resolutionBase = {
+    resolutionId,
+    runId,
+    motionId: state.motionId,
+    rulingId,
+    title,
+    decision,
+    createdAt: now
+  };
+  await store.appendResolution(scope === "general" ? { ...resolutionBase, scope: "general" } : { ...resolutionBase, scope: "project", projectId });
+  return output(0, {
+    schemaVersion: SCHEMA_VERSION,
+    command: "adjudicate",
+    status: "adjudicated",
+    runId,
+    motionId: state.motionId,
+    rulingId,
+    resolutionId,
+    decisionState: "adjudicated",
+    dataAvailability: state.dataAvailability,
+    sessionStatus: state.status,
+    dissentAcknowledged: acknowledged
+  });
+}
 function help() {
   return output(0, {
     name: "claude-council",
@@ -21916,6 +22607,7 @@ function help() {
       "result",
       "jobs",
       "cancel",
+      "adjudicate",
       "health",
       "doctor",
       "migrate-general",
@@ -21968,12 +22660,17 @@ async function runCliFacade(argv, environment = {}) {
         ...engineIdentity(configured, environment)
       });
     }
+    if (command === "adjudicate")
+      return await adjudicateCommand(args, environment);
     if (command === "self-check") {
       const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0)
         throw new Error("self-check accepts no positional arguments");
       const configured = await configuredModelRegistry(parsed, environment);
-      const roster = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env });
+      const roster = environment.adapters ?? createProviderRoster({
+        env: environment.env ?? process.env,
+        billingMode: reportBillingMode(parsed)
+      });
       return output(0, {
         ok: true,
         schemaVersion: SCHEMA_VERSION,
