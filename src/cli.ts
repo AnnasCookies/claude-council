@@ -8,6 +8,7 @@ import {
   MotionImpactSchema,
   ModelRegistryProvenanceSchema,
   ProjectPolicySchema,
+  CouncilScopeSchema,
   ProviderFamilySchema,
   RefinementTriggerSchema,
   RunManifestSchema,
@@ -19,7 +20,6 @@ import {
   type RunManifest,
 } from './domain/schemas';
 import {
-  CouncilAnswerSchema,
   type ProviderAdapter,
   type ProviderContext,
   type ProviderDiagnostic,
@@ -52,6 +52,8 @@ import {
 import {
   CouncilStore,
   SessionRecordSchema,
+  type CurrentSessionRecord,
+  type PersistedDecisionState,
   type SessionRecord,
   writeTextAtomically,
 } from './records/store';
@@ -91,7 +93,15 @@ const INSTALLER_PROVENANCE_VALUE_SCHEMA = z
   .max(2_048)
   .refine((value) => !/[\r\n]/.test(value), 'must be a single line');
 const SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
-const BOOLEAN_FLAGS = new Set(['dry-run', 'json', 'contested', 'help']);
+const BOOLEAN_FLAGS = new Set([
+  'dry-run',
+  'json',
+  'contested',
+  'help',
+  'accept-degraded',
+  'dissent-acknowledged',
+  'no-dissent',
+]);
 const COMMON_RUN_FLAGS = new Set([
   'classification',
   'contested',
@@ -115,6 +125,25 @@ const COMMON_RUN_FLAGS = new Set([
 ]);
 const COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, 'min-families']);
 const REGISTRY_REPORT_FLAGS = new Set(['help', 'json', 'records-root', 'registry']);
+const ADJUDICATE_FLAGS = new Set([
+  'help',
+  'json',
+  'records-root',
+  'scope',
+  'project-id',
+  'run-id',
+  'decision',
+  'rationale',
+  'authorised-by',
+  'followed-seats',
+  'set-aside-seats',
+  'dissent-acknowledged',
+  'no-dissent',
+  'accept-degraded',
+  'acceptance-rationale',
+  'ruling-id',
+  'resolution-id',
+]);
 
 interface ParsedArguments {
   readonly flags: ReadonlyMap<string, readonly string[]>;
@@ -636,42 +665,19 @@ function publicExecution(result: CouncilRunResult): Omit<CouncilRunResult, 'moti
   return safeResult;
 }
 
-function parseCouncilAnswer(value: string): z.infer<typeof CouncilAnswerSchema> | undefined {
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(value);
-  } catch {
-    return undefined;
-  }
-  return CouncilAnswerSchema.safeParse(parsedJson).data;
-}
-
-function consensusRecommendation(result: CouncilRunResult): string | undefined {
-  const finalRound = result.rounds.at(-1);
-  if (finalRound === undefined) return undefined;
-  const recommendationsByFamily = new Map<ProviderFamily, string>();
-  for (const response of finalRound.responses) {
-    if (response.status !== 'ok') continue;
-    const answer = parseCouncilAnswer(response.answer);
-    if (answer === undefined) return undefined;
-    const recommendation = answer.recommendation.trim();
-    const priorRecommendation = recommendationsByFamily.get(response.provider);
-    if (
-      priorRecommendation !== undefined &&
-      priorRecommendation.toLocaleLowerCase() !== recommendation.toLocaleLowerCase()
-    ) {
-      return undefined;
-    }
-    recommendationsByFamily.set(response.provider, recommendation);
-  }
-  if (recommendationsByFamily.size < result.quorum.minimumDistinctFamilies) return undefined;
-  const recommendations = [...recommendationsByFamily.values()];
-  const canonical = recommendations[0]?.toLocaleLowerCase();
-  if (canonical === undefined) return undefined;
-  return recommendations.every((recommendation) => recommendation.toLocaleLowerCase() === canonical)
-    ? recommendations[0]
-    : undefined;
-}
+/**
+ * Deliberately absent: a `consensusRecommendation()` that lower-cased each family's
+ * `answer.recommendation`, compared the strings, and appended a ledger resolution when they matched.
+ *
+ * It inverted three standing invariants at once — treat unanimity as a prompt-quality warning, the
+ * panel informs rather than out-votes the chair, and do not adjudicate as consensus — and it
+ * inspected only the final round, so earlier dissent could not affect the outcome. A shared answer
+ * schema and a shared prompt can induce identical short categorical recommendations, which is a
+ * measurement artefact rather than agreement.
+ *
+ * A decision now requires `council adjudicate`, which records a named chair's ruling. The archive
+ * enforces the same rule structurally: `appendResolution` refuses a resolution that no ruling backs.
+ */
 
 async function loadAssignmentHistory(
   options: RunOptions,
@@ -694,13 +700,13 @@ async function persistRun(
   manifest: RunManifest,
   result: CouncilRunResult,
   roleAssignments: RoleAssignment[],
+  startedAt: string,
   now: string,
 ): Promise<
   | {
       session: true;
-      resolution: boolean;
-      resolutionBlockReason?:
-        'motion-already-resolved' | 'resolution-id-conflict' | 'resolution-append-failed';
+      decisionState: PersistedDecisionState;
+      dataAvailability: 'captured';
     }
   | undefined
 > {
@@ -712,22 +718,26 @@ async function persistRun(
   const status = result.outcome;
   const outcomeSummary =
     status === 'completed'
-      ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.`
+      ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families; a chair ruling is required before this becomes a resolution.`
       : status === 'degraded'
-        ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.`
+        ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance and a chair ruling are both required before resolution.`
         : `Quorum blocked: ${result.quorum.failureReasons.join(', ') || 'insufficient responses'}.`;
   const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
   const sessionSummary =
     reducedQuorumWarning === undefined
       ? outcomeSummary
       : `${reducedQuorumWarning} ${outcomeSummary}`;
+  const decisionState: PersistedDecisionState =
+    status === 'completed' || status === 'degraded' ? 'awaiting-adjudication' : 'not-adjudicable';
   const sessionBase = {
+    schemaVersion: 2 as const,
     runId: options.runId,
     motionId: options.motionId,
     status,
     motion: options.motion,
-    startedAt: now,
+    startedAt,
     completedAt: now,
+    decisionState,
     policyDecision: {
       kind: decision.kind,
       classification: decision.effectiveClassification ?? options.classification,
@@ -744,10 +754,19 @@ async function persistRun(
         : { refinementTrigger: result.refinementTrigger }),
       quorumPolicy: result.quorumPolicy,
     },
+    // The decision-level evidence: every seat's actual answer, the model that really responded,
+    // whether that identity verified, what was retried and why. Without this a record proves only
+    // what was requested, never what was decided.
+    execution: {
+      rounds: result.rounds,
+      quorum: result.quorum,
+      rebuttalObligation: result.rebuttalObligation,
+      synthesisEligible: result.synthesisEligible,
+    },
     assignments: roleAssignments,
     summary: sessionSummary,
   } as const;
-  const session: SessionRecord =
+  const session: CurrentSessionRecord =
     options.scope === 'general'
       ? { ...sessionBase, scope: 'general' }
       : {
@@ -756,42 +775,7 @@ async function persistRun(
           projectId: options.projectId as string,
         };
   await store.writeSession(session);
-
-  const recommendation = consensusRecommendation(result);
-  if (status !== 'completed' || recommendation === undefined) {
-    return { session: true, resolution: false };
-  }
-  const resolutionBase = {
-    resolutionId: deterministicId('resolution', options.command, options.motion, now),
-    runId: options.runId,
-    motionId: options.motionId,
-    title: options.motion
-      .replace(/[\r\n]+/g, ' ')
-      .trim()
-      .slice(0, 200),
-    decision: recommendation,
-    createdAt: now,
-  } as const;
-  try {
-    await store.appendResolution(
-      options.scope === 'general'
-        ? { ...resolutionBase, scope: 'general' }
-        : {
-            ...resolutionBase,
-            scope: 'project',
-            projectId: options.projectId as string,
-          },
-    );
-    return { session: true, resolution: true };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '';
-    const resolutionBlockReason = /motion already has a resolution/i.test(message)
-      ? 'motion-already-resolved'
-      : /duplicate resolution id/i.test(message)
-        ? 'resolution-id-conflict'
-        : 'resolution-append-failed';
-    return { session: true, resolution: false, resolutionBlockReason };
-  }
+  return { session: true, decisionState, dataAvailability: 'captured' };
 }
 
 async function resolveCouncilProviders(
@@ -1007,6 +991,9 @@ async function runCouncilCommand(
     ),
   };
   const runner = new CouncilRunner({ adapters, context });
+  // Taken before execution so the record shows real elapsed time. Both timestamps were previously
+  // the same post-run value, which made every session look instantaneous.
+  const startedAt = (environment.now ?? (() => new Date().toISOString()))();
   const execution = await runner.run({
     runId: executionOptions.runId,
     motion: executionOptions.motion,
@@ -1024,11 +1011,14 @@ async function runCouncilCommand(
     manifest,
     execution,
     roleAssignments,
+    startedAt,
     now,
   );
-  const resolutionPersistenceFailed = records?.resolutionBlockReason === 'resolution-append-failed';
-  const status = resolutionPersistenceFailed ? 'record-failure' : execution.outcome;
-  return output(resolutionPersistenceFailed ? 5 : status === 'completed' ? 0 : 4, {
+  // A run can no longer fail by failing to append a resolution, because it no longer appends one.
+  // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
+  // is a separate command with its own exit status.
+  const status = execution.outcome;
+  return output(status === 'completed' ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     status,
@@ -1249,6 +1239,170 @@ async function migrationCommand(
   throw new Error(`Unknown migrate-general action: ${action}`);
 }
 
+/**
+ * Record a chair's ruling on an executed motion, and the resolution that follows from it.
+ *
+ * This is the only path from a council run to a decision. It is deliberately a separate, explicit
+ * command rather than a step inside `run`: the panel produces evidence, a named human produces the
+ * decision, and the record has to show which of the two happened.
+ */
+async function adjudicateCommand(
+  args: readonly string[],
+  environment: CliFacadeEnvironment,
+): Promise<CliFacadeResult> {
+  const parsed = parseArguments(args, ADJUDICATE_FLAGS);
+  if (hasFlag(parsed, 'help')) {
+    return output(0, {
+      command: 'adjudicate',
+      summary: 'Record a chair ruling on an executed motion and append the resulting resolution.',
+      required: ['--run-id', '--decision', '--rationale', '--authorised-by', '--records-root'],
+      dissent:
+        'Exactly one of --dissent-acknowledged or --no-dissent is required. A ruling must state whether the panel disagreed, because textual agreement across a shared schema is a prompt-quality signal rather than a mandate.',
+      degraded:
+        'A degraded session additionally requires --accept-degraded with --acceptance-rationale.',
+      optional: ['--scope', '--project-id', '--followed-seats', '--set-aside-seats'],
+    });
+  }
+
+  const recordsRoot = oneFlag(parsed, 'records-root');
+  if (recordsRoot === undefined) throw new Error('adjudicate requires --records-root');
+  const scope = CouncilScopeSchema.parse(oneFlag(parsed, 'scope') ?? 'general');
+  const projectIdValue = oneFlag(parsed, 'project-id');
+  if (scope === 'general' && projectIdValue !== undefined) {
+    throw new Error('Project id requires --scope project');
+  }
+  if (scope === 'project' && projectIdValue === undefined) {
+    throw new Error('Project scope requires --project-id');
+  }
+  const projectId =
+    projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, 'Project id');
+  const runIdValue = oneFlag(parsed, 'run-id');
+  if (runIdValue === undefined) throw new Error('adjudicate requires --run-id');
+  const runId = safeStorageId(runIdValue, 'Run id');
+  const decision = oneFlag(parsed, 'decision');
+  const rationale = oneFlag(parsed, 'rationale');
+  const authorisedBy = oneFlag(parsed, 'authorised-by');
+  if (decision === undefined || rationale === undefined || authorisedBy === undefined) {
+    throw new Error('adjudicate requires --decision, --rationale and --authorised-by');
+  }
+
+  // Forcing an explicit choice, rather than defaulting to false, is the point: a chair who never
+  // considered whether the panel disagreed should not be able to produce a record that claims they
+  // did, nor one that silently claims they did not.
+  const acknowledged = hasFlag(parsed, 'dissent-acknowledged');
+  const noDissent = hasFlag(parsed, 'no-dissent');
+  if (acknowledged === noDissent) {
+    throw new Error('adjudicate requires exactly one of --dissent-acknowledged or --no-dissent');
+  }
+
+  const seatList = (name: string): string[] => {
+    const raw = parsed.flags.get(name);
+    if (raw === undefined) return [];
+    const seats = raw
+      .flatMap((value) => value.split(','))
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    return [...new Set(seats)];
+  };
+
+  const store = CouncilStore.open(recordsRoot);
+  const states = await store.readDecisionStates(scope, projectId);
+  const state = states.find((candidate) => candidate.runId === runId);
+  if (state === undefined) throw new Error(`No persisted session for run id: ${runId}`);
+  if (state.decisionState === 'not-adjudicable') {
+    throw new Error(
+      `Run ${runId} has status ${state.status}; there is no quorum outcome to rule on. Re-run the motion instead.`,
+    );
+  }
+  if (state.decisionState === 'adjudicated') {
+    throw new Error(`Run ${runId} already has a chair ruling: ${state.rulingId}`);
+  }
+
+  const now = (environment.now ?? (() => new Date().toISOString()))();
+  const title = decision
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 200);
+
+  if (state.status === 'degraded') {
+    const acceptanceRationale = oneFlag(parsed, 'acceptance-rationale');
+    if (!hasFlag(parsed, 'accept-degraded') || acceptanceRationale === undefined) {
+      throw new Error(
+        `Run ${runId} is degraded; ruling on it requires --accept-degraded and --acceptance-rationale`,
+      );
+    }
+    const acceptanceBase = {
+      acceptanceId: deterministicId('acceptance', 'adjudicate', runId, now),
+      runId,
+      motionId: state.motionId,
+      rationale: acceptanceRationale,
+      authorisedBy,
+      createdAt: now,
+    } as const;
+    await store.appendChairAcceptance(
+      scope === 'general'
+        ? { ...acceptanceBase, scope: 'general' }
+        : { ...acceptanceBase, scope: 'project', projectId: projectId as string },
+    );
+  }
+
+  const rulingId = safeStorageId(
+    oneFlag(parsed, 'ruling-id') ?? deterministicId('ruling', 'adjudicate', runId, now),
+    'Ruling id',
+  );
+  const rulingBase = {
+    rulingId,
+    runId,
+    motionId: state.motionId,
+    title,
+    decision,
+    rationale,
+    authorisedBy,
+    followedSeats: seatList('followed-seats'),
+    setAsideSeats: seatList('set-aside-seats'),
+    dissentAcknowledged: acknowledged,
+    createdAt: now,
+  } as const;
+  await store.appendChairRuling(
+    scope === 'general'
+      ? { ...rulingBase, scope: 'general' }
+      : { ...rulingBase, scope: 'project', projectId: projectId as string },
+  );
+
+  const resolutionId = safeStorageId(
+    oneFlag(parsed, 'resolution-id') ?? deterministicId('resolution', 'adjudicate', runId, now),
+    'Resolution id',
+  );
+  const resolutionBase = {
+    resolutionId,
+    runId,
+    motionId: state.motionId,
+    rulingId,
+    title,
+    decision,
+    createdAt: now,
+  } as const;
+  await store.appendResolution(
+    scope === 'general'
+      ? { ...resolutionBase, scope: 'general' }
+      : { ...resolutionBase, scope: 'project', projectId: projectId as string },
+  );
+
+  return output(0, {
+    schemaVersion: SCHEMA_VERSION,
+    command: 'adjudicate',
+    status: 'adjudicated',
+    runId,
+    motionId: state.motionId,
+    rulingId,
+    resolutionId,
+    decisionState: 'adjudicated',
+    dataAvailability: state.dataAvailability,
+    sessionStatus: state.status,
+    dissentAcknowledged: acknowledged,
+  });
+}
+
 function help(): CliFacadeResult {
   return output(0, {
     name: 'claude-council',
@@ -1259,6 +1413,7 @@ function help(): CliFacadeResult {
       'result',
       'jobs',
       'cancel',
+      'adjudicate',
       'health',
       'doctor',
       'migrate-general',
@@ -1316,6 +1471,7 @@ export async function runCliFacade(
         ...engineIdentity(configured, environment),
       });
     }
+    if (command === 'adjudicate') return await adjudicateCommand(args, environment);
     if (command === 'self-check') {
       const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0)

@@ -16003,6 +16003,19 @@ var RunManifestSchema = exports_external.strictObject({
   evidenceReferences: exports_external.array(NonEmptyStringSchema)
 });
 var SeatRouteSchema = exports_external.enum(["primary", "same-provider-fallback"]);
+var CredentialPathSchema = exports_external.enum(["subscription", "api-key"]);
+var ReasoningEffortSchema = exports_external.string().trim().min(1).max(32);
+var SeatUsageSchema = exports_external.strictObject({
+  inputTokens: exports_external.number().int().nonnegative().optional(),
+  outputTokens: exports_external.number().int().nonnegative().optional(),
+  totalCostUsd: exports_external.number().nonnegative().optional()
+});
+var SeatAttributionShape = {
+  requestedEffort: ReasoningEffortSchema.optional(),
+  observedEffort: ReasoningEffortSchema.optional(),
+  credentialPath: CredentialPathSchema.optional(),
+  usage: SeatUsageSchema.optional()
+};
 var SeatErrorSchema = exports_external.strictObject({
   code: NonEmptyStringSchema,
   message: NonEmptyStringSchema,
@@ -16018,7 +16031,8 @@ var SuccessfulSeatResponseSchema = exports_external.strictObject({
   route: SeatRouteSchema,
   role: NonEmptyStringSchema,
   latencyMs: exports_external.number().nonnegative(),
-  answer: NonEmptyStringSchema
+  answer: NonEmptyStringSchema,
+  ...SeatAttributionShape
 });
 var FailedSeatResponseShape = {
   seatId: NonEmptyStringSchema,
@@ -16029,7 +16043,8 @@ var FailedSeatResponseShape = {
   route: SeatRouteSchema.optional(),
   role: NonEmptyStringSchema,
   latencyMs: exports_external.number().nonnegative().optional(),
-  error: SeatErrorSchema
+  error: SeatErrorSchema,
+  ...SeatAttributionShape
 };
 var FailedSeatResponseSchema = exports_external.strictObject({
   status: exports_external.literal("failed"),
@@ -16055,10 +16070,118 @@ var SeatResponseSchema = exports_external.discriminatedUnion("status", [
   CancelledSeatResponseSchema
 ]);
 
-// src/execution/provider.ts
-import { existsSync as existsSync2 } from "fs";
-import { homedir, tmpdir } from "os";
-import { isAbsolute as isAbsolute2, join as join2, normalize, resolve as resolve2 } from "path";
+// src/domain/quorum.ts
+var PROVIDER_FAMILY_ORDER = Object.freeze([
+  ...ProviderFamilySchema.options
+]);
+var familyOrder = {
+  anthropic: 0,
+  openai: 1,
+  xai: 2,
+  google: 3,
+  deepseek: 4,
+  moonshot: 5
+};
+function minimumQuorumFamilyFloor(policy) {
+  return policy.requiresContrarian && policy.reducedQuorum === undefined ? 4 : 3;
+}
+var QuorumFailureReasonSchema = exports_external.enum([
+  "insufficient-provider-families",
+  "missing-successful-contrarian"
+]);
+var SuccessfulFamiliesSchema = exports_external.array(ProviderFamilySchema).superRefine((families, context) => {
+  let previousIndex = -1;
+  for (const [index, family] of families.entries()) {
+    const currentIndex = familyOrder[family];
+    if (currentIndex <= previousIndex) {
+      context.addIssue({
+        code: "custom",
+        path: [index],
+        message: "Successful provider families must be unique and in canonical order"
+      });
+    }
+    previousIndex = currentIndex;
+  }
+});
+var QuorumEvaluationSchema = exports_external.strictObject({
+  passed: exports_external.boolean(),
+  minimumDistinctFamilies: exports_external.number().int().min(3).max(ProviderFamilySchema.options.length),
+  successfulFamilies: SuccessfulFamiliesSchema,
+  requiresContrarian: exports_external.boolean(),
+  contrarianSatisfied: exports_external.boolean(),
+  reducedQuorum: ReducedQuorumNoticeSchema.optional(),
+  failureReasons: exports_external.array(QuorumFailureReasonSchema).max(2)
+}).superRefine((evaluation, context) => {
+  if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4 && evaluation.reducedQuorum === undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["minimumDistinctFamilies"],
+      message: "Significant motions require at least four distinct provider families"
+    });
+  }
+  if (evaluation.reducedQuorum !== undefined && (!evaluation.requiresContrarian || evaluation.minimumDistinctFamilies < 3 || evaluation.minimumDistinctFamilies >= evaluation.reducedQuorum.standingDefaultMinimumDistinctFamilies)) {
+    context.addIssue({
+      code: "custom",
+      path: ["reducedQuorum"],
+      message: "Reduced quorum must be an explicit significant-council floor below four"
+    });
+  }
+  const insufficientFamilies = evaluation.successfulFamilies.length < evaluation.minimumDistinctFamilies;
+  const missingContrarian = evaluation.requiresContrarian && !evaluation.contrarianSatisfied;
+  const expectedReasons = [];
+  if (insufficientFamilies)
+    expectedReasons.push("insufficient-provider-families");
+  if (missingContrarian)
+    expectedReasons.push("missing-successful-contrarian");
+  if (evaluation.failureReasons.length !== expectedReasons.length || evaluation.failureReasons.some((reason, index) => reason !== expectedReasons[index])) {
+    context.addIssue({
+      code: "custom",
+      path: ["failureReasons"],
+      message: "Quorum failure reasons do not match the reported evidence"
+    });
+  }
+  if (evaluation.passed !== (expectedReasons.length === 0)) {
+    context.addIssue({
+      code: "custom",
+      path: ["passed"],
+      message: "Quorum pass state does not match the reported evidence"
+    });
+  }
+});
+function evaluateQuorum(policy, responses, contrarianSeatIds) {
+  const parsedPolicy = QuorumPolicySchema.parse(policy);
+  const parsedResponses = exports_external.array(SeatResponseSchema).parse(responses);
+  const parsedContrarianSeatIds = exports_external.array(exports_external.string().trim().min(1)).superRefine((seatIds, context) => {
+    if (new Set(seatIds).size !== seatIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Contrarian seat IDs must be unique"
+      });
+    }
+  }).parse(contrarianSeatIds);
+  const minimumDistinctFamilies = Math.max(minimumQuorumFamilyFloor(parsedPolicy), parsedPolicy.minimumDistinctFamilies);
+  const successfulResponses = parsedResponses.filter((response) => response.status === "ok" && response.modelIdentity === "verified");
+  const successfulFamilySet = new Set(successfulResponses.map(({ provider }) => provider));
+  const successfulFamilies = PROVIDER_FAMILY_ORDER.filter((family) => successfulFamilySet.has(family));
+  const contrarianSeatIdSet = new Set(parsedContrarianSeatIds);
+  const contrarianSatisfied = successfulResponses.some(({ seatId }) => contrarianSeatIdSet.has(seatId));
+  const failureReasons = [];
+  if (successfulFamilies.length < minimumDistinctFamilies) {
+    failureReasons.push("insufficient-provider-families");
+  }
+  if (parsedPolicy.requiresContrarian && !contrarianSatisfied) {
+    failureReasons.push("missing-successful-contrarian");
+  }
+  return QuorumEvaluationSchema.parse({
+    passed: failureReasons.length === 0,
+    minimumDistinctFamilies,
+    successfulFamilies,
+    requiresContrarian: parsedPolicy.requiresContrarian,
+    contrarianSatisfied,
+    ...parsedPolicy.reducedQuorum === undefined ? {} : { reducedQuorum: parsedPolicy.reducedQuorum },
+    failureReasons
+  });
+}
 
 // src/policy/secrets.ts
 import { createHash } from "crypto";
@@ -16231,1514 +16354,6 @@ function scanAndRedact(text) {
     findings,
     hardBlocked: findings.length > 0
   };
-}
-
-// src/execution/cli.ts
-import { existsSync, realpathSync } from "fs";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
-import { isAbsolute, join, relative, resolve } from "path";
-var CLI_OUTPUT_LIMIT_BYTES = 1024 * 1024;
-function findPackageRoot(startDirectory) {
-  let candidate = realpathSync(startDirectory);
-  while (true) {
-    if (existsSync(join(candidate, "package.json")))
-      return candidate;
-    const parent = resolve(candidate, "..");
-    if (parent === candidate) {
-      throw new Error("claude-council package root could not be resolved");
-    }
-    candidate = parent;
-  }
-}
-var repositoryRoot = findPackageRoot(import.meta.dir);
-var inheritedEnvironment = [
-  "PATH",
-  "SystemRoot",
-  "WINDIR",
-  "TEMP",
-  "TMP",
-  "HOME",
-  "USERPROFILE",
-  "APPDATA",
-  "LOCALAPPDATA",
-  "LANG",
-  "LC_ALL",
-  "HTTP_PROXY",
-  "HTTPS_PROXY",
-  "NO_PROXY"
-];
-function inside(parent, candidate) {
-  const path = relative(parent, candidate);
-  return path === "" || !path.startsWith("..") && !isAbsolute(path);
-}
-async function absoluteExecutable(executable) {
-  const candidate = isAbsolute(executable) ? executable : Bun.which(executable);
-  if (!candidate)
-    return;
-  try {
-    return await realpath(candidate);
-  } catch {
-    return resolve(candidate);
-  }
-}
-function isolatedEnvironment(additions) {
-  const environment = {};
-  for (const name of inheritedEnvironment) {
-    const value = process.env[name];
-    if (value !== undefined)
-      environment[name] = value;
-  }
-  if (additions) {
-    for (const [name, value] of Object.entries(additions))
-      environment[name] = value;
-  }
-  return environment;
-}
-function ownedPath(workingDirectory, requestedPath) {
-  if (!requestedPath || isAbsolute(requestedPath))
-    return;
-  const destination = resolve(workingDirectory, requestedPath);
-  return inside(workingDirectory, destination) ? destination : undefined;
-}
-function resolveOwnedValue(value, workingDirectory) {
-  return typeof value === "function" ? value(workingDirectory) : value;
-}
-async function stageRequestFiles(request, workingDirectory) {
-  for (const [requestedPath, value] of Object.entries(request.files ?? {})) {
-    const destination = ownedPath(workingDirectory, requestedPath);
-    if (!destination)
-      throw new Error(`invalid staged file path: ${requestedPath}`);
-    await mkdir(resolve(destination, ".."), { recursive: true, mode: 448 });
-    await writeFile(destination, resolveOwnedValue(value, workingDirectory), {
-      encoding: "utf8",
-      mode: 384
-    });
-  }
-}
-function failedResult(executable, startedAt, errorCode, stderr) {
-  return {
-    status: "failed",
-    executable,
-    exitCode: null,
-    stdout: "",
-    stderr,
-    durationMs: Date.now() - startedAt,
-    treeTerminated: false,
-    errorCode
-  };
-}
-async function readBoundedOutput(stream, onLimit) {
-  const reader = stream.getReader();
-  const chunks = [];
-  let totalBytes = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done)
-      return { text: Buffer.concat(chunks, totalBytes).toString("utf8"), exceeded: false };
-    if (totalBytes + value.byteLength > CLI_OUTPUT_LIMIT_BYTES) {
-      onLimit();
-      await reader.cancel().catch(() => {
-        return;
-      });
-      return { text: "", exceeded: true };
-    }
-    chunks.push(value);
-    totalBytes += value.byteLength;
-  }
-}
-async function runIsolatedCli(request) {
-  const startedAt = Date.now();
-  if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
-    return failedResult(request.executable, startedAt, "invalid-request", "timeoutMs must be positive");
-  }
-  const executable = await absoluteExecutable(request.executable);
-  if (!executable) {
-    return failedResult(request.executable, startedAt, "executable-not-found", "executable not found");
-  }
-  if (inside(repositoryRoot, executable)) {
-    return failedResult(executable, startedAt, "repository-executable", "repository-local executables are not permitted");
-  }
-  const workingDirectory = await realpath(await mkdtemp(join(resolve(request.cwd), "claude-council-cli-")));
-  try {
-    let args;
-    try {
-      await stageRequestFiles(request, workingDirectory);
-      args = request.args.map((value) => resolveOwnedValue(value, workingDirectory));
-    } catch (error51) {
-      return failedResult(executable, startedAt, "invalid-request", error51 instanceof Error ? error51.message : "failed to prepare CLI inputs");
-    }
-    const environment = isolatedEnvironment(request.env);
-    for (const name of request.workingDirectoryEnv ?? []) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-        return failedResult(executable, startedAt, "invalid-request", `invalid environment name: ${name}`);
-      }
-      environment[name] = workingDirectory;
-    }
-    let processHandle;
-    try {
-      processHandle = Bun.spawn([executable, ...args], {
-        cwd: workingDirectory,
-        env: environment,
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        detached: process.platform !== "win32",
-        windowsHide: true
-      });
-    } catch (error51) {
-      return failedResult(executable, startedAt, "spawn-failed", error51 instanceof Error ? error51.message : "spawn failed");
-    }
-    processHandle.stdin.write(request.stdin);
-    processHandle.stdin.end();
-    let terminationReason = null;
-    let treeTerminated = false;
-    const terminateTree = (reason) => {
-      if (terminationReason !== null)
-        return;
-      terminationReason = reason;
-      if (process.platform === "win32") {
-        const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-        if (systemRoot) {
-          const taskkill = join(systemRoot, "System32", "taskkill.exe");
-          const termination = Bun.spawnSync([
-            taskkill,
-            "/T",
-            "/F",
-            "/PID",
-            String(processHandle.pid)
-          ]);
-          treeTerminated = termination.exitCode === 0;
-        }
-        if (!treeTerminated)
-          processHandle.kill("SIGKILL");
-      } else {
-        try {
-          process.kill(-processHandle.pid, "SIGKILL");
-          treeTerminated = true;
-        } catch {
-          processHandle.kill("SIGKILL");
-        }
-      }
-    };
-    const timer = setTimeout(() => terminateTree("timeout"), request.timeoutMs);
-    try {
-      const [stdoutResult, stderrResult, exitCode] = await Promise.all([
-        readBoundedOutput(processHandle.stdout, () => terminateTree("output-limit")),
-        readBoundedOutput(processHandle.stderr, () => terminateTree("output-limit")),
-        processHandle.exited
-      ]);
-      if (terminationReason === "output-limit" || stdoutResult.exceeded || stderrResult.exceeded) {
-        return {
-          status: "failed",
-          executable,
-          exitCode,
-          stdout: "",
-          stderr: "CLI output exceeded the byte limit",
-          durationMs: Date.now() - startedAt,
-          treeTerminated,
-          errorCode: "output-limit",
-          workingDirectory
-        };
-      }
-      if (terminationReason === "timeout") {
-        return {
-          status: "timed-out",
-          executable,
-          exitCode,
-          stdout: stdoutResult.text,
-          stderr: stderrResult.text,
-          durationMs: Date.now() - startedAt,
-          treeTerminated,
-          errorCode: "timeout",
-          workingDirectory
-        };
-      }
-      return {
-        status: exitCode === 0 ? "ok" : "failed",
-        executable,
-        exitCode,
-        stdout: stdoutResult.text,
-        stderr: stderrResult.text,
-        durationMs: Date.now() - startedAt,
-        treeTerminated: false,
-        errorCode: exitCode === 0 ? null : "non-zero-exit",
-        workingDirectory
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  } finally {
-    await rm(workingDirectory, {
-      recursive: true,
-      force: true,
-      maxRetries: 10,
-      retryDelay: 100
-    });
-  }
-}
-
-// src/execution/http.ts
-var retryableStatuses = new Set([429, 500, 502, 503, 504]);
-function validatePolicy(policy) {
-  if (!Number.isInteger(policy.maxAttempts) || policy.maxAttempts < 1) {
-    throw new RangeError("maxAttempts must be a positive integer");
-  }
-  for (const [name, value] of [
-    ["timeoutMs", policy.timeoutMs],
-    ["baseDelayMs", policy.baseDelayMs],
-    ["maxDelayMs", policy.maxDelayMs]
-  ]) {
-    if (!Number.isFinite(value) || value < 0)
-      throw new RangeError(`${name} must be non-negative`);
-  }
-  if (policy.timeoutMs === 0)
-    throw new RangeError("timeoutMs must be positive");
-  if (policy.maxDelayMs < policy.baseDelayMs) {
-    throw new RangeError("maxDelayMs must not be less than baseDelayMs");
-  }
-  if (!Number.isFinite(policy.jitterRatio) || policy.jitterRatio < 0 || policy.jitterRatio > 1) {
-    throw new RangeError("jitterRatio must be between 0 and 1");
-  }
-}
-function errorCodeForStatus(status) {
-  if (status === 401 || status === 403)
-    return "authentication";
-  if (status === 404)
-    return "model-not-found";
-  if (status === 400 || status === 409 || status === 422)
-    return "validation";
-  if (status === 429)
-    return "rate-limit";
-  if (status >= 500)
-    return "server";
-  return "http";
-}
-async function responseBody(response) {
-  const text = await response.text();
-  if (!text)
-    return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-function retryDelay(attempt, policy) {
-  const exponential = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** (attempt - 1));
-  const spread = exponential * policy.jitterRatio;
-  const jittered = exponential + (Math.random() * 2 - 1) * spread;
-  return Math.max(0, Math.min(policy.maxDelayMs, Math.round(jittered)));
-}
-async function requestWithPolicy(request, policy) {
-  validatePolicy(policy);
-  for (let attempt = 1;attempt <= policy.maxAttempts; attempt += 1) {
-    const controller = new AbortController;
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, policy.timeoutMs);
-    try {
-      const response = await fetch(request.url, {
-        method: request.method ?? "GET",
-        ...request.headers === undefined ? {} : { headers: request.headers },
-        ...request.body === undefined ? {} : { body: request.body },
-        signal: controller.signal
-      });
-      const body = await responseBody(response);
-      if (response.ok) {
-        return {
-          status: "ok",
-          attempts: attempt,
-          statusCode: response.status,
-          body,
-          errorCode: null,
-          message: ""
-        };
-      }
-      const errorCode = errorCodeForStatus(response.status);
-      if (retryableStatuses.has(response.status) && attempt < policy.maxAttempts) {
-        await Bun.sleep(retryDelay(attempt, policy));
-        continue;
-      }
-      return {
-        status: "failed",
-        attempts: attempt,
-        statusCode: response.status,
-        body,
-        errorCode,
-        message: `HTTP ${response.status}`
-      };
-    } catch (error51) {
-      if (timedOut) {
-        return {
-          status: "timed-out",
-          attempts: attempt,
-          statusCode: null,
-          body: null,
-          errorCode: "timeout",
-          message: `request timed out after ${policy.timeoutMs}ms`
-        };
-      }
-      if (attempt < policy.maxAttempts) {
-        await Bun.sleep(retryDelay(attempt, policy));
-        continue;
-      }
-      return {
-        status: "failed",
-        attempts: attempt,
-        statusCode: null,
-        body: null,
-        errorCode: "network",
-        message: error51 instanceof Error ? error51.message : "network request failed"
-      };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  throw new Error("retry loop exhausted without a result");
-}
-
-// src/execution/provider.ts
-var CouncilAnswerSchema = exports_external.strictObject({
-  recommendation: exports_external.string().min(1),
-  evidence: exports_external.array(exports_external.string().min(1)),
-  assumptions: exports_external.array(exports_external.string().min(1)),
-  risks: exports_external.array(exports_external.string().min(1)),
-  uncertainty: exports_external.string().min(1),
-  decisiveTest: exports_external.string().min(1)
-});
-var nativeHttpTransport = { request: requestWithPolicy };
-var nativeCliTransport = { run: runIsolatedCli };
-var ChatCompletionSchema = exports_external.object({
-  model: exports_external.string().min(1),
-  choices: exports_external.array(exports_external.object({ message: exports_external.object({ content: exports_external.string() }) })).min(1)
-});
-var ClaudeResponseSchema = exports_external.object({
-  result: exports_external.string(),
-  modelUsage: exports_external.record(exports_external.string(), exports_external.unknown())
-});
-var defaultRetryPolicy = (timeoutMs) => ({
-  maxAttempts: 3,
-  timeoutMs,
-  baseDelayMs: 250,
-  maxDelayMs: 2000,
-  jitterRatio: 0.2
-});
-var answerInstruction = `Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.`;
-var healthPrompt = "Return the required JSON object confirming this provider route is available.";
-var grokInlineAnswerGuard = "IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.";
-function structuredPrompt(prompt) {
-  return `${answerInstruction}
-
-${prompt}`;
-}
-function stripOuterJsonFence(text) {
-  const match = text.match(/^\s*```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i);
-  return match?.[1] ?? text;
-}
-function safeRawText(value) {
-  return scanAndRedact(value).redacted;
-}
-function safeExternalMessage(value, fallback) {
-  const sanitised = safeRawText(value).replace(/\s+/g, " ").trim();
-  return (sanitised || fallback).slice(0, 500);
-}
-function capture(request, family, code, rawText) {
-  request.context.captureDiagnostic?.({
-    family,
-    seatId: request.seatId,
-    code,
-    rawText: safeRawText(rawText)
-  });
-}
-function serialiseUnknown(value) {
-  if (typeof value === "string")
-    return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return "[unserialisable provider response]";
-  }
-}
-function parseAnswer(request, family, rawAnswer, retainDiagnostic = true) {
-  const diagnostic = retainDiagnostic ? rawAnswer : "[invalid structured subscription answer omitted]";
-  let value;
-  try {
-    value = JSON.parse(stripOuterJsonFence(scanAndRedact(rawAnswer).redacted));
-  } catch {
-    capture(request, family, "invalid-structured-answer", diagnostic);
-    return;
-  }
-  const parsed = CouncilAnswerSchema.safeParse(value);
-  if (!parsed.success) {
-    capture(request, family, "invalid-structured-answer", diagnostic);
-    return;
-  }
-  return JSON.stringify(parsed.data);
-}
-function seatError(request, family, requestedModel, status, code, message, latencyMs, retryable = false, observedIdentity) {
-  const actualModel = observedIdentity === undefined ? undefined : safeExternalMessage(observedIdentity.actualModel, "").slice(0, 128) || undefined;
-  return {
-    status,
-    seatId: request.seatId,
-    provider: family,
-    requestedModel,
-    ...actualModel === undefined || observedIdentity === undefined ? {} : {
-      actualModel,
-      modelIdentity: observedIdentity.modelIdentity,
-      ...observedIdentity.route === undefined ? {} : { route: observedIdentity.route }
-    },
-    role: request.role,
-    latencyMs,
-    error: { code, message, retryable }
-  };
-}
-function seatSuccess(request, family, requestedModel, actualModel, route, answer, latencyMs) {
-  return {
-    status: "ok",
-    seatId: request.seatId,
-    provider: family,
-    requestedModel,
-    actualModel,
-    modelIdentity: "verified",
-    route,
-    role: request.role,
-    latencyMs,
-    answer
-  };
-}
-function healthFromResponse(response) {
-  if (response.status === "ok") {
-    return {
-      status: "healthy",
-      provider: response.provider,
-      requestedModel: response.requestedModel,
-      actualModel: response.actualModel,
-      latencyMs: response.latencyMs,
-      reason: ""
-    };
-  }
-  const unsafeErrorCodes = new Set([
-    "unsafe-tool-isolation",
-    "unsafe-transport",
-    "repository-executable"
-  ]);
-  const status = unsafeErrorCodes.has(response.error.code) ? "unsafe-transport" : response.error.code === "identity-unverified" ? "identity-unverified" : response.status === "skipped" ? "unconfigured" : "down";
-  return {
-    status,
-    provider: response.provider,
-    requestedModel: response.requestedModel ?? "",
-    actualModel: response.actualModel ?? null,
-    latencyMs: response.latencyMs ?? 0,
-    reason: response.error.message
-  };
-}
-function httpPayload(model, prompt) {
-  return JSON.stringify({
-    model,
-    messages: [{ role: "user", content: structuredPrompt(prompt) }],
-    max_tokens: 32768
-  });
-}
-function extractHttpAnswer(body) {
-  const parsed = ChatCompletionSchema.safeParse(body);
-  if (!parsed.success)
-    return;
-  return {
-    actualModel: parsed.data.model,
-    rawAnswer: parsed.data.choices[0]?.message.content ?? ""
-  };
-}
-function createHttpAdapter(config2, transport = nativeHttpTransport) {
-  const route = (context) => context.registry[config2.family];
-  const availability = async (context) => ({
-    status: context.env[config2.credential] ? "available" : "unconfigured",
-    provider: config2.family,
-    model: route(context).primary,
-    reason: context.env[config2.credential] ? "" : `missing ${config2.credential}`
-  });
-  const adapter = {
-    family: config2.family,
-    transport: "http",
-    availability,
-    async invoke(request) {
-      const startedAt = Date.now();
-      const configuredRoute = route(request.context);
-      const credential = request.context.env[config2.credential];
-      if (!credential) {
-        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-credential", `missing ${config2.credential}`, 0);
-      }
-      const invokeModel = (model2) => transport.request({
-        url: config2.endpoint,
-        method: "POST",
-        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
-        body: httpPayload(model2, request.prompt)
-      }, defaultRetryPolicy(request.context.timeoutMs));
-      let model = configuredRoute.primary;
-      let providerResult = await invokeModel(model);
-      let seatRoute = "primary";
-      const fallback = configuredRoute.fallbacks[0];
-      if (config2.allowRegistryFallback && providerResult.errorCode === "model-not-found" && fallback !== undefined) {
-        model = fallback;
-        seatRoute = "same-provider-fallback";
-        providerResult = await invokeModel(model);
-      }
-      const latencyMs = Date.now() - startedAt;
-      if (providerResult.status !== "ok") {
-        return seatError(request, config2.family, configuredRoute.primary, providerResult.status === "timed-out" ? "timed-out" : "failed", providerResult.errorCode ?? "provider-failed", safeExternalMessage(providerResult.message, "provider request failed"), latencyMs, ["network", "rate-limit", "server"].includes(providerResult.errorCode ?? ""));
-      }
-      const extracted = extractHttpAnswer(providerResult.body);
-      if (!extracted) {
-        capture(request, config2.family, "invalid-provider-response", serialiseUnknown(providerResult.body));
-        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-provider-response", "provider response did not contain verified model metadata and text", latencyMs);
-      }
-      const answer = parseAnswer(request, config2.family, extracted.rawAnswer);
-      if (!answer) {
-        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", latencyMs);
-      }
-      return seatSuccess(request, config2.family, configuredRoute.primary, extracted.actualModel, seatRoute, answer, latencyMs);
-    },
-    async probe(context) {
-      return healthFromResponse(await adapter.invoke({
-        context,
-        seatId: `health-${config2.family}`,
-        role: "health",
-        prompt: healthPrompt
-      }));
-    }
-  };
-  return adapter;
-}
-var JsonStreamEventSchema = exports_external.object({ type: exports_external.string().min(1) }).passthrough();
-var OmpContentBlockSchema = exports_external.discriminatedUnion("type", [
-  exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }).passthrough(),
-  exports_external.object({ type: exports_external.literal("thinking"), thinking: exports_external.string() }).passthrough()
-]);
-var OmpMessageSchema = exports_external.object({
-  role: exports_external.enum(["user", "assistant"]),
-  content: exports_external.array(OmpContentBlockSchema),
-  provider: exports_external.string().min(1).optional(),
-  model: exports_external.string().min(1).optional()
-});
-var OmpMessageEventSchema = exports_external.object({
-  type: exports_external.enum(["message_start", "message_end"]),
-  message: OmpMessageSchema
-});
-var OmpSessionEventSchema = exports_external.object({
-  type: exports_external.literal("session"),
-  version: exports_external.number().int().positive(),
-  id: exports_external.string().min(1)
-});
-var OmpMessageUpdateSchema = exports_external.object({
-  type: exports_external.literal("message_update"),
-  assistantMessageEvent: exports_external.object({
-    type: exports_external.enum(["thinking_start", "thinking_end", "text_start", "text_delta", "text_end"])
-  })
-});
-var OmpTurnEndSchema = exports_external.object({
-  type: exports_external.literal("turn_end"),
-  message: OmpMessageSchema
-});
-var OmpAgentEndSchema = exports_external.object({
-  type: exports_external.literal("agent_end"),
-  messages: exports_external.array(OmpMessageSchema).min(1)
-});
-var codexReasoningEffort = "xhigh";
-var CodexIdentitySchema = exports_external.object({
-  workdir: exports_external.string().min(1),
-  model: exports_external.string().min(1),
-  provider: exports_external.literal("openai"),
-  approval: exports_external.literal("never"),
-  sandbox: exports_external.literal("read-only"),
-  "reasoning effort": exports_external.literal(codexReasoningEffort)
-});
-var AgyEventEnvelopeSchema = exports_external.object({ event: exports_external.string().min(1) }).passthrough();
-var AgyInitEventSchema = exports_external.object({
-  event: exports_external.literal("init"),
-  init: exports_external.object({
-    model: exports_external.string().min(1),
-    cwd: exports_external.string().min(1),
-    tools: exports_external.array(exports_external.string().min(1))
-  })
-});
-var AgyToolEventSchema = exports_external.object({
-  event: exports_external.literal("step_update"),
-  step_update: exports_external.object({
-    step_index: exports_external.number().int().nonnegative(),
-    state: exports_external.enum(["ACTIVE", "DONE"]),
-    step_type: exports_external.literal("tool"),
-    tool_name: exports_external.string().min(1),
-    tool_info: exports_external.object({
-      parameters: exports_external.object({ AbsolutePath: exports_external.string().min(1) }).passthrough()
-    })
-  })
-});
-var AgyResultEventSchema = exports_external.object({
-  event: exports_external.literal("result"),
-  result: exports_external.object({
-    status: exports_external.literal("SUCCESS"),
-    structured_output: exports_external.record(exports_external.string(), exports_external.unknown())
-  })
-});
-var GrokInitEventSchema = exports_external.object({
-  type: exports_external.literal("system"),
-  subtype: exports_external.literal("init"),
-  session_id: exports_external.string().min(1),
-  apiKeySource: exports_external.literal("oauth"),
-  model: exports_external.string().min(1),
-  cwd: exports_external.string().min(1),
-  permissionMode: exports_external.literal("plan"),
-  tools: exports_external.array(exports_external.string()),
-  mcp_servers: exports_external.array(exports_external.unknown()),
-  skills: exports_external.array(exports_external.string())
-});
-var GrokContentBlockSchema = exports_external.discriminatedUnion("type", [
-  exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }),
-  exports_external.object({ type: exports_external.literal("thinking"), thinking: exports_external.string(), signature: exports_external.string() })
-]);
-var GrokAssistantEventSchema = exports_external.object({
-  type: exports_external.literal("assistant"),
-  message: exports_external.object({
-    type: exports_external.literal("message"),
-    role: exports_external.literal("assistant"),
-    model: exports_external.string().min(1),
-    content: exports_external.array(GrokContentBlockSchema).min(1),
-    stop_reason: exports_external.literal("end_turn")
-  }),
-  session_id: exports_external.string().min(1)
-});
-var GrokResultEventSchema = exports_external.object({
-  type: exports_external.literal("result"),
-  subtype: exports_external.literal("success"),
-  is_error: exports_external.literal(false),
-  num_turns: exports_external.literal(1),
-  result: exports_external.string().min(1),
-  stop_reason: exports_external.literal("end_turn"),
-  modelUsage: exports_external.record(exports_external.string().min(1), exports_external.unknown()),
-  session_id: exports_external.string().min(1)
-});
-var councilAnswerJsonSchema = JSON.stringify({
-  type: "object",
-  additionalProperties: false,
-  required: ["recommendation", "evidence", "assumptions", "risks", "uncertainty", "decisiveTest"],
-  properties: {
-    recommendation: { type: "string", minLength: 1 },
-    evidence: { type: "array", items: { type: "string", minLength: 1 } },
-    assumptions: { type: "array", items: { type: "string", minLength: 1 } },
-    risks: { type: "array", items: { type: "string", minLength: 1 } },
-    uncertainty: { type: "string", minLength: 1 },
-    decisiveTest: { type: "string", minLength: 1 }
-  }
-});
-function parseFailure(code, actualModel) {
-  return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
-}
-function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt) {
-  const normalised = stderr.replace(/\r\n/g, `
-`);
-  const userPrefix = `
-user
-${expectedPrompt.replace(/\r\n/g, `
-`)}
-`;
-  const promptStart = normalised.indexOf(userPrefix);
-  if (promptStart < 0 || normalised.lastIndexOf(userPrefix) !== promptStart) {
-    return parseFailure("identity-unverified");
-  }
-  const rendererPreamble = normalised.slice(0, promptStart);
-  const headers = [
-    ...rendererPreamble.matchAll(/(?:^|\n)OpenAI Codex v[^\n]+\n--------\n([\s\S]*?)\n--------(?=\n|$)/g)
-  ];
-  const header = headers[0];
-  if (headers.length !== 1 || header === undefined || workingDirectory === undefined || !isAbsolute2(workingDirectory)) {
-    return parseFailure("identity-unverified");
-  }
-  const fields = {};
-  for (const line of header[1]?.split(`
-`) ?? []) {
-    const separator = line.indexOf(":");
-    if (separator <= 0)
-      return parseFailure("identity-unverified");
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim();
-    if (!key || !value || fields[key] !== undefined) {
-      return parseFailure("identity-unverified", fields.model);
-    }
-    fields[key] = value;
-  }
-  const identity = CodexIdentitySchema.safeParse(fields);
-  const actualModel = identity.success ? identity.data.model : fields.model;
-  if (!identity.success || !isAbsolute2(identity.data.workdir) || canonicalPath(identity.data.workdir) !== canonicalPath(workingDirectory)) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  const responseTranscript = normalised.slice(promptStart + userPrefix.length);
-  const answerMarker = `codex
-`;
-  const tokenSuffix = responseTranscript.match(/\ntokens used\n([\d,]+)\n?$/);
-  if (tokenSuffix?.index === undefined) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  const renderedMessages = responseTranscript.slice(0, tokenSuffix.index);
-  if (/(?:^|\n)model rerouted: [^\n]+ -> [^\n]+(?:\n|$)/i.test(renderedMessages)) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  if (/(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(renderedMessages)) {
-    return parseFailure("unsafe-tool-isolation", actualModel);
-  }
-  if (!renderedMessages.startsWith(answerMarker)) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  const answers = renderedMessages.slice(answerMarker.length).split(`
-${answerMarker}`).map((value) => value.trim());
-  for (const renderedAnswer of answers) {
-    let value;
-    try {
-      value = JSON.parse(renderedAnswer);
-    } catch {
-      return parseFailure("identity-unverified", actualModel);
-    }
-    if (!CouncilAnswerSchema.safeParse(value).success) {
-      return parseFailure("identity-unverified", actualModel);
-    }
-  }
-  const rawAnswer = stdout.trim();
-  const normalisedAnswer = stdout.replace(/\r\n/g, `
-`).trim();
-  if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  return { status: "ok", actualModel: identity.data.model, rawAnswer };
-}
-function containsUnsafeToolNode(value) {
-  if (Array.isArray(value))
-    return value.some(containsUnsafeToolNode);
-  if (!isRecord(value))
-    return false;
-  if (typeof value.type === "string" && /tool|browser|mcp|bash|read_file|write_file|edit_file/i.test(value.type) || typeof value.step_type === "string" && /tool|subagent|browser|mcp|bash|read_file|write_file|edit_file/i.test(value.step_type)) {
-    return true;
-  }
-  if (Object.keys(value).some((key) => /^(?:toolName|toolCallId|tool_name|tool_info|browser|mcp)$/i.test(key))) {
-    return true;
-  }
-  return Object.values(value).some(containsUnsafeToolNode);
-}
-function canonicalPath(path) {
-  const canonical = normalize(resolve2(path));
-  return process.platform === "win32" ? canonical.toLocaleLowerCase() : canonical;
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null;
-}
-function extractAgyOutput(stdout, workingDirectory, _stderr, _prompt, requestedModel) {
-  let actualModel;
-  let rawAnswer;
-  let sawPromptRead = false;
-  let sawTerminalResult = false;
-  const expectedWorkingDirectory = workingDirectory !== undefined && isAbsolute2(workingDirectory) ? canonicalPath(workingDirectory) : undefined;
-  const expectedPromptPath = expectedWorkingDirectory === undefined ? undefined : canonicalPath(join2(expectedWorkingDirectory, "council-prompt.txt"));
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim())
-      continue;
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch {
-      return parseFailure("identity-unverified", actualModel);
-    }
-    const envelope = AgyEventEnvelopeSchema.safeParse(value);
-    if (!envelope.success || sawTerminalResult) {
-      return parseFailure("identity-unverified", actualModel);
-    }
-    if (envelope.data.event === "init") {
-      const init = AgyInitEventSchema.safeParse(value);
-      if (actualModel !== undefined)
-        return parseFailure("identity-unverified", actualModel);
-      if (!init.success) {
-        const reportedModel = isRecord(value) && isRecord(value.init) && typeof value.init.model === "string" && value.init.model.trim() ? value.init.model : undefined;
-        return parseFailure(reportedModel === undefined ? "identity-unverified" : "unsafe-tool-isolation", reportedModel);
-      }
-      actualModel = init.data.init.model;
-      if (expectedWorkingDirectory === undefined || !isAbsolute2(init.data.init.cwd) || canonicalPath(init.data.init.cwd) !== expectedWorkingDirectory || !init.data.init.tools.includes("view_file")) {
-        return parseFailure("unsafe-tool-isolation", actualModel);
-      }
-      continue;
-    }
-    if (envelope.data.event === "step_update") {
-      const stepUpdate = isRecord(value) && isRecord(value.step_update) ? value.step_update : undefined;
-      if (stepUpdate?.step_type === "tool") {
-        const tool = AgyToolEventSchema.safeParse(value);
-        if (!tool.success || expectedPromptPath === undefined) {
-          return parseFailure("unsafe-tool-isolation", actualModel);
-        }
-        const reportedPath = tool.data.step_update.tool_info.parameters.AbsolutePath;
-        if (tool.data.step_update.tool_name !== "view_file" || !isAbsolute2(reportedPath) || canonicalPath(reportedPath) !== expectedPromptPath) {
-          return parseFailure("unsafe-tool-isolation", actualModel);
-        }
-        if (tool.data.step_update.state === "DONE")
-          sawPromptRead = true;
-        continue;
-      }
-      if (containsUnsafeToolNode(value)) {
-        return parseFailure("unsafe-tool-isolation", actualModel);
-      }
-      continue;
-    }
-    if (envelope.data.event === "result") {
-      const result = AgyResultEventSchema.safeParse(value);
-      if (!result.success)
-        return parseFailure("identity-unverified", actualModel);
-      rawAnswer = JSON.stringify(result.data.result.structured_output);
-      sawTerminalResult = true;
-      continue;
-    }
-    if (/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)) {
-      return parseFailure("unsafe-tool-isolation", actualModel);
-    }
-  }
-  if (actualModel === undefined || rawAnswer === undefined) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  if (actualModel !== requestedModel) {
-    return parseFailure("identity-unverified", actualModel);
-  }
-  if (!sawPromptRead)
-    return parseFailure("unsafe-tool-isolation", actualModel);
-  return { status: "ok", actualModel, rawAnswer };
-}
-function grokReportedModel(value) {
-  if (!isRecord(value))
-    return;
-  if (typeof value.model === "string" && value.model.trim())
-    return value.model;
-  return isRecord(value.message) && typeof value.message.model === "string" && value.message.model.trim() ? value.message.model : undefined;
-}
-function grokInitViolatesIsolation(value, workingDirectory) {
-  if (!isRecord(value))
-    return false;
-  const cwd = typeof value.cwd === "string" ? value.cwd : undefined;
-  return typeof value.permissionMode === "string" && value.permissionMode !== "plan" || cwd !== undefined && (workingDirectory === undefined || !isAbsolute2(cwd) || canonicalPath(cwd) !== canonicalPath(workingDirectory));
-}
-function extractGrokOutput(stdout, workingDirectory) {
-  let state = "await-init";
-  let sessionId;
-  let actualModel;
-  let rawAnswer;
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim())
-      continue;
-    let value;
-    try {
-      value = JSON.parse(line);
-    } catch {
-      return parseFailure("identity-unverified", actualModel);
-    }
-    if (containsUnsafeToolNode(value)) {
-      return parseFailure("unsafe-tool-isolation", grokReportedModel(value) ?? actualModel);
-    }
-    if (!isRecord(value) || typeof value.type !== "string") {
-      return parseFailure("identity-unverified", actualModel);
-    }
-    if (value.type === "system") {
-      const init = GrokInitEventSchema.safeParse(value);
-      const reportedModel = grokReportedModel(value);
-      if (state !== "await-init" || !init.success || workingDirectory === undefined || !isAbsolute2(workingDirectory) || !isAbsolute2(init.data.cwd) || canonicalPath(init.data.cwd) !== canonicalPath(workingDirectory)) {
-        return parseFailure(grokInitViolatesIsolation(value, workingDirectory) ? "unsafe-tool-isolation" : "identity-unverified", reportedModel);
-      }
-      sessionId = init.data.session_id;
-      actualModel = init.data.model;
-      state = "await-assistant";
-      continue;
-    }
-    if (value.type === "assistant") {
-      const assistant = GrokAssistantEventSchema.safeParse(value);
-      const reportedModel = grokReportedModel(value);
-      if (state !== "await-assistant" || !assistant.success || sessionId === undefined || actualModel === undefined || assistant.data.session_id !== sessionId || assistant.data.message.model !== actualModel) {
-        return parseFailure("identity-unverified", reportedModel ?? actualModel);
-      }
-      rawAnswer = "";
-      for (const block of assistant.data.message.content) {
-        if (block.type === "text")
-          rawAnswer += block.text;
-      }
-      if (!rawAnswer.trim())
-        return parseFailure("identity-unverified", actualModel);
-      state = "await-result";
-      continue;
-    }
-    if (value.type === "result") {
-      const result = GrokResultEventSchema.safeParse(value);
-      if (state !== "await-result" || !result.success || sessionId === undefined || actualModel === undefined || rawAnswer === undefined || result.data.session_id !== sessionId || result.data.result !== rawAnswer) {
-        return parseFailure("identity-unverified", actualModel);
-      }
-      const usageModels = Object.keys(result.data.modelUsage);
-      if (usageModels.length !== 1 || usageModels[0] !== actualModel) {
-        return parseFailure("identity-unverified", actualModel);
-      }
-      state = "closed";
-      continue;
-    }
-    return parseFailure("identity-unverified", actualModel);
-  }
-  return state === "closed" && actualModel !== undefined && rawAnswer !== undefined ? { status: "ok", actualModel, rawAnswer } : parseFailure("identity-unverified", actualModel);
-}
-function observedRoute(route, actualModel) {
-  if (actualModel === route.primary)
-    return "primary";
-  return route.fallbacks.includes(actualModel) ? "same-provider-fallback" : undefined;
-}
-function quotaExhaustion(stderr) {
-  if (!stderr)
-    return;
-  const line = stderr.split(/\r?\n/).map((value) => value.trim()).find((value) => /usage limit|quota|out of credit|insufficient_quota|rate limit exceeded/i.test(value));
-  if (line === undefined)
-    return;
-  const resetsAt = /try again at ([^.]+)/i.exec(line)?.[1]?.trim();
-  return resetsAt ? `Subscription quota exhausted; the provider reports it resets at ${resetsAt}.` : `Subscription quota exhausted: ${line.slice(0, 200)}`;
-}
-function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
-  const route = (context) => context.registry[config2.family];
-  const adapter = {
-    family: config2.family,
-    transport: "subscription-cli",
-    async availability(context) {
-      const configurationError = config2.configurationError?.();
-      const executable = resolveExecutable();
-      return {
-        status: configurationError ? "unconfigured" : executable && isAbsolute2(executable) ? "available" : executable ? "unsafe-transport" : "unconfigured",
-        provider: config2.family,
-        model: route(context).primary,
-        reason: configurationError ?? (executable && isAbsolute2(executable) ? "" : executable ? `${config2.executableName} executable is not absolute` : `${config2.executableName} executable not found`)
-      };
-    },
-    async invoke(request) {
-      const configuredRoute = route(request.context);
-      const configurationError = config2.configurationError?.();
-      if (configurationError) {
-        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-subscription-profile", configurationError, 0);
-      }
-      const executable = resolveExecutable();
-      if (!executable) {
-        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-executable", `${config2.executableName} executable not found`, 0);
-      }
-      if (!isAbsolute2(executable)) {
-        return seatError(request, config2.family, configuredRoute.primary, "skipped", "unsafe-transport", `${config2.executableName} executable is not absolute`, 0);
-      }
-      const result = await transport.run(config2.request(executable, configuredRoute, request.prompt, request.context.timeoutMs));
-      if (result.status !== "ok") {
-        const quota = quotaExhaustion(result.stderr);
-        if (quota !== undefined) {
-          capture(request, config2.family, "provider-failure", quota);
-          return seatError(request, config2.family, configuredRoute.primary, "failed", "quota-exhausted", quota, result.durationMs);
-        }
-        capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
-        return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
-      }
-      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt), configuredRoute.primary);
-      if (output.status === "failed") {
-        capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
-        return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" });
-      }
-      const seatRoute = observedRoute(configuredRoute, output.actualModel);
-      if (!seatRoute) {
-        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", `${config2.executableName} reported a model outside the approved route`, result.durationMs, false, { actualModel: output.actualModel, modelIdentity: "unverified" });
-      }
-      const answer = parseAnswer(request, config2.family, output.rawAnswer, false);
-      if (!answer) {
-        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", result.durationMs, false, {
-          actualModel: output.actualModel,
-          modelIdentity: "verified",
-          route: seatRoute
-        });
-      }
-      return seatSuccess(request, config2.family, configuredRoute.primary, output.actualModel, seatRoute, answer, result.durationMs);
-    },
-    async probe(context) {
-      return healthFromResponse(await adapter.invoke({
-        context,
-        seatId: `health-${config2.family}`,
-        role: "health",
-        prompt: healthPrompt
-      }));
-    }
-  };
-  return adapter;
-}
-var ompIsolationConfig = [
-  "advisor:",
-  "  enabled: false",
-  "prewalk:",
-  "  enabled: false",
-  "disabledProviders:",
-  "  - native",
-  "  - claude",
-  "  - codex",
-  "  - gemini",
-  "  - opencode",
-  "  - github",
-  "  - agents",
-  "  - agents-md"
-].join(`
-`);
-function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("codex") ?? undefined) {
-  return createSubscriptionCliAdapter({
-    family: "openai",
-    executableName: "codex",
-    request: (executable, route, prompt, timeoutMs) => {
-      const councilPrompt = structuredPrompt(prompt);
-      return {
-        executable,
-        args: [
-          "exec",
-          "--skip-git-repo-check",
-          "--strict-config",
-          "--model",
-          route.primary,
-          "--output-schema",
-          (workingDirectory) => join2(workingDirectory, "council-answer-schema.json"),
-          "--sandbox",
-          "read-only",
-          "--ephemeral",
-          "--ignore-user-config",
-          "--ignore-rules",
-          "-c",
-          `model_reasoning_effort="${codexReasoningEffort}"`,
-          "-c",
-          'web_search="disabled"',
-          "--disable",
-          "shell_tool",
-          "--disable",
-          "unified_exec",
-          "--disable",
-          "browser_use",
-          "--disable",
-          "browser_use_external",
-          "--disable",
-          "browser_use_full_cdp_access",
-          "--disable",
-          "computer_use",
-          "--disable",
-          "view_image",
-          "--disable",
-          "image_generation",
-          "--disable",
-          "apps",
-          "--disable",
-          "plugins",
-          "--disable",
-          "remote_plugin",
-          "--disable",
-          "multi_agent",
-          "--disable",
-          "hooks",
-          "--disable",
-          "skill_search",
-          "--disable",
-          "skill_mcp_dependency_install",
-          "--disable",
-          "workspace_dependencies",
-          "--color",
-          "never",
-          "-"
-        ],
-        stdin: councilPrompt,
-        timeoutMs,
-        cwd: tmpdir(),
-        files: {
-          "council-prompt.txt": councilPrompt,
-          "council-answer-schema.json": councilAnswerJsonSchema
-        }
-      };
-    },
-    output: extractCodexOutput
-  }, transport, resolveExecutable);
-}
-function resolveAgyExecutable() {
-  const onPath = Bun.which("agy");
-  if (onPath)
-    return onPath;
-  const localAppData = process.env.LOCALAPPDATA;
-  if (!localAppData || process.platform !== "win32")
-    return;
-  const candidate = join2(localAppData, "agy", "bin", "agy.exe");
-  return existsSync2(candidate) ? candidate : undefined;
-}
-function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveAgyExecutable) {
-  return createSubscriptionCliAdapter({
-    family: "google",
-    executableName: "agy",
-    request: (executable, route, prompt, timeoutMs) => ({
-      executable,
-      args: [
-        "--sandbox",
-        "--mode",
-        "plan",
-        "--effort",
-        "high",
-        "--output-format",
-        "stream-json",
-        "--json-schema",
-        councilAnswerJsonSchema,
-        "--model",
-        route.primary,
-        "--print-timeout",
-        `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
-        "-p",
-        (workingDirectory) => `Read ${join2(workingDirectory, "council-prompt.txt")}, follow it exactly, and do not use any other tool.`
-      ],
-      stdin: "",
-      timeoutMs,
-      cwd: tmpdir(),
-      files: {
-        "council-prompt.txt": structuredPrompt(prompt),
-        ".gemini/antigravity-cli/settings.json": (workingDirectory) => JSON.stringify({
-          enableTelemetry: false,
-          trustedWorkspaces: [workingDirectory],
-          permissions: {
-            allow: [`read_file(${join2(workingDirectory, "council-prompt.txt")})`]
-          }
-        })
-      },
-      workingDirectoryEnv: ["HOME", "USERPROFILE"]
-    }),
-    output: extractAgyOutput
-  }, transport, resolveExecutable);
-}
-function resolveGrokExecutable() {
-  return Bun.which("grok") ?? undefined;
-}
-var GROK_DISALLOWED_TOOLS = [
-  "run_terminal_command",
-  "write",
-  "search_replace",
-  "use_tool",
-  "search_tool",
-  "workflow",
-  "monitor",
-  "scheduler_create",
-  "scheduler_delete",
-  "scheduler_list",
-  "image_gen",
-  "image_edit",
-  "image_to_video",
-  "reference_to_video"
-];
-function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveGrokExecutable, modelOverride = () => process.env.GROK_CLI_MODEL?.trim() || undefined) {
-  return createSubscriptionCliAdapter({
-    family: "xai",
-    executableName: "grok",
-    request: (executable, _route, prompt, timeoutMs) => {
-      const councilPrompt = `${grokInlineAnswerGuard}
-
-${structuredPrompt(prompt)}`;
-      const override = modelOverride()?.trim();
-      return {
-        executable,
-        args: [
-          "--no-auto-update",
-          "--prompt-file",
-          (workingDirectory) => join2(workingDirectory, "council-prompt.txt"),
-          "--output-format",
-          "streaming-messages-json",
-          "--sandbox",
-          "read-only",
-          "--permission-mode",
-          "plan",
-          "--no-plan",
-          "--no-subagents",
-          "--no-memory",
-          "--disable-web-search",
-          "--disallowed-tools",
-          GROK_DISALLOWED_TOOLS.join(","),
-          "--max-turns",
-          "1",
-          "--verbatim",
-          ...override ? ["-m", override] : []
-        ],
-        stdin: "",
-        timeoutMs,
-        cwd: tmpdir(),
-        files: { "council-prompt.txt": councilPrompt }
-      };
-    },
-    output: extractGrokOutput
-  }, transport, resolveExecutable);
-}
-var xaiUnconfiguredReason = "set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH";
-function withTransportResolution(adapter, transportResolution) {
-  return {
-    ...adapter,
-    transportResolution,
-    async availability(context) {
-      const availability = await adapter.availability(context);
-      return availability.status === "available" ? { ...availability, reason: transportResolution.reason } : availability;
-    },
-    async probe(context) {
-      const health = await adapter.probe(context);
-      return health.status === "healthy" ? { ...health, reason: transportResolution.reason } : health;
-    }
-  };
-}
-function createUnconfiguredXaiAdapter() {
-  const family = "xai";
-  const transportResolution = {
-    preferred: "subscription-cli",
-    effective: null,
-    reason: xaiUnconfiguredReason
-  };
-  const adapter = {
-    family,
-    transport: "http",
-    transportResolution,
-    async availability(context) {
-      return {
-        status: "unconfigured",
-        provider: family,
-        model: context.registry.xai.primary,
-        reason: xaiUnconfiguredReason
-      };
-    },
-    async invoke(request) {
-      return seatError(request, family, request.context.registry.xai.primary, "skipped", "missing-xai-transport", xaiUnconfiguredReason, 0);
-    },
-    async probe(context) {
-      return healthFromResponse(await adapter.invoke({
-        context,
-        seatId: "health-xai",
-        role: "health",
-        prompt: healthPrompt
-      }));
-    }
-  };
-  return adapter;
-}
-function createXaiAdapter(options = {}) {
-  const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
-  const apiKeyPresent = Boolean(env.COUNCIL_XAI_API_KEY);
-  const httpAdapter = () => createHttpAdapter({
-    family: "xai",
-    credential: "COUNCIL_XAI_API_KEY",
-    endpoint: "https://api.x.ai/v1/chat/completions",
-    allowRegistryFallback: false
-  }, options.httpTransport);
-  const cliAdapter = (resolved) => createXaiSubscriptionAdapter(options.cliTransport, () => resolved, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined));
-  if (options.transportPreference === "http" && apiKeyPresent) {
-    return withTransportResolution(httpAdapter(), {
-      preferred: "http",
-      effective: "http",
-      reason: "HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used."
-    });
-  }
-  if (executable) {
-    return withTransportResolution(cliAdapter(executable), {
-      preferred: "subscription-cli",
-      effective: "subscription-cli",
-      reason: apiKeyPresent ? "The grok subscription CLI resolved on PATH and is preferred over the metered API key." : "The grok subscription CLI resolved on PATH."
-    });
-  }
-  if (apiKeyPresent) {
-    return withTransportResolution(httpAdapter(), {
-      preferred: "subscription-cli",
-      effective: "http",
-      reason: "No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable."
-    });
-  }
-  return createUnconfiguredXaiAdapter();
-}
-function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("claude") ?? undefined) {
-  const family = "anthropic";
-  const adapter = {
-    family,
-    transport: "cli",
-    async availability(context) {
-      const executable = resolveExecutable();
-      return {
-        status: executable && isAbsolute2(executable) ? "available" : executable ? "unsafe-transport" : "unconfigured",
-        provider: family,
-        model: context.registry.anthropic.primary,
-        reason: executable && isAbsolute2(executable) ? "" : executable ? "claude executable is not absolute" : "claude executable not found"
-      };
-    },
-    async invoke(request) {
-      const route = request.context.registry.anthropic;
-      const executable = resolveExecutable();
-      if (!executable) {
-        return seatError(request, family, route.primary, "skipped", "missing-executable", "claude executable not found", 0);
-      }
-      if (!isAbsolute2(executable)) {
-        return seatError(request, family, route.primary, "skipped", "unsafe-transport", "claude executable is not absolute", 0);
-      }
-      const result = await transport.run({
-        executable,
-        args: [
-          "-p",
-          "--model",
-          route.primary,
-          "--effort",
-          "max",
-          "--safe-mode",
-          "--no-session-persistence",
-          "--tools",
-          "",
-          "--output-format",
-          "json"
-        ],
-        stdin: structuredPrompt(request.prompt),
-        timeoutMs: request.context.timeoutMs,
-        cwd: tmpdir()
-      });
-      if (result.status !== "ok") {
-        if (result.stderr)
-          capture(request, family, "provider-failure", result.stderr);
-        return seatError(request, family, route.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", safeExternalMessage(result.stderr, "claude process failed"), result.durationMs);
-      }
-      let output;
-      try {
-        output = JSON.parse(result.stdout);
-      } catch {
-        capture(request, family, "invalid-provider-response", result.stdout);
-        return seatError(request, family, route.primary, "failed", "invalid-provider-response", "claude output was not valid JSON", result.durationMs);
-      }
-      const parsed = ClaudeResponseSchema.safeParse(output);
-      if (!parsed.success) {
-        capture(request, family, "invalid-provider-response", result.stdout);
-        return seatError(request, family, route.primary, "failed", "identity-unverified", "claude output did not include model identity", result.durationMs);
-      }
-      const actualModels = Object.keys(parsed.data.modelUsage).sort();
-      const actualModel = actualModels.includes(route.primary) ? route.primary : actualModels[0];
-      if (!actualModel) {
-        return seatError(request, family, route.primary, "failed", "identity-unverified", "claude output did not include model identity", result.durationMs);
-      }
-      const answer = parseAnswer(request, family, parsed.data.result);
-      if (!answer) {
-        return seatError(request, family, route.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", result.durationMs);
-      }
-      return seatSuccess(request, family, route.primary, actualModel, "primary", answer, result.durationMs);
-    },
-    async probe(context) {
-      return healthFromResponse(await adapter.invoke({
-        context,
-        seatId: "health-anthropic",
-        role: "health",
-        prompt: healthPrompt
-      }));
-    }
-  };
-  return adapter;
-}
-
-// src/domain/quorum.ts
-var PROVIDER_FAMILY_ORDER = Object.freeze([
-  ...ProviderFamilySchema.options
-]);
-var familyOrder = {
-  anthropic: 0,
-  openai: 1,
-  xai: 2,
-  google: 3,
-  deepseek: 4,
-  moonshot: 5
-};
-function minimumQuorumFamilyFloor(policy) {
-  return policy.requiresContrarian && policy.reducedQuorum === undefined ? 4 : 3;
-}
-var QuorumFailureReasonSchema = exports_external.enum([
-  "insufficient-provider-families",
-  "missing-successful-contrarian"
-]);
-var SuccessfulFamiliesSchema = exports_external.array(ProviderFamilySchema).superRefine((families, context) => {
-  let previousIndex = -1;
-  for (const [index, family] of families.entries()) {
-    const currentIndex = familyOrder[family];
-    if (currentIndex <= previousIndex) {
-      context.addIssue({
-        code: "custom",
-        path: [index],
-        message: "Successful provider families must be unique and in canonical order"
-      });
-    }
-    previousIndex = currentIndex;
-  }
-});
-var QuorumEvaluationSchema = exports_external.strictObject({
-  passed: exports_external.boolean(),
-  minimumDistinctFamilies: exports_external.number().int().min(3).max(ProviderFamilySchema.options.length),
-  successfulFamilies: SuccessfulFamiliesSchema,
-  requiresContrarian: exports_external.boolean(),
-  contrarianSatisfied: exports_external.boolean(),
-  reducedQuorum: ReducedQuorumNoticeSchema.optional(),
-  failureReasons: exports_external.array(QuorumFailureReasonSchema).max(2)
-}).superRefine((evaluation, context) => {
-  if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4 && evaluation.reducedQuorum === undefined) {
-    context.addIssue({
-      code: "custom",
-      path: ["minimumDistinctFamilies"],
-      message: "Significant motions require at least four distinct provider families"
-    });
-  }
-  if (evaluation.reducedQuorum !== undefined && (!evaluation.requiresContrarian || evaluation.minimumDistinctFamilies < 3 || evaluation.minimumDistinctFamilies >= evaluation.reducedQuorum.standingDefaultMinimumDistinctFamilies)) {
-    context.addIssue({
-      code: "custom",
-      path: ["reducedQuorum"],
-      message: "Reduced quorum must be an explicit significant-council floor below four"
-    });
-  }
-  const insufficientFamilies = evaluation.successfulFamilies.length < evaluation.minimumDistinctFamilies;
-  const missingContrarian = evaluation.requiresContrarian && !evaluation.contrarianSatisfied;
-  const expectedReasons = [];
-  if (insufficientFamilies)
-    expectedReasons.push("insufficient-provider-families");
-  if (missingContrarian)
-    expectedReasons.push("missing-successful-contrarian");
-  if (evaluation.failureReasons.length !== expectedReasons.length || evaluation.failureReasons.some((reason, index) => reason !== expectedReasons[index])) {
-    context.addIssue({
-      code: "custom",
-      path: ["failureReasons"],
-      message: "Quorum failure reasons do not match the reported evidence"
-    });
-  }
-  if (evaluation.passed !== (expectedReasons.length === 0)) {
-    context.addIssue({
-      code: "custom",
-      path: ["passed"],
-      message: "Quorum pass state does not match the reported evidence"
-    });
-  }
-});
-function evaluateQuorum(policy, responses, contrarianSeatIds) {
-  const parsedPolicy = QuorumPolicySchema.parse(policy);
-  const parsedResponses = exports_external.array(SeatResponseSchema).parse(responses);
-  const parsedContrarianSeatIds = exports_external.array(exports_external.string().trim().min(1)).superRefine((seatIds, context) => {
-    if (new Set(seatIds).size !== seatIds.length) {
-      context.addIssue({
-        code: "custom",
-        message: "Contrarian seat IDs must be unique"
-      });
-    }
-  }).parse(contrarianSeatIds);
-  const minimumDistinctFamilies = Math.max(minimumQuorumFamilyFloor(parsedPolicy), parsedPolicy.minimumDistinctFamilies);
-  const successfulResponses = parsedResponses.filter((response) => response.status === "ok" && response.modelIdentity === "verified");
-  const successfulFamilySet = new Set(successfulResponses.map(({ provider }) => provider));
-  const successfulFamilies = PROVIDER_FAMILY_ORDER.filter((family) => successfulFamilySet.has(family));
-  const contrarianSeatIdSet = new Set(parsedContrarianSeatIds);
-  const contrarianSatisfied = successfulResponses.some(({ seatId }) => contrarianSeatIdSet.has(seatId));
-  const failureReasons = [];
-  if (successfulFamilies.length < minimumDistinctFamilies) {
-    failureReasons.push("insufficient-provider-families");
-  }
-  if (parsedPolicy.requiresContrarian && !contrarianSatisfied) {
-    failureReasons.push("missing-successful-contrarian");
-  }
-  return QuorumEvaluationSchema.parse({
-    passed: failureReasons.length === 0,
-    minimumDistinctFamilies,
-    successfulFamilies,
-    requiresContrarian: parsedPolicy.requiresContrarian,
-    contrarianSatisfied,
-    ...parsedPolicy.reducedQuorum === undefined ? {} : { reducedQuorum: parsedPolicy.reducedQuorum },
-    failureReasons
-  });
 }
 
 // src/evidence/schema.ts
@@ -18397,8 +17012,8 @@ class CouncilRunner {
 
 // src/models/registry.ts
 import { createHash as createHash2 } from "crypto";
-import { homedir as homedir2 } from "os";
-import { isAbsolute as isAbsolute3, join as join3, resolve as resolve3 } from "path";
+import { homedir } from "os";
+import { isAbsolute, join, resolve } from "path";
 // src/models/registry.json
 var registry_default = {
   anthropic: {
@@ -18509,7 +17124,7 @@ async function loadModelRegistryWithProvenance(overridePath) {
   const builtIn = builtInRegistry();
   if (overridePath === undefined)
     return builtIn;
-  const absolutePath = resolve3(overridePath);
+  const absolutePath = resolve(overridePath);
   let contents;
   let fileBytes;
   try {
@@ -18557,23 +17172,23 @@ async function loadModelRegistryWithProvenance(overridePath) {
   };
 }
 async function resolveModelRegistry(options = {}) {
-  const cwd = resolve3(options.cwd ?? process.cwd());
+  const cwd = resolve(options.cwd ?? process.cwd());
   if (options.overridePath !== undefined) {
-    const explicitPath = isAbsolute3(options.overridePath) ? options.overridePath : resolve3(cwd, options.overridePath);
+    const explicitPath = isAbsolute(options.overridePath) ? options.overridePath : resolve(cwd, options.overridePath);
     return loadModelRegistryWithProvenance(explicitPath);
   }
   if (options.recordsRoot !== undefined) {
-    const recordsRoot = isAbsolute3(options.recordsRoot) ? options.recordsRoot : resolve3(cwd, options.recordsRoot);
-    const recordsRegistryPath = join3(recordsRoot, "models.json");
+    const recordsRoot = isAbsolute(options.recordsRoot) ? options.recordsRoot : resolve(cwd, options.recordsRoot);
+    const recordsRegistryPath = join(recordsRoot, "models.json");
     if (await Bun.file(recordsRegistryPath).exists()) {
       return loadModelRegistryWithProvenance(recordsRegistryPath);
     }
   }
   const environment = options.env ?? process.env;
   const configuredHome = environment.HOME?.trim() || environment.USERPROFILE?.trim();
-  const homeValue = configuredHome || homedir2();
-  const home = isAbsolute3(homeValue) ? resolve3(homeValue) : resolve3(cwd, homeValue);
-  const userRegistryPath = join3(home, ".claude", "council", "models.json");
+  const homeValue = configuredHome || homedir();
+  const home = isAbsolute(homeValue) ? resolve(homeValue) : resolve(cwd, homeValue);
+  const userRegistryPath = join(home, ".claude", "council", "models.json");
   if (await Bun.file(userRegistryPath).exists()) {
     return loadModelRegistryWithProvenance(userRegistryPath);
   }
@@ -18812,7 +17427,7 @@ function errorCategory(status) {
       return "unsafe-transport";
   }
 }
-function observedRoute2(probe, route) {
+function observedRoute(probe, route) {
   if (probe.status === "identity-unverified")
     return "unverified";
   if (probe.status !== "healthy" || probe.actualModel === null)
@@ -18831,7 +17446,7 @@ function snapshot(probes, registry2, capturedAt = new Date().toISOString()) {
     return ProviderRouteHealthSchema.parse({
       provider: probe.provider,
       route,
-      observedRoute: observedRoute2(probe, route),
+      observedRoute: observedRoute(probe, route),
       requestedModel: sanitiseModel2(probe.requestedModel),
       actualModel: probe.actualModel === null ? null : sanitiseModel2(probe.actualModel),
       identity: identityState(probe),
@@ -19310,6 +17925,1453 @@ function evaluateOutbound(request) {
     redactions,
     ...override === undefined ? {} : { override }
   });
+}
+
+// src/execution/provider.ts
+import { existsSync as existsSync2 } from "fs";
+import { homedir as homedir2, tmpdir } from "os";
+import { isAbsolute as isAbsolute3, join as join3, normalize, resolve as resolve3 } from "path";
+
+// src/execution/cli.ts
+import { existsSync, realpathSync } from "fs";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
+import { isAbsolute as isAbsolute2, join as join2, relative, resolve as resolve2 } from "path";
+var CLI_OUTPUT_LIMIT_BYTES = 1024 * 1024;
+function findPackageRoot(startDirectory) {
+  let candidate = realpathSync(startDirectory);
+  while (true) {
+    if (existsSync(join2(candidate, "package.json")))
+      return candidate;
+    const parent = resolve2(candidate, "..");
+    if (parent === candidate) {
+      throw new Error("claude-council package root could not be resolved");
+    }
+    candidate = parent;
+  }
+}
+var repositoryRoot = findPackageRoot(import.meta.dir);
+var inheritedEnvironment = [
+  "PATH",
+  "SystemRoot",
+  "WINDIR",
+  "TEMP",
+  "TMP",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "LANG",
+  "LC_ALL",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY"
+];
+function inside(parent, candidate) {
+  const path = relative(parent, candidate);
+  return path === "" || !path.startsWith("..") && !isAbsolute2(path);
+}
+async function absoluteExecutable(executable) {
+  const candidate = isAbsolute2(executable) ? executable : Bun.which(executable);
+  if (!candidate)
+    return;
+  try {
+    return await realpath(candidate);
+  } catch {
+    return resolve2(candidate);
+  }
+}
+function isolatedEnvironment(additions) {
+  const environment = {};
+  for (const name of inheritedEnvironment) {
+    const value = process.env[name];
+    if (value !== undefined)
+      environment[name] = value;
+  }
+  if (additions) {
+    for (const [name, value] of Object.entries(additions))
+      environment[name] = value;
+  }
+  return environment;
+}
+function ownedPath(workingDirectory, requestedPath) {
+  if (!requestedPath || isAbsolute2(requestedPath))
+    return;
+  const destination = resolve2(workingDirectory, requestedPath);
+  return inside(workingDirectory, destination) ? destination : undefined;
+}
+function resolveOwnedValue(value, workingDirectory) {
+  return typeof value === "function" ? value(workingDirectory) : value;
+}
+async function stageRequestFiles(request, workingDirectory) {
+  for (const [requestedPath, value] of Object.entries(request.files ?? {})) {
+    const destination = ownedPath(workingDirectory, requestedPath);
+    if (!destination)
+      throw new Error(`invalid staged file path: ${requestedPath}`);
+    await mkdir(resolve2(destination, ".."), { recursive: true, mode: 448 });
+    await writeFile(destination, resolveOwnedValue(value, workingDirectory), {
+      encoding: "utf8",
+      mode: 384
+    });
+  }
+}
+function failedResult(executable, startedAt, errorCode, stderr) {
+  return {
+    status: "failed",
+    executable,
+    exitCode: null,
+    stdout: "",
+    stderr,
+    durationMs: Date.now() - startedAt,
+    treeTerminated: false,
+    errorCode
+  };
+}
+async function readBoundedOutput(stream, onLimit) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done)
+      return { text: Buffer.concat(chunks, totalBytes).toString("utf8"), exceeded: false };
+    if (totalBytes + value.byteLength > CLI_OUTPUT_LIMIT_BYTES) {
+      onLimit();
+      await reader.cancel().catch(() => {
+        return;
+      });
+      return { text: "", exceeded: true };
+    }
+    chunks.push(value);
+    totalBytes += value.byteLength;
+  }
+}
+async function runIsolatedCli(request) {
+  const startedAt = Date.now();
+  if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) {
+    return failedResult(request.executable, startedAt, "invalid-request", "timeoutMs must be positive");
+  }
+  const executable = await absoluteExecutable(request.executable);
+  if (!executable) {
+    return failedResult(request.executable, startedAt, "executable-not-found", "executable not found");
+  }
+  if (inside(repositoryRoot, executable)) {
+    return failedResult(executable, startedAt, "repository-executable", "repository-local executables are not permitted");
+  }
+  const workingDirectory = await realpath(await mkdtemp(join2(resolve2(request.cwd), "claude-council-cli-")));
+  try {
+    let args;
+    try {
+      await stageRequestFiles(request, workingDirectory);
+      args = request.args.map((value) => resolveOwnedValue(value, workingDirectory));
+    } catch (error51) {
+      return failedResult(executable, startedAt, "invalid-request", error51 instanceof Error ? error51.message : "failed to prepare CLI inputs");
+    }
+    const environment = isolatedEnvironment(request.env);
+    for (const name of request.workingDirectoryEnv ?? []) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        return failedResult(executable, startedAt, "invalid-request", `invalid environment name: ${name}`);
+      }
+      environment[name] = workingDirectory;
+    }
+    let processHandle;
+    try {
+      processHandle = Bun.spawn([executable, ...args], {
+        cwd: workingDirectory,
+        env: environment,
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: process.platform !== "win32",
+        windowsHide: true
+      });
+    } catch (error51) {
+      return failedResult(executable, startedAt, "spawn-failed", error51 instanceof Error ? error51.message : "spawn failed");
+    }
+    processHandle.stdin.write(request.stdin);
+    processHandle.stdin.end();
+    let terminationReason = null;
+    let treeTerminated = false;
+    const terminateTree = (reason) => {
+      if (terminationReason !== null)
+        return;
+      terminationReason = reason;
+      if (process.platform === "win32") {
+        const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+        if (systemRoot) {
+          const taskkill = join2(systemRoot, "System32", "taskkill.exe");
+          const termination = Bun.spawnSync([
+            taskkill,
+            "/T",
+            "/F",
+            "/PID",
+            String(processHandle.pid)
+          ]);
+          treeTerminated = termination.exitCode === 0;
+        }
+        if (!treeTerminated)
+          processHandle.kill("SIGKILL");
+      } else {
+        try {
+          process.kill(-processHandle.pid, "SIGKILL");
+          treeTerminated = true;
+        } catch {
+          processHandle.kill("SIGKILL");
+        }
+      }
+    };
+    const timer = setTimeout(() => terminateTree("timeout"), request.timeoutMs);
+    try {
+      const [stdoutResult, stderrResult, exitCode] = await Promise.all([
+        readBoundedOutput(processHandle.stdout, () => terminateTree("output-limit")),
+        readBoundedOutput(processHandle.stderr, () => terminateTree("output-limit")),
+        processHandle.exited
+      ]);
+      if (terminationReason === "output-limit" || stdoutResult.exceeded || stderrResult.exceeded) {
+        return {
+          status: "failed",
+          executable,
+          exitCode,
+          stdout: "",
+          stderr: "CLI output exceeded the byte limit",
+          durationMs: Date.now() - startedAt,
+          treeTerminated,
+          errorCode: "output-limit",
+          workingDirectory
+        };
+      }
+      if (terminationReason === "timeout") {
+        return {
+          status: "timed-out",
+          executable,
+          exitCode,
+          stdout: stdoutResult.text,
+          stderr: stderrResult.text,
+          durationMs: Date.now() - startedAt,
+          treeTerminated,
+          errorCode: "timeout",
+          workingDirectory
+        };
+      }
+      return {
+        status: exitCode === 0 ? "ok" : "failed",
+        executable,
+        exitCode,
+        stdout: stdoutResult.text,
+        stderr: stderrResult.text,
+        durationMs: Date.now() - startedAt,
+        treeTerminated: false,
+        errorCode: exitCode === 0 ? null : "non-zero-exit",
+        workingDirectory
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    await rm(workingDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100
+    });
+  }
+}
+
+// src/execution/http.ts
+var retryableStatuses = new Set([429, 500, 502, 503, 504]);
+function validatePolicy(policy) {
+  if (!Number.isInteger(policy.maxAttempts) || policy.maxAttempts < 1) {
+    throw new RangeError("maxAttempts must be a positive integer");
+  }
+  for (const [name, value] of [
+    ["timeoutMs", policy.timeoutMs],
+    ["baseDelayMs", policy.baseDelayMs],
+    ["maxDelayMs", policy.maxDelayMs]
+  ]) {
+    if (!Number.isFinite(value) || value < 0)
+      throw new RangeError(`${name} must be non-negative`);
+  }
+  if (policy.timeoutMs === 0)
+    throw new RangeError("timeoutMs must be positive");
+  if (policy.maxDelayMs < policy.baseDelayMs) {
+    throw new RangeError("maxDelayMs must not be less than baseDelayMs");
+  }
+  if (!Number.isFinite(policy.jitterRatio) || policy.jitterRatio < 0 || policy.jitterRatio > 1) {
+    throw new RangeError("jitterRatio must be between 0 and 1");
+  }
+}
+function errorCodeForStatus(status) {
+  if (status === 401 || status === 403)
+    return "authentication";
+  if (status === 404)
+    return "model-not-found";
+  if (status === 400 || status === 409 || status === 422)
+    return "validation";
+  if (status === 429)
+    return "rate-limit";
+  if (status >= 500)
+    return "server";
+  return "http";
+}
+async function responseBody(response) {
+  const text = await response.text();
+  if (!text)
+    return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+function retryDelay(attempt, policy) {
+  const exponential = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** (attempt - 1));
+  const spread = exponential * policy.jitterRatio;
+  const jittered = exponential + (Math.random() * 2 - 1) * spread;
+  return Math.max(0, Math.min(policy.maxDelayMs, Math.round(jittered)));
+}
+async function requestWithPolicy(request, policy) {
+  validatePolicy(policy);
+  for (let attempt = 1;attempt <= policy.maxAttempts; attempt += 1) {
+    const controller = new AbortController;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, policy.timeoutMs);
+    try {
+      const response = await fetch(request.url, {
+        method: request.method ?? "GET",
+        ...request.headers === undefined ? {} : { headers: request.headers },
+        ...request.body === undefined ? {} : { body: request.body },
+        signal: controller.signal
+      });
+      const body = await responseBody(response);
+      if (response.ok) {
+        return {
+          status: "ok",
+          attempts: attempt,
+          statusCode: response.status,
+          body,
+          errorCode: null,
+          message: ""
+        };
+      }
+      const errorCode = errorCodeForStatus(response.status);
+      if (retryableStatuses.has(response.status) && attempt < policy.maxAttempts) {
+        await Bun.sleep(retryDelay(attempt, policy));
+        continue;
+      }
+      return {
+        status: "failed",
+        attempts: attempt,
+        statusCode: response.status,
+        body,
+        errorCode,
+        message: `HTTP ${response.status}`
+      };
+    } catch (error51) {
+      if (timedOut) {
+        return {
+          status: "timed-out",
+          attempts: attempt,
+          statusCode: null,
+          body: null,
+          errorCode: "timeout",
+          message: `request timed out after ${policy.timeoutMs}ms`
+        };
+      }
+      if (attempt < policy.maxAttempts) {
+        await Bun.sleep(retryDelay(attempt, policy));
+        continue;
+      }
+      return {
+        status: "failed",
+        attempts: attempt,
+        statusCode: null,
+        body: null,
+        errorCode: "network",
+        message: error51 instanceof Error ? error51.message : "network request failed"
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error("retry loop exhausted without a result");
+}
+
+// src/execution/provider.ts
+var CouncilAnswerSchema = exports_external.strictObject({
+  recommendation: exports_external.string().min(1),
+  evidence: exports_external.array(exports_external.string().min(1)),
+  assumptions: exports_external.array(exports_external.string().min(1)),
+  risks: exports_external.array(exports_external.string().min(1)),
+  uncertainty: exports_external.string().min(1),
+  decisiveTest: exports_external.string().min(1)
+});
+var nativeHttpTransport = { request: requestWithPolicy };
+var nativeCliTransport = { run: runIsolatedCli };
+var ChatCompletionSchema = exports_external.object({
+  model: exports_external.string().min(1),
+  choices: exports_external.array(exports_external.object({ message: exports_external.object({ content: exports_external.string() }) })).min(1)
+});
+var ClaudeResponseSchema = exports_external.object({
+  result: exports_external.string(),
+  modelUsage: exports_external.record(exports_external.string(), exports_external.unknown())
+});
+var defaultRetryPolicy = (timeoutMs) => ({
+  maxAttempts: 3,
+  timeoutMs,
+  baseDelayMs: 250,
+  maxDelayMs: 2000,
+  jitterRatio: 0.2
+});
+var answerInstruction = `Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.`;
+var healthPrompt = "Return the required JSON object confirming this provider route is available.";
+var grokInlineAnswerGuard = "IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.";
+function structuredPrompt(prompt) {
+  return `${answerInstruction}
+
+${prompt}`;
+}
+function stripOuterJsonFence(text) {
+  const match = text.match(/^\s*```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i);
+  return match?.[1] ?? text;
+}
+function safeRawText(value) {
+  return scanAndRedact(value).redacted;
+}
+function safeExternalMessage(value, fallback) {
+  const sanitised = safeRawText(value).replace(/\s+/g, " ").trim();
+  return (sanitised || fallback).slice(0, 500);
+}
+function capture(request, family, code, rawText) {
+  request.context.captureDiagnostic?.({
+    family,
+    seatId: request.seatId,
+    code,
+    rawText: safeRawText(rawText)
+  });
+}
+function serialiseUnknown(value) {
+  if (typeof value === "string")
+    return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "[unserialisable provider response]";
+  }
+}
+function parseAnswer(request, family, rawAnswer, retainDiagnostic = true) {
+  const diagnostic = retainDiagnostic ? rawAnswer : "[invalid structured subscription answer omitted]";
+  let value;
+  try {
+    value = JSON.parse(stripOuterJsonFence(scanAndRedact(rawAnswer).redacted));
+  } catch {
+    capture(request, family, "invalid-structured-answer", diagnostic);
+    return;
+  }
+  const parsed = CouncilAnswerSchema.safeParse(value);
+  if (!parsed.success) {
+    capture(request, family, "invalid-structured-answer", diagnostic);
+    return;
+  }
+  return JSON.stringify(parsed.data);
+}
+function attributionFields(attribution) {
+  if (attribution === undefined)
+    return {};
+  return {
+    ...attribution.requestedEffort === undefined ? {} : { requestedEffort: attribution.requestedEffort },
+    ...attribution.observedEffort === undefined ? {} : { observedEffort: attribution.observedEffort },
+    ...attribution.credentialPath === undefined ? {} : { credentialPath: attribution.credentialPath },
+    ...attribution.usage === undefined ? {} : { usage: attribution.usage }
+  };
+}
+function seatError(request, family, requestedModel, status, code, message, latencyMs, retryable = false, observedIdentity, attribution) {
+  const actualModel = observedIdentity === undefined ? undefined : safeExternalMessage(observedIdentity.actualModel, "").slice(0, 128) || undefined;
+  return {
+    status,
+    seatId: request.seatId,
+    provider: family,
+    requestedModel,
+    ...actualModel === undefined || observedIdentity === undefined ? {} : {
+      actualModel,
+      modelIdentity: observedIdentity.modelIdentity,
+      ...observedIdentity.route === undefined ? {} : { route: observedIdentity.route }
+    },
+    role: request.role,
+    latencyMs,
+    ...attributionFields(attribution),
+    error: { code, message, retryable }
+  };
+}
+function seatSuccess(request, family, requestedModel, actualModel, route, answer, latencyMs, attribution) {
+  return {
+    status: "ok",
+    seatId: request.seatId,
+    provider: family,
+    requestedModel,
+    actualModel,
+    modelIdentity: "verified",
+    route,
+    role: request.role,
+    latencyMs,
+    ...attributionFields(attribution),
+    answer
+  };
+}
+function healthFromResponse(response) {
+  if (response.status === "ok") {
+    return {
+      status: "healthy",
+      provider: response.provider,
+      requestedModel: response.requestedModel,
+      actualModel: response.actualModel,
+      latencyMs: response.latencyMs,
+      reason: ""
+    };
+  }
+  const unsafeErrorCodes = new Set([
+    "unsafe-tool-isolation",
+    "unsafe-transport",
+    "repository-executable"
+  ]);
+  const status = unsafeErrorCodes.has(response.error.code) ? "unsafe-transport" : response.error.code === "identity-unverified" ? "identity-unverified" : response.status === "skipped" ? "unconfigured" : "down";
+  return {
+    status,
+    provider: response.provider,
+    requestedModel: response.requestedModel ?? "",
+    actualModel: response.actualModel ?? null,
+    latencyMs: response.latencyMs ?? 0,
+    reason: response.error.message
+  };
+}
+function httpPayload(model, prompt) {
+  return JSON.stringify({
+    model,
+    messages: [{ role: "user", content: structuredPrompt(prompt) }],
+    max_tokens: 32768
+  });
+}
+function extractHttpAnswer(body) {
+  const parsed = ChatCompletionSchema.safeParse(body);
+  if (!parsed.success)
+    return;
+  return {
+    actualModel: parsed.data.model,
+    rawAnswer: parsed.data.choices[0]?.message.content ?? ""
+  };
+}
+function createHttpAdapter(config2, transport = nativeHttpTransport) {
+  const route = (context) => context.registry[config2.family];
+  const availability = async (context) => ({
+    status: context.env[config2.credential] ? "available" : "unconfigured",
+    provider: config2.family,
+    model: route(context).primary,
+    reason: context.env[config2.credential] ? "" : `missing ${config2.credential}`
+  });
+  const adapter = {
+    family: config2.family,
+    transport: "http",
+    availability,
+    async invoke(request) {
+      const startedAt = Date.now();
+      const configuredRoute = route(request.context);
+      const credential = request.context.env[config2.credential];
+      if (!credential) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-credential", `missing ${config2.credential}`, 0);
+      }
+      const invokeModel = (model2) => transport.request({
+        url: config2.endpoint,
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: httpPayload(model2, request.prompt)
+      }, defaultRetryPolicy(request.context.timeoutMs));
+      let model = configuredRoute.primary;
+      let providerResult = await invokeModel(model);
+      const fallback = configuredRoute.fallbacks[0];
+      if (config2.allowRegistryFallback && providerResult.errorCode === "model-not-found" && fallback !== undefined) {
+        model = fallback;
+        providerResult = await invokeModel(model);
+      }
+      const latencyMs = Date.now() - startedAt;
+      if (providerResult.status !== "ok") {
+        return seatError(request, config2.family, configuredRoute.primary, providerResult.status === "timed-out" ? "timed-out" : "failed", providerResult.errorCode ?? "provider-failed", safeExternalMessage(providerResult.message, "provider request failed"), latencyMs, ["network", "rate-limit", "server"].includes(providerResult.errorCode ?? ""));
+      }
+      const extracted = extractHttpAnswer(providerResult.body);
+      if (!extracted) {
+        capture(request, config2.family, "invalid-provider-response", serialiseUnknown(providerResult.body));
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-provider-response", "provider response did not contain verified model metadata and text", latencyMs);
+      }
+      const answer = parseAnswer(request, config2.family, extracted.rawAnswer);
+      if (!answer) {
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", latencyMs);
+      }
+      const observed = observedRoute2(configuredRoute, extracted.actualModel);
+      if (observed === undefined) {
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", "provider responded with a model outside the configured route", latencyMs, false, { actualModel: extracted.actualModel, modelIdentity: "unverified" });
+      }
+      return seatSuccess(request, config2.family, configuredRoute.primary, extracted.actualModel, observed, answer, latencyMs, { credentialPath: "api-key" });
+    },
+    async probe(context) {
+      return healthFromResponse(await adapter.invoke({
+        context,
+        seatId: `health-${config2.family}`,
+        role: "health",
+        prompt: healthPrompt
+      }));
+    }
+  };
+  return adapter;
+}
+var JsonStreamEventSchema = exports_external.object({ type: exports_external.string().min(1) }).passthrough();
+var OmpContentBlockSchema = exports_external.discriminatedUnion("type", [
+  exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }).passthrough(),
+  exports_external.object({ type: exports_external.literal("thinking"), thinking: exports_external.string() }).passthrough()
+]);
+var OmpMessageSchema = exports_external.object({
+  role: exports_external.enum(["user", "assistant"]),
+  content: exports_external.array(OmpContentBlockSchema),
+  provider: exports_external.string().min(1).optional(),
+  model: exports_external.string().min(1).optional()
+});
+var OmpMessageEventSchema = exports_external.object({
+  type: exports_external.enum(["message_start", "message_end"]),
+  message: OmpMessageSchema
+});
+var OmpSessionEventSchema = exports_external.object({
+  type: exports_external.literal("session"),
+  version: exports_external.number().int().positive(),
+  id: exports_external.string().min(1)
+});
+var OmpMessageUpdateSchema = exports_external.object({
+  type: exports_external.literal("message_update"),
+  assistantMessageEvent: exports_external.object({
+    type: exports_external.enum(["thinking_start", "thinking_end", "text_start", "text_delta", "text_end"])
+  })
+});
+var OmpTurnEndSchema = exports_external.object({
+  type: exports_external.literal("turn_end"),
+  message: OmpMessageSchema
+});
+var OmpAgentEndSchema = exports_external.object({
+  type: exports_external.literal("agent_end"),
+  messages: exports_external.array(OmpMessageSchema).min(1)
+});
+var anthropicReasoningEffort = "max";
+var agyReasoningEffort = "high";
+var grokReasoningEffort = "default";
+var codexReasoningEffort = "xhigh";
+var CodexIdentitySchema = exports_external.object({
+  workdir: exports_external.string().min(1),
+  model: exports_external.string().min(1),
+  provider: exports_external.literal("openai"),
+  approval: exports_external.literal("never"),
+  sandbox: exports_external.literal("read-only"),
+  "reasoning effort": exports_external.literal(codexReasoningEffort)
+});
+var AgyEventEnvelopeSchema = exports_external.object({ event: exports_external.string().min(1) }).passthrough();
+var AgyInitEventSchema = exports_external.object({
+  event: exports_external.literal("init"),
+  init: exports_external.object({
+    model: exports_external.string().min(1),
+    cwd: exports_external.string().min(1),
+    tools: exports_external.array(exports_external.string().min(1))
+  })
+});
+var AgyToolEventSchema = exports_external.object({
+  event: exports_external.literal("step_update"),
+  step_update: exports_external.object({
+    step_index: exports_external.number().int().nonnegative(),
+    state: exports_external.enum(["ACTIVE", "DONE"]),
+    step_type: exports_external.literal("tool"),
+    tool_name: exports_external.string().min(1),
+    tool_info: exports_external.object({
+      parameters: exports_external.object({ AbsolutePath: exports_external.string().min(1) }).passthrough()
+    })
+  })
+});
+var AgyResultEventSchema = exports_external.object({
+  event: exports_external.literal("result"),
+  result: exports_external.object({
+    status: exports_external.literal("SUCCESS"),
+    structured_output: exports_external.record(exports_external.string(), exports_external.unknown())
+  })
+});
+var GrokInitEventSchema = exports_external.object({
+  type: exports_external.literal("system"),
+  subtype: exports_external.literal("init"),
+  session_id: exports_external.string().min(1),
+  apiKeySource: exports_external.literal("oauth"),
+  model: exports_external.string().min(1),
+  cwd: exports_external.string().min(1),
+  permissionMode: exports_external.literal("plan"),
+  tools: exports_external.array(exports_external.string()),
+  mcp_servers: exports_external.array(exports_external.unknown()),
+  skills: exports_external.array(exports_external.string())
+});
+var GrokContentBlockSchema = exports_external.discriminatedUnion("type", [
+  exports_external.object({ type: exports_external.literal("text"), text: exports_external.string() }),
+  exports_external.object({ type: exports_external.literal("thinking"), thinking: exports_external.string(), signature: exports_external.string() })
+]);
+var GrokAssistantEventSchema = exports_external.object({
+  type: exports_external.literal("assistant"),
+  message: exports_external.object({
+    type: exports_external.literal("message"),
+    role: exports_external.literal("assistant"),
+    model: exports_external.string().min(1),
+    content: exports_external.array(GrokContentBlockSchema).min(1),
+    stop_reason: exports_external.literal("end_turn")
+  }),
+  session_id: exports_external.string().min(1)
+});
+var GrokResultEventSchema = exports_external.object({
+  type: exports_external.literal("result"),
+  subtype: exports_external.literal("success"),
+  is_error: exports_external.literal(false),
+  num_turns: exports_external.literal(1),
+  result: exports_external.string().min(1),
+  stop_reason: exports_external.literal("end_turn"),
+  modelUsage: exports_external.record(exports_external.string().min(1), exports_external.unknown()),
+  session_id: exports_external.string().min(1),
+  total_cost_usd: exports_external.number().nonnegative().optional()
+});
+var councilAnswerJsonSchema = JSON.stringify({
+  type: "object",
+  additionalProperties: false,
+  required: ["recommendation", "evidence", "assumptions", "risks", "uncertainty", "decisiveTest"],
+  properties: {
+    recommendation: { type: "string", minLength: 1 },
+    evidence: { type: "array", items: { type: "string", minLength: 1 } },
+    assumptions: { type: "array", items: { type: "string", minLength: 1 } },
+    risks: { type: "array", items: { type: "string", minLength: 1 } },
+    uncertainty: { type: "string", minLength: 1 },
+    decisiveTest: { type: "string", minLength: 1 }
+  }
+});
+function parseFailure(code, actualModel) {
+  return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
+}
+function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt) {
+  const normalised = stderr.replace(/\r\n/g, `
+`);
+  const userPrefix = `
+user
+${expectedPrompt.replace(/\r\n/g, `
+`)}
+`;
+  const promptStart = normalised.indexOf(userPrefix);
+  if (promptStart < 0 || normalised.lastIndexOf(userPrefix) !== promptStart) {
+    return parseFailure("identity-unverified");
+  }
+  const rendererPreamble = normalised.slice(0, promptStart);
+  const headers = [
+    ...rendererPreamble.matchAll(/(?:^|\n)OpenAI Codex v[^\n]+\n--------\n([\s\S]*?)\n--------(?=\n|$)/g)
+  ];
+  const header = headers[0];
+  if (headers.length !== 1 || header === undefined || workingDirectory === undefined || !isAbsolute3(workingDirectory)) {
+    return parseFailure("identity-unverified");
+  }
+  const fields = {};
+  for (const line of header[1]?.split(`
+`) ?? []) {
+    const separator = line.indexOf(":");
+    if (separator <= 0)
+      return parseFailure("identity-unverified");
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!key || !value || fields[key] !== undefined) {
+      return parseFailure("identity-unverified", fields.model);
+    }
+    fields[key] = value;
+  }
+  const identity = CodexIdentitySchema.safeParse(fields);
+  const actualModel = identity.success ? identity.data.model : fields.model;
+  if (!identity.success || !isAbsolute3(identity.data.workdir) || canonicalPath(identity.data.workdir) !== canonicalPath(workingDirectory)) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const responseTranscript = normalised.slice(promptStart + userPrefix.length);
+  const answerMarker = `codex
+`;
+  const tokenSuffix = responseTranscript.match(/\ntokens used\n([\d,]+)\n?$/);
+  if (tokenSuffix?.index === undefined) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const renderedMessages = responseTranscript.slice(0, tokenSuffix.index);
+  if (/(?:^|\n)model rerouted: [^\n]+ -> [^\n]+(?:\n|$)/i.test(renderedMessages)) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  if (/(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(renderedMessages)) {
+    return parseFailure("unsafe-tool-isolation", actualModel);
+  }
+  if (!renderedMessages.startsWith(answerMarker)) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const answers = renderedMessages.slice(answerMarker.length).split(`
+${answerMarker}`).map((value) => value.trim());
+  for (const renderedAnswer of answers) {
+    let value;
+    try {
+      value = JSON.parse(renderedAnswer);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (!CouncilAnswerSchema.safeParse(value).success) {
+      return parseFailure("identity-unverified", actualModel);
+    }
+  }
+  const rawAnswer = stdout.trim();
+  const normalisedAnswer = stdout.replace(/\r\n/g, `
+`).trim();
+  if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  const tokensUsed = Number.parseInt(tokenSuffix[1]?.replace(/,/g, "") ?? "", 10);
+  return {
+    status: "ok",
+    actualModel: identity.data.model,
+    rawAnswer,
+    observedEffort: identity.data["reasoning effort"],
+    ...Number.isSafeInteger(tokensUsed) && tokensUsed >= 0 ? { usage: { inputTokens: tokensUsed } } : {}
+  };
+}
+function containsUnsafeToolNode(value) {
+  if (Array.isArray(value))
+    return value.some(containsUnsafeToolNode);
+  if (!isRecord(value))
+    return false;
+  if (typeof value.type === "string" && /tool|browser|mcp|bash|read_file|write_file|edit_file/i.test(value.type) || typeof value.step_type === "string" && /tool|subagent|browser|mcp|bash|read_file|write_file|edit_file/i.test(value.step_type)) {
+    return true;
+  }
+  if (Object.keys(value).some((key) => /^(?:toolName|toolCallId|tool_name|tool_info|browser|mcp)$/i.test(key))) {
+    return true;
+  }
+  return Object.values(value).some(containsUnsafeToolNode);
+}
+function canonicalPath(path) {
+  const canonical = normalize(resolve3(path));
+  return process.platform === "win32" ? canonical.toLocaleLowerCase() : canonical;
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null;
+}
+function extractAgyOutput(stdout, workingDirectory, _stderr, _prompt, requestedModel) {
+  let actualModel;
+  let rawAnswer;
+  let sawPromptRead = false;
+  let sawTerminalResult = false;
+  const expectedWorkingDirectory = workingDirectory !== undefined && isAbsolute3(workingDirectory) ? canonicalPath(workingDirectory) : undefined;
+  const expectedPromptPath = expectedWorkingDirectory === undefined ? undefined : canonicalPath(join3(expectedWorkingDirectory, "council-prompt.txt"));
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim())
+      continue;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    const envelope = AgyEventEnvelopeSchema.safeParse(value);
+    if (!envelope.success || sawTerminalResult) {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (envelope.data.event === "init") {
+      const init = AgyInitEventSchema.safeParse(value);
+      if (actualModel !== undefined)
+        return parseFailure("identity-unverified", actualModel);
+      if (!init.success) {
+        const reportedModel = isRecord(value) && isRecord(value.init) && typeof value.init.model === "string" && value.init.model.trim() ? value.init.model : undefined;
+        return parseFailure(reportedModel === undefined ? "identity-unverified" : "unsafe-tool-isolation", reportedModel);
+      }
+      actualModel = init.data.init.model;
+      if (expectedWorkingDirectory === undefined || !isAbsolute3(init.data.init.cwd) || canonicalPath(init.data.init.cwd) !== expectedWorkingDirectory || !init.data.init.tools.includes("view_file")) {
+        return parseFailure("unsafe-tool-isolation", actualModel);
+      }
+      continue;
+    }
+    if (envelope.data.event === "step_update") {
+      const stepUpdate = isRecord(value) && isRecord(value.step_update) ? value.step_update : undefined;
+      if (stepUpdate?.step_type === "tool") {
+        const tool = AgyToolEventSchema.safeParse(value);
+        if (!tool.success || expectedPromptPath === undefined) {
+          return parseFailure("unsafe-tool-isolation", actualModel);
+        }
+        const reportedPath = tool.data.step_update.tool_info.parameters.AbsolutePath;
+        if (tool.data.step_update.tool_name !== "view_file" || !isAbsolute3(reportedPath) || canonicalPath(reportedPath) !== expectedPromptPath) {
+          return parseFailure("unsafe-tool-isolation", actualModel);
+        }
+        if (tool.data.step_update.state === "DONE")
+          sawPromptRead = true;
+        continue;
+      }
+      if (containsUnsafeToolNode(value)) {
+        return parseFailure("unsafe-tool-isolation", actualModel);
+      }
+      continue;
+    }
+    if (envelope.data.event === "result") {
+      const result = AgyResultEventSchema.safeParse(value);
+      if (!result.success)
+        return parseFailure("identity-unverified", actualModel);
+      rawAnswer = JSON.stringify(result.data.result.structured_output);
+      sawTerminalResult = true;
+      continue;
+    }
+    if (/tool|browser|subagent/i.test(envelope.data.event) || containsUnsafeToolNode(value)) {
+      return parseFailure("unsafe-tool-isolation", actualModel);
+    }
+  }
+  if (actualModel === undefined || rawAnswer === undefined) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  if (actualModel !== requestedModel) {
+    return parseFailure("identity-unverified", actualModel);
+  }
+  if (!sawPromptRead)
+    return parseFailure("unsafe-tool-isolation", actualModel);
+  return { status: "ok", actualModel, rawAnswer };
+}
+function grokReportedModel(value) {
+  if (!isRecord(value))
+    return;
+  if (typeof value.model === "string" && value.model.trim())
+    return value.model;
+  return isRecord(value.message) && typeof value.message.model === "string" && value.message.model.trim() ? value.message.model : undefined;
+}
+function grokInitViolatesIsolation(value, workingDirectory) {
+  if (!isRecord(value))
+    return false;
+  const cwd = typeof value.cwd === "string" ? value.cwd : undefined;
+  return typeof value.permissionMode === "string" && value.permissionMode !== "plan" || cwd !== undefined && (workingDirectory === undefined || !isAbsolute3(cwd) || canonicalPath(cwd) !== canonicalPath(workingDirectory));
+}
+function extractGrokOutput(stdout, workingDirectory) {
+  let state = "await-init";
+  let sessionId;
+  let actualModel;
+  let rawAnswer;
+  let totalCostUsd;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim())
+      continue;
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (containsUnsafeToolNode(value)) {
+      return parseFailure("unsafe-tool-isolation", grokReportedModel(value) ?? actualModel);
+    }
+    if (!isRecord(value) || typeof value.type !== "string") {
+      return parseFailure("identity-unverified", actualModel);
+    }
+    if (value.type === "system") {
+      const init = GrokInitEventSchema.safeParse(value);
+      const reportedModel = grokReportedModel(value);
+      if (state !== "await-init" || !init.success || workingDirectory === undefined || !isAbsolute3(workingDirectory) || !isAbsolute3(init.data.cwd) || canonicalPath(init.data.cwd) !== canonicalPath(workingDirectory)) {
+        return parseFailure(grokInitViolatesIsolation(value, workingDirectory) ? "unsafe-tool-isolation" : "identity-unverified", reportedModel);
+      }
+      sessionId = init.data.session_id;
+      actualModel = init.data.model;
+      state = "await-assistant";
+      continue;
+    }
+    if (value.type === "assistant") {
+      const assistant = GrokAssistantEventSchema.safeParse(value);
+      const reportedModel = grokReportedModel(value);
+      if (state !== "await-assistant" || !assistant.success || sessionId === undefined || actualModel === undefined || assistant.data.session_id !== sessionId || assistant.data.message.model !== actualModel) {
+        return parseFailure("identity-unverified", reportedModel ?? actualModel);
+      }
+      rawAnswer = "";
+      for (const block of assistant.data.message.content) {
+        if (block.type === "text")
+          rawAnswer += block.text;
+      }
+      if (!rawAnswer.trim())
+        return parseFailure("identity-unverified", actualModel);
+      state = "await-result";
+      continue;
+    }
+    if (value.type === "result") {
+      const result = GrokResultEventSchema.safeParse(value);
+      if (state !== "await-result" || !result.success || sessionId === undefined || actualModel === undefined || rawAnswer === undefined || result.data.session_id !== sessionId || result.data.result !== rawAnswer) {
+        return parseFailure("identity-unverified", actualModel);
+      }
+      const usageModels = Object.keys(result.data.modelUsage);
+      if (usageModels.length !== 1 || usageModels[0] !== actualModel) {
+        return parseFailure("identity-unverified", actualModel);
+      }
+      totalCostUsd = result.data.total_cost_usd;
+      state = "closed";
+      continue;
+    }
+    return parseFailure("identity-unverified", actualModel);
+  }
+  return state === "closed" && actualModel !== undefined && rawAnswer !== undefined ? {
+    status: "ok",
+    actualModel,
+    rawAnswer,
+    ...totalCostUsd === undefined ? {} : { usage: { totalCostUsd } }
+  } : parseFailure("identity-unverified", actualModel);
+}
+function observedRoute2(route, actualModel) {
+  if (actualModel === route.primary)
+    return "primary";
+  return route.fallbacks.includes(actualModel) ? "same-provider-fallback" : undefined;
+}
+function quotaExhaustion(stderr) {
+  if (!stderr)
+    return;
+  const line = stderr.split(/\r?\n/).map((value) => value.trim()).find((value) => /usage limit|quota|out of credit|insufficient_quota|rate limit exceeded/i.test(value));
+  if (line === undefined)
+    return;
+  const resetsAt = /try again at ([^.]+)/i.exec(line)?.[1]?.trim();
+  return resetsAt ? `Subscription quota exhausted; the provider reports it resets at ${resetsAt}.` : `Subscription quota exhausted: ${line.slice(0, 200)}`;
+}
+function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
+  const route = (context) => context.registry[config2.family];
+  const adapter = {
+    family: config2.family,
+    transport: "subscription-cli",
+    async availability(context) {
+      const configurationError = config2.configurationError?.();
+      const executable = resolveExecutable();
+      return {
+        status: configurationError ? "unconfigured" : executable && isAbsolute3(executable) ? "available" : executable ? "unsafe-transport" : "unconfigured",
+        provider: config2.family,
+        model: route(context).primary,
+        reason: configurationError ?? (executable && isAbsolute3(executable) ? "" : executable ? `${config2.executableName} executable is not absolute` : `${config2.executableName} executable not found`)
+      };
+    },
+    async invoke(request) {
+      const configuredRoute = route(request.context);
+      const configurationError = config2.configurationError?.();
+      if (configurationError) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-subscription-profile", configurationError, 0);
+      }
+      const executable = resolveExecutable();
+      if (!executable) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-executable", `${config2.executableName} executable not found`, 0);
+      }
+      if (!isAbsolute3(executable)) {
+        return seatError(request, config2.family, configuredRoute.primary, "skipped", "unsafe-transport", `${config2.executableName} executable is not absolute`, 0);
+      }
+      const result = await transport.run(config2.request(executable, configuredRoute, request.prompt, request.context.timeoutMs));
+      if (result.status !== "ok") {
+        const quota = quotaExhaustion(result.stderr);
+        if (quota !== undefined) {
+          capture(request, config2.family, "provider-failure", quota);
+          return seatError(request, config2.family, configuredRoute.primary, "failed", "quota-exhausted", quota, result.durationMs);
+        }
+        capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
+        return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
+      }
+      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt), configuredRoute.primary);
+      if (output.status === "failed") {
+        capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
+        return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
+      }
+      const seatRoute = observedRoute2(configuredRoute, output.actualModel);
+      if (!seatRoute) {
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "identity-unverified", `${config2.executableName} reported a model outside the approved route`, result.durationMs, false, { actualModel: output.actualModel, modelIdentity: "unverified" }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
+      }
+      const answer = parseAnswer(request, config2.family, output.rawAnswer, false);
+      if (!answer) {
+        return seatError(request, config2.family, configuredRoute.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", result.durationMs, false, {
+          actualModel: output.actualModel,
+          modelIdentity: "verified",
+          route: seatRoute
+        }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
+      }
+      return seatSuccess(request, config2.family, configuredRoute.primary, output.actualModel, seatRoute, answer, result.durationMs, {
+        requestedEffort: config2.requestedEffort,
+        ...output.observedEffort === undefined ? {} : { observedEffort: output.observedEffort },
+        credentialPath: "subscription",
+        ...output.usage === undefined ? {} : { usage: output.usage }
+      });
+    },
+    async probe(context) {
+      return healthFromResponse(await adapter.invoke({
+        context,
+        seatId: `health-${config2.family}`,
+        role: "health",
+        prompt: healthPrompt
+      }));
+    }
+  };
+  return adapter;
+}
+var ompIsolationConfig = [
+  "advisor:",
+  "  enabled: false",
+  "prewalk:",
+  "  enabled: false",
+  "disabledProviders:",
+  "  - native",
+  "  - claude",
+  "  - codex",
+  "  - gemini",
+  "  - opencode",
+  "  - github",
+  "  - agents",
+  "  - agents-md"
+].join(`
+`);
+function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("codex") ?? undefined) {
+  return createSubscriptionCliAdapter({
+    family: "openai",
+    executableName: "codex",
+    requestedEffort: codexReasoningEffort,
+    request: (executable, route, prompt, timeoutMs) => {
+      const councilPrompt = structuredPrompt(prompt);
+      return {
+        executable,
+        args: [
+          "exec",
+          "--skip-git-repo-check",
+          "--strict-config",
+          "--model",
+          route.primary,
+          "--output-schema",
+          (workingDirectory) => join3(workingDirectory, "council-answer-schema.json"),
+          "--sandbox",
+          "read-only",
+          "--ephemeral",
+          "--ignore-user-config",
+          "--ignore-rules",
+          "-c",
+          `model_reasoning_effort="${codexReasoningEffort}"`,
+          "-c",
+          'web_search="disabled"',
+          "--disable",
+          "shell_tool",
+          "--disable",
+          "unified_exec",
+          "--disable",
+          "browser_use",
+          "--disable",
+          "browser_use_external",
+          "--disable",
+          "browser_use_full_cdp_access",
+          "--disable",
+          "computer_use",
+          "--disable",
+          "view_image",
+          "--disable",
+          "image_generation",
+          "--disable",
+          "apps",
+          "--disable",
+          "plugins",
+          "--disable",
+          "remote_plugin",
+          "--disable",
+          "multi_agent",
+          "--disable",
+          "hooks",
+          "--disable",
+          "skill_search",
+          "--disable",
+          "skill_mcp_dependency_install",
+          "--disable",
+          "workspace_dependencies",
+          "--color",
+          "never",
+          "-"
+        ],
+        stdin: councilPrompt,
+        timeoutMs,
+        cwd: tmpdir(),
+        files: {
+          "council-prompt.txt": councilPrompt,
+          "council-answer-schema.json": councilAnswerJsonSchema
+        }
+      };
+    },
+    output: extractCodexOutput
+  }, transport, resolveExecutable);
+}
+function resolveAgyExecutable() {
+  const onPath = Bun.which("agy");
+  if (onPath)
+    return onPath;
+  const localAppData = process.env.LOCALAPPDATA;
+  if (!localAppData || process.platform !== "win32")
+    return;
+  const candidate = join3(localAppData, "agy", "bin", "agy.exe");
+  return existsSync2(candidate) ? candidate : undefined;
+}
+function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveAgyExecutable) {
+  return createSubscriptionCliAdapter({
+    family: "google",
+    executableName: "agy",
+    requestedEffort: agyReasoningEffort,
+    request: (executable, route, prompt, timeoutMs) => ({
+      executable,
+      args: [
+        "--sandbox",
+        "--mode",
+        "plan",
+        "--effort",
+        agyReasoningEffort,
+        "--output-format",
+        "stream-json",
+        "--json-schema",
+        councilAnswerJsonSchema,
+        "--model",
+        route.primary,
+        "--print-timeout",
+        `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`,
+        "-p",
+        (workingDirectory) => `Read ${join3(workingDirectory, "council-prompt.txt")}, follow it exactly, and do not use any other tool.`
+      ],
+      stdin: "",
+      timeoutMs,
+      cwd: tmpdir(),
+      files: {
+        "council-prompt.txt": structuredPrompt(prompt),
+        ".gemini/antigravity-cli/settings.json": (workingDirectory) => JSON.stringify({
+          enableTelemetry: false,
+          trustedWorkspaces: [workingDirectory],
+          permissions: {
+            allow: [`read_file(${join3(workingDirectory, "council-prompt.txt")})`]
+          }
+        })
+      },
+      workingDirectoryEnv: ["HOME", "USERPROFILE"]
+    }),
+    output: extractAgyOutput
+  }, transport, resolveExecutable);
+}
+function resolveGrokExecutable() {
+  return Bun.which("grok") ?? undefined;
+}
+var GROK_DISALLOWED_TOOLS = [
+  "run_terminal_command",
+  "write",
+  "search_replace",
+  "use_tool",
+  "search_tool",
+  "workflow",
+  "monitor",
+  "scheduler_create",
+  "scheduler_delete",
+  "scheduler_list",
+  "image_gen",
+  "image_edit",
+  "image_to_video",
+  "reference_to_video"
+];
+function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveGrokExecutable, modelOverride = () => process.env.GROK_CLI_MODEL?.trim() || undefined) {
+  return createSubscriptionCliAdapter({
+    family: "xai",
+    executableName: "grok",
+    requestedEffort: grokReasoningEffort,
+    request: (executable, _route, prompt, timeoutMs) => {
+      const councilPrompt = `${grokInlineAnswerGuard}
+
+${structuredPrompt(prompt)}`;
+      const override = modelOverride()?.trim();
+      return {
+        executable,
+        args: [
+          "--no-auto-update",
+          "--prompt-file",
+          (workingDirectory) => join3(workingDirectory, "council-prompt.txt"),
+          "--output-format",
+          "streaming-messages-json",
+          "--sandbox",
+          "read-only",
+          "--permission-mode",
+          "plan",
+          "--no-plan",
+          "--no-subagents",
+          "--no-memory",
+          "--disable-web-search",
+          "--disallowed-tools",
+          GROK_DISALLOWED_TOOLS.join(","),
+          "--max-turns",
+          "1",
+          "--verbatim",
+          ...override ? ["-m", override] : []
+        ],
+        stdin: "",
+        timeoutMs,
+        cwd: tmpdir(),
+        files: { "council-prompt.txt": councilPrompt }
+      };
+    },
+    output: extractGrokOutput
+  }, transport, resolveExecutable);
+}
+var xaiUnconfiguredReason = "set COUNCIL_XAI_API_KEY in ~/.claude/council/providers.env, or install the grok CLI on PATH";
+function withTransportResolution(adapter, transportResolution) {
+  return {
+    ...adapter,
+    transportResolution,
+    async availability(context) {
+      const availability = await adapter.availability(context);
+      return availability.status === "available" ? { ...availability, reason: transportResolution.reason } : availability;
+    },
+    async probe(context) {
+      const health = await adapter.probe(context);
+      return health.status === "healthy" ? { ...health, reason: transportResolution.reason } : health;
+    }
+  };
+}
+function createUnconfiguredXaiAdapter() {
+  const family = "xai";
+  const transportResolution = {
+    preferred: "subscription-cli",
+    effective: null,
+    reason: xaiUnconfiguredReason
+  };
+  const adapter = {
+    family,
+    transport: "http",
+    transportResolution,
+    async availability(context) {
+      return {
+        status: "unconfigured",
+        provider: family,
+        model: context.registry.xai.primary,
+        reason: xaiUnconfiguredReason
+      };
+    },
+    async invoke(request) {
+      return seatError(request, family, request.context.registry.xai.primary, "skipped", "missing-xai-transport", xaiUnconfiguredReason, 0);
+    },
+    async probe(context) {
+      return healthFromResponse(await adapter.invoke({
+        context,
+        seatId: "health-xai",
+        role: "health",
+        prompt: healthPrompt
+      }));
+    }
+  };
+  return adapter;
+}
+function createXaiAdapter(options = {}) {
+  const env = options.env ?? process.env;
+  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
+  const apiKeyPresent = Boolean(env.COUNCIL_XAI_API_KEY);
+  const httpAdapter = () => createHttpAdapter({
+    family: "xai",
+    credential: "COUNCIL_XAI_API_KEY",
+    endpoint: "https://api.x.ai/v1/chat/completions",
+    allowRegistryFallback: false
+  }, options.httpTransport);
+  const cliAdapter = (resolved) => createXaiSubscriptionAdapter(options.cliTransport, () => resolved, options.modelOverride ?? (() => env.GROK_CLI_MODEL?.trim() || undefined));
+  if (options.transportPreference === "http" && apiKeyPresent) {
+    return withTransportResolution(httpAdapter(), {
+      preferred: "http",
+      effective: "http",
+      reason: "HTTPS was explicitly preferred and COUNCIL_XAI_API_KEY is set; the grok CLI was not used."
+    });
+  }
+  if (executable) {
+    return withTransportResolution(cliAdapter(executable), {
+      preferred: "subscription-cli",
+      effective: "subscription-cli",
+      reason: apiKeyPresent ? "The grok subscription CLI resolved on PATH and is preferred over the metered API key." : "The grok subscription CLI resolved on PATH."
+    });
+  }
+  if (apiKeyPresent) {
+    return withTransportResolution(httpAdapter(), {
+      preferred: "subscription-cli",
+      effective: "http",
+      reason: "No grok CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable."
+    });
+  }
+  return createUnconfiguredXaiAdapter();
+}
+function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutable = () => Bun.which("claude") ?? undefined) {
+  const family = "anthropic";
+  const adapter = {
+    family,
+    transport: "cli",
+    async availability(context) {
+      const executable = resolveExecutable();
+      return {
+        status: executable && isAbsolute3(executable) ? "available" : executable ? "unsafe-transport" : "unconfigured",
+        provider: family,
+        model: context.registry.anthropic.primary,
+        reason: executable && isAbsolute3(executable) ? "" : executable ? "claude executable is not absolute" : "claude executable not found"
+      };
+    },
+    async invoke(request) {
+      const route = request.context.registry.anthropic;
+      const executable = resolveExecutable();
+      if (!executable) {
+        return seatError(request, family, route.primary, "skipped", "missing-executable", "claude executable not found", 0);
+      }
+      if (!isAbsolute3(executable)) {
+        return seatError(request, family, route.primary, "skipped", "unsafe-transport", "claude executable is not absolute", 0);
+      }
+      const result = await transport.run({
+        executable,
+        args: [
+          "-p",
+          "--model",
+          route.primary,
+          "--effort",
+          anthropicReasoningEffort,
+          "--safe-mode",
+          "--no-session-persistence",
+          "--tools",
+          "",
+          "--output-format",
+          "json"
+        ],
+        stdin: structuredPrompt(request.prompt),
+        timeoutMs: request.context.timeoutMs,
+        cwd: tmpdir()
+      });
+      if (result.status !== "ok") {
+        if (result.stderr)
+          capture(request, family, "provider-failure", result.stderr);
+        return seatError(request, family, route.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", safeExternalMessage(result.stderr, "claude process failed"), result.durationMs);
+      }
+      let output;
+      try {
+        output = JSON.parse(result.stdout);
+      } catch {
+        capture(request, family, "invalid-provider-response", result.stdout);
+        return seatError(request, family, route.primary, "failed", "invalid-provider-response", "claude output was not valid JSON", result.durationMs);
+      }
+      const parsed = ClaudeResponseSchema.safeParse(output);
+      if (!parsed.success) {
+        capture(request, family, "invalid-provider-response", result.stdout);
+        return seatError(request, family, route.primary, "failed", "identity-unverified", "claude output did not include model identity", result.durationMs);
+      }
+      const actualModels = Object.keys(parsed.data.modelUsage).sort();
+      const actualModel = actualModels[0];
+      if (actualModel === undefined) {
+        return seatError(request, family, route.primary, "failed", "identity-unverified", "claude output did not include model identity", result.durationMs);
+      }
+      if (actualModels.length > 1) {
+        return seatError(request, family, route.primary, "failed", "identity-unverified", `claude billed ${actualModels.length} models for one seat, so the responding model is not attributable`, result.durationMs, false, { actualModel, modelIdentity: "unverified" }, { requestedEffort: anthropicReasoningEffort, credentialPath: "subscription" });
+      }
+      const observed = observedRoute2(route, actualModel);
+      if (observed === undefined) {
+        return seatError(request, family, route.primary, "failed", "identity-unverified", "claude responded with a model outside the configured route", result.durationMs, false, { actualModel, modelIdentity: "unverified" }, { requestedEffort: anthropicReasoningEffort, credentialPath: "subscription" });
+      }
+      const answer = parseAnswer(request, family, parsed.data.result);
+      if (!answer) {
+        return seatError(request, family, route.primary, "failed", "invalid-structured-answer", "provider answer did not match the council schema", result.durationMs);
+      }
+      return seatSuccess(request, family, route.primary, actualModel, observed, answer, result.durationMs, { requestedEffort: anthropicReasoningEffort, credentialPath: "subscription" });
+    },
+    async probe(context) {
+      return healthFromResponse(await adapter.invoke({
+        context,
+        seatId: "health-anthropic",
+        role: "health",
+        prompt: healthPrompt
+      }));
+    }
+  };
+  return adapter;
 }
 
 // src/providers/anthropic-cli.ts
@@ -19986,6 +20048,39 @@ var SessionProtocolSchema = exports_external.strictObject({
     });
   }
 });
+var PersistedSeatRetrySchema = exports_external.strictObject({
+  seatId: NonEmptyStringSchema3,
+  provider: ProviderFamilySchema,
+  role: NonEmptyStringSchema3,
+  attempt: exports_external.literal(2),
+  reason: exports_external.strictObject({
+    status: exports_external.enum(["failed", "timed-out", "cancelled"]),
+    error: SeatErrorSchema
+  })
+});
+var PersistedRoundSchema = exports_external.strictObject({
+  round: exports_external.number().int().min(1).max(3),
+  phase: exports_external.enum(["analysis", "rebuttal", "refinement"]),
+  responses: exports_external.array(SeatResponseSchema).min(1),
+  retries: exports_external.array(PersistedSeatRetrySchema)
+});
+var ExecutionSnapshotSchema = exports_external.strictObject({
+  rounds: exports_external.array(PersistedRoundSchema).min(1).max(3),
+  quorum: QuorumEvaluationSchema,
+  rebuttalObligation: exports_external.strictObject({
+    minimumSuccessfulResponses: exports_external.number().int().nonnegative(),
+    successfulResponses: exports_external.number().int().nonnegative(),
+    satisfied: exports_external.boolean()
+  }),
+  synthesisEligible: exports_external.boolean()
+});
+var DataAvailabilitySchema = exports_external.enum(["unavailable", "captured"]);
+var PersistedDecisionStateSchema = exports_external.enum(["awaiting-adjudication", "not-adjudicable"]);
+var DecisionStateSchema = exports_external.enum([
+  "awaiting-adjudication",
+  "adjudicated",
+  "not-adjudicable"
+]);
 var SessionRecordShape = {
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
@@ -19999,22 +20094,45 @@ var SessionRecordShape = {
   assignments: AssignmentHistorySchema.default([]),
   summary: NonEmptyStringSchema3.optional()
 };
-var GeneralSessionRecordSchema = exports_external.strictObject({
+var CurrentSessionRecordShape = {
+  ...SessionRecordShape,
+  schemaVersion: exports_external.literal(2),
+  decisionState: PersistedDecisionStateSchema,
+  execution: ExecutionSnapshotSchema
+};
+var LegacyGeneralSessionRecordSchema = exports_external.strictObject({
   ...SessionRecordShape,
   scope: exports_external.literal("general")
 });
-var ProjectSessionRecordSchema = exports_external.strictObject({
+var LegacyProjectSessionRecordSchema = exports_external.strictObject({
   ...SessionRecordShape,
   scope: exports_external.literal("project"),
   projectId: StorageIdSchema,
   projectDisplayName: SingleLineStringSchema.optional()
 });
-var SessionRecordSchema = exports_external.discriminatedUnion("scope", [GeneralSessionRecordSchema, ProjectSessionRecordSchema]).superRefine((record2, context) => {
+var CurrentGeneralSessionRecordSchema = exports_external.strictObject({
+  ...CurrentSessionRecordShape,
+  scope: exports_external.literal("general")
+});
+var CurrentProjectSessionRecordSchema = exports_external.strictObject({
+  ...CurrentSessionRecordShape,
+  scope: exports_external.literal("project"),
+  projectId: StorageIdSchema,
+  projectDisplayName: SingleLineStringSchema.optional()
+});
+function refineSessionRecord(record2, context) {
   if (record2.status === "completed" && record2.completedAt === undefined) {
     context.addIssue({
       code: "custom",
       path: ["completedAt"],
       message: "completed sessions require completedAt"
+    });
+  }
+  if (record2.completedAt !== undefined && Date.parse(record2.completedAt) < Date.parse(record2.startedAt)) {
+    context.addIssue({
+      code: "custom",
+      path: ["completedAt"],
+      message: "completedAt must not precede startedAt"
     });
   }
   const seatIds = new Set;
@@ -20051,7 +20169,35 @@ var SessionRecordSchema = exports_external.discriminatedUnion("scope", [GeneralS
     seatIds.add(assignment.seatId);
     lensNames.add(assignment.lensName);
   }
-});
+  if (!("schemaVersion" in record2))
+    return;
+  const adjudicable = record2.status === "completed" || record2.status === "degraded";
+  const expected = adjudicable ? "awaiting-adjudication" : "not-adjudicable";
+  if (record2.decisionState !== expected) {
+    context.addIssue({
+      code: "custom",
+      path: ["decisionState"],
+      message: `sessions with status ${record2.status} must persist decisionState ${expected}`
+    });
+  }
+}
+var SessionRecordSchema = exports_external.union([
+  exports_external.discriminatedUnion("scope", [
+    CurrentGeneralSessionRecordSchema,
+    CurrentProjectSessionRecordSchema
+  ]),
+  exports_external.discriminatedUnion("scope", [
+    LegacyGeneralSessionRecordSchema,
+    LegacyProjectSessionRecordSchema
+  ])
+]).superRefine(refineSessionRecord);
+var CurrentSessionRecordSchema = exports_external.discriminatedUnion("scope", [
+  CurrentGeneralSessionRecordSchema,
+  CurrentProjectSessionRecordSchema
+]).superRefine(refineSessionRecord);
+function sessionDataAvailability(record2) {
+  return "schemaVersion" in record2 ? "captured" : "unavailable";
+}
 var ChairAcceptanceRecordShape = {
   acceptanceId: StorageIdSchema,
   runId: StorageIdSchema,
@@ -20073,10 +20219,43 @@ var ChairAcceptanceRecordSchema = exports_external.discriminatedUnion("scope", [
   GeneralChairAcceptanceRecordSchema,
   ProjectChairAcceptanceRecordSchema
 ]);
+var ChairRulingRecordShape = {
+  rulingId: StorageIdSchema,
+  runId: StorageIdSchema,
+  motionId: StorageIdSchema,
+  title: SingleLineStringSchema,
+  decision: NonEmptyStringSchema3,
+  rationale: NonEmptyStringSchema3,
+  authorisedBy: SingleLineStringSchema,
+  followedSeats: exports_external.array(NonEmptyStringSchema3),
+  setAsideSeats: exports_external.array(NonEmptyStringSchema3),
+  dissentAcknowledged: exports_external.boolean(),
+  createdAt: TimestampSchema5
+};
+var GeneralChairRulingRecordSchema = exports_external.strictObject({
+  ...ChairRulingRecordShape,
+  scope: exports_external.literal("general")
+});
+var ProjectChairRulingRecordSchema = exports_external.strictObject({
+  ...ChairRulingRecordShape,
+  scope: exports_external.literal("project"),
+  projectId: StorageIdSchema
+});
+var ChairRulingRecordSchema = exports_external.discriminatedUnion("scope", [GeneralChairRulingRecordSchema, ProjectChairRulingRecordSchema]).superRefine((record2, context) => {
+  const overlap = record2.followedSeats.filter((seat) => record2.setAsideSeats.includes(seat));
+  if (overlap.length > 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["setAsideSeats"],
+      message: `a seat cannot be both followed and set aside: ${overlap.join(", ")}`
+    });
+  }
+});
 var ResolutionRecordShape = {
   resolutionId: StorageIdSchema,
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
+  rulingId: StorageIdSchema,
   title: SingleLineStringSchema,
   decision: NonEmptyStringSchema3,
   createdAt: TimestampSchema5
@@ -20221,12 +20400,16 @@ async function validatePersistedScope(directory) {
   const sessionPaths = await jsonFiles(join4(directory, "sessions"));
   const resolutionPaths = await jsonFiles(join4(directory, "resolutions"));
   const chairAcceptancePaths = await jsonFiles(join4(directory, "chair-acceptances"));
+  const chairRulingPaths = await jsonFiles(join4(directory, "chair-rulings"));
   const sessions = [];
   const resolutions = [];
   const chairAcceptances = [];
+  const chairRulings = [];
   const runIds = new Set;
   const resolutionIds = new Set;
   const acceptanceIds = new Set;
+  const rulingIds = new Set;
+  const ruledRunIds = new Set;
   const acceptedRunIds = new Set;
   const resolvedMotionIds = new Set;
   const motions = new Map;
@@ -20265,6 +20448,21 @@ async function validatePersistedScope(directory) {
     acceptedRunIds.add(acceptance.runId);
     chairAcceptances.push(acceptance);
   }
+  for (const path of chairRulingPaths) {
+    const ruling = await parsePersistedJson(path, ChairRulingRecordSchema, "chair ruling");
+    if (fileStem(path) !== ruling.rulingId) {
+      throw new Error(`Persisted chair ruling filename does not match rulingId: ${path}`);
+    }
+    if (rulingIds.has(ruling.rulingId)) {
+      throw new Error(`Duplicate persisted chair ruling id: ${ruling.rulingId}`);
+    }
+    if (ruledRunIds.has(ruling.runId)) {
+      throw new Error(`Duplicate persisted chair ruling for run: ${ruling.runId}`);
+    }
+    rulingIds.add(ruling.rulingId);
+    ruledRunIds.add(ruling.runId);
+    chairRulings.push(ruling);
+  }
   for (const path of resolutionPaths) {
     const resolution = await parsePersistedJson(path, ResolutionRecordSchema, "resolution");
     if (fileStem(path) !== resolution.resolutionId) {
@@ -20286,13 +20484,26 @@ async function validatePersistedScope(directory) {
       throw new Error(`Persisted chair acceptance has no matching degraded session: ${acceptance.acceptanceId}`);
     }
   }
+  for (const ruling of chairRulings) {
+    const session = sessions.find((candidate) => candidate.runId === ruling.runId);
+    if (!session || session.status !== "completed" && session.status !== "degraded" || session.motionId !== ruling.motionId || session.scope !== ruling.scope || session.scope === "project" && ruling.scope === "project" && session.projectId !== ruling.projectId) {
+      throw new Error(`Persisted chair ruling has no matching adjudicable session: ${ruling.rulingId}`);
+    }
+    if (session.status === "degraded" && !chairAcceptances.some(({ runId }) => runId === ruling.runId)) {
+      throw new Error(`Persisted chair ruling on a degraded session requires a chair acceptance: ${ruling.rulingId}`);
+    }
+  }
   for (const resolution of resolutions) {
     const session = sessions.find((candidate) => candidate.runId === resolution.runId);
     if (!session || session.status !== "completed" && !(session.status === "degraded" && chairAcceptances.some(({ runId }) => runId === session.runId)) || session.motionId !== resolution.motionId || session.scope !== resolution.scope || session.scope === "project" && resolution.scope === "project" && session.projectId !== resolution.projectId) {
       throw new Error(`Persisted resolution has no matching accepted session: ${resolution.resolutionId}`);
     }
+    const ruling = chairRulings.find((candidate) => candidate.rulingId === resolution.rulingId);
+    if (!ruling || ruling.runId !== resolution.runId || ruling.motionId !== resolution.motionId || ruling.decision !== resolution.decision) {
+      throw new Error(`Persisted resolution is not backed by a matching chair ruling: ${resolution.resolutionId}`);
+    }
   }
-  return { sessions, chairAcceptances, resolutions };
+  return { sessions, chairAcceptances, chairRulings, resolutions };
 }
 function serialiseJson(value) {
   return `${JSON.stringify(value, null, 2)}
@@ -20372,6 +20583,21 @@ function renderLedgerEntry(record2) {
   ].join(`
 `);
 }
+function renderChairRulingMarkdown(record2) {
+  const lines = [
+    `# Chair ruling ${record2.rulingId}`,
+    "",
+    `- Session: \`${record2.runId}\``,
+    `- Motion ID: \`${record2.motionId}\``,
+    `- Scope: \`${record2.scope}\``
+  ];
+  if (record2.scope === "project")
+    lines.push(`- Project ID: \`${record2.projectId}\``);
+  lines.push(`- Authorised by: ${record2.authorisedBy}`, `- Dissent acknowledged: ${record2.dissentAcknowledged ? "yes" : "no"}`, record2.followedSeats.length > 0 ? `- Seats followed: ${record2.followedSeats.map((seat) => `\`${seat}\``).join(", ")}` : "- Seats followed: none recorded", record2.setAsideSeats.length > 0 ? `- Seats set aside: ${record2.setAsideSeats.map((seat) => `\`${seat}\``).join(", ")}` : "- Seats set aside: none", `- Created: ${record2.createdAt}`, "", `## ${record2.title}`, "", record2.decision, "", "## Rationale", "", record2.rationale);
+  return `${lines.join(`
+`)}
+`;
+}
 async function removeCommittedFile(path, originalError) {
   try {
     await rm2(path, { force: true });
@@ -20431,7 +20657,7 @@ class CouncilStore {
     return AssignmentHistorySchema.parse(state.sessions.flatMap(({ assignments }) => assignments));
   }
   async writeSession(input) {
-    const record2 = SessionRecordSchema.parse(input);
+    const record2 = CurrentSessionRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
     await withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
@@ -20469,7 +20695,7 @@ class CouncilStore {
             } catch (error51) {
               throw new Error("Session serialisation produced invalid JSON", { cause: error51 });
             }
-            SessionRecordSchema.parse(value);
+            CurrentSessionRecordSchema.parse(value);
           }
         });
       } catch (error51) {
@@ -20527,6 +20753,73 @@ class CouncilStore {
       }
     });
   }
+  async appendChairRuling(input) {
+    const record2 = ChairRulingRecordSchema.parse(input);
+    const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
+    await withScopeWriteLock(directory, async () => {
+      const state = await validatePersistedScope(directory);
+      const session = state.sessions.find((candidate) => candidate.runId === record2.runId);
+      if (!session || session.status !== "completed" && session.status !== "degraded" || session.motionId !== record2.motionId || session.scope !== record2.scope || session.scope === "project" && record2.scope === "project" && session.projectId !== record2.projectId) {
+        throw new Error(`Chair ruling requires a matching adjudicable session: ${record2.runId}`);
+      }
+      if (session.status === "degraded" && !state.chairAcceptances.some(({ runId }) => runId === record2.runId)) {
+        throw new Error(`Chair ruling on a degraded session requires a chair acceptance first: ${record2.runId}`);
+      }
+      if (state.chairRulings.some(({ rulingId }) => rulingId === record2.rulingId)) {
+        throw new Error(`Duplicate chair ruling id: ${record2.rulingId}`);
+      }
+      if (state.chairRulings.some(({ runId }) => runId === record2.runId)) {
+        throw new Error(`Session already has a chair ruling: ${record2.runId}`);
+      }
+      const rulingsDirectory = join4(directory, "chair-rulings");
+      const jsonPath = join4(rulingsDirectory, `${record2.rulingId}.json`);
+      const markdownPath = join4(rulingsDirectory, `${record2.rulingId}.md`);
+      if (await Bun.file(jsonPath).exists() || await Bun.file(markdownPath).exists()) {
+        throw new Error(`Duplicate chair ruling id: ${record2.rulingId}`);
+      }
+      let markdownCommitted = false;
+      try {
+        await writeTextAtomically(markdownPath, renderChairRulingMarkdown(record2), {
+          replace: false
+        });
+        markdownCommitted = true;
+        await writeTextAtomically(jsonPath, serialiseJson(record2), {
+          replace: false,
+          validate: (content) => {
+            let value;
+            try {
+              value = JSON.parse(content);
+            } catch (error51) {
+              throw new Error("Chair ruling serialisation produced invalid JSON", { cause: error51 });
+            }
+            ChairRulingRecordSchema.parse(value);
+          }
+        });
+      } catch (error51) {
+        if (markdownCommitted)
+          await removeCommittedFile(markdownPath, error51);
+        throw error51;
+      }
+    });
+  }
+  async readDecisionStates(scope, projectId) {
+    const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(scope), projectId);
+    const state = await validatePersistedScope(directory);
+    return state.sessions.map((session) => {
+      const ruling = state.chairRulings.find(({ runId }) => runId === session.runId);
+      const resolution = state.resolutions.find(({ runId }) => runId === session.runId);
+      const adjudicable = session.status === "completed" || session.status === "degraded";
+      return {
+        runId: session.runId,
+        motionId: session.motionId,
+        status: session.status,
+        decisionState: ruling ? "adjudicated" : adjudicable ? "awaiting-adjudication" : "not-adjudicable",
+        dataAvailability: sessionDataAvailability(session),
+        ...ruling === undefined ? {} : { rulingId: ruling.rulingId },
+        ...resolution === undefined ? {} : { resolutionId: resolution.resolutionId }
+      };
+    });
+  }
   async appendResolution(input) {
     const record2 = ResolutionRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
@@ -20553,6 +20846,16 @@ class CouncilStore {
       }
       if (state.resolutions.some((resolution) => resolution.resolutionId === record2.resolutionId)) {
         throw new Error(`Duplicate resolution id: ${record2.resolutionId}`);
+      }
+      const ruling = state.chairRulings.find(({ rulingId }) => rulingId === record2.rulingId);
+      if (!ruling) {
+        throw new Error(`Resolution requires an existing chair ruling: ${record2.rulingId}`);
+      }
+      if (ruling.runId !== record2.runId || ruling.motionId !== record2.motionId) {
+        throw new Error("Resolution does not match its chair ruling");
+      }
+      if (ruling.decision !== record2.decision) {
+        throw new Error("Resolution decision does not match its chair ruling");
       }
       const resolutionsDirectory = join4(directory, "resolutions");
       const jsonPath = join4(resolutionsDirectory, `${record2.resolutionId}.json`);
@@ -21119,7 +21422,15 @@ var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_defa
 var EXECUTABLE_PATH = resolve6(import.meta.main ? Bun.main : import.meta.path);
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
-var BOOLEAN_FLAGS = new Set(["dry-run", "json", "contested", "help"]);
+var BOOLEAN_FLAGS = new Set([
+  "dry-run",
+  "json",
+  "contested",
+  "help",
+  "accept-degraded",
+  "dissent-acknowledged",
+  "no-dissent"
+]);
 var COMMON_RUN_FLAGS = new Set([
   "classification",
   "contested",
@@ -21143,6 +21454,25 @@ var COMMON_RUN_FLAGS = new Set([
 ]);
 var COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, "min-families"]);
 var REGISTRY_REPORT_FLAGS = new Set(["help", "json", "records-root", "registry"]);
+var ADJUDICATE_FLAGS = new Set([
+  "help",
+  "json",
+  "records-root",
+  "scope",
+  "project-id",
+  "run-id",
+  "decision",
+  "rationale",
+  "authorised-by",
+  "followed-seats",
+  "set-aside-seats",
+  "dissent-acknowledged",
+  "no-dissent",
+  "accept-degraded",
+  "acceptance-rationale",
+  "ruling-id",
+  "resolution-id"
+]);
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -21454,41 +21784,6 @@ function publicExecution(result) {
   const { motion: _motion, ...safeResult } = result;
   return safeResult;
 }
-function parseCouncilAnswer(value) {
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(value);
-  } catch {
-    return;
-  }
-  return CouncilAnswerSchema.safeParse(parsedJson).data;
-}
-function consensusRecommendation(result) {
-  const finalRound = result.rounds.at(-1);
-  if (finalRound === undefined)
-    return;
-  const recommendationsByFamily = new Map;
-  for (const response of finalRound.responses) {
-    if (response.status !== "ok")
-      continue;
-    const answer = parseCouncilAnswer(response.answer);
-    if (answer === undefined)
-      return;
-    const recommendation = answer.recommendation.trim();
-    const priorRecommendation = recommendationsByFamily.get(response.provider);
-    if (priorRecommendation !== undefined && priorRecommendation.toLocaleLowerCase() !== recommendation.toLocaleLowerCase()) {
-      return;
-    }
-    recommendationsByFamily.set(response.provider, recommendation);
-  }
-  if (recommendationsByFamily.size < result.quorum.minimumDistinctFamilies)
-    return;
-  const recommendations = [...recommendationsByFamily.values()];
-  const canonical = recommendations[0]?.toLocaleLowerCase();
-  if (canonical === undefined)
-    return;
-  return recommendations.every((recommendation) => recommendation.toLocaleLowerCase() === canonical) ? recommendations[0] : undefined;
-}
 async function loadAssignmentHistory(options, environment) {
   if (environment.assignmentHistory !== undefined) {
     return AssignmentHistorySchema.parse(environment.assignmentHistory);
@@ -21497,7 +21792,7 @@ async function loadAssignmentHistory(options, environment) {
     return [];
   return CouncilStore.open(options.recordsRoot).readAssignmentHistory(options.scope, { motionId: options.motionId, motion: options.motion }, options.projectId);
 }
-async function persistRun(options, decision, manifest, result, roleAssignments, now) {
+async function persistRun(options, decision, manifest, result, roleAssignments, startedAt, now) {
   if (options.recordsRoot === undefined)
     return;
   if (options.scope === "project" && options.projectId === undefined) {
@@ -21505,16 +21800,19 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
   }
   const store = CouncilStore.open(options.recordsRoot);
   const status = result.outcome;
-  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance is required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
+  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families; a chair ruling is required before this becomes a resolution.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance and a chair ruling are both required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
   const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
   const sessionSummary = reducedQuorumWarning === undefined ? outcomeSummary : `${reducedQuorumWarning} ${outcomeSummary}`;
+  const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
   const sessionBase = {
+    schemaVersion: 2,
     runId: options.runId,
     motionId: options.motionId,
     status,
     motion: options.motion,
-    startedAt: now,
+    startedAt,
     completedAt: now,
+    decisionState,
     policyDecision: {
       kind: decision.kind,
       classification: decision.effectiveClassification ?? options.classification,
@@ -21529,6 +21827,12 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
       ...result.refinementTrigger === undefined ? {} : { refinementTrigger: result.refinementTrigger },
       quorumPolicy: result.quorumPolicy
     },
+    execution: {
+      rounds: result.rounds,
+      quorum: result.quorum,
+      rebuttalObligation: result.rebuttalObligation,
+      synthesisEligible: result.synthesisEligible
+    },
     assignments: roleAssignments,
     summary: sessionSummary
   };
@@ -21538,30 +21842,7 @@ async function persistRun(options, decision, manifest, result, roleAssignments, 
     projectId: options.projectId
   };
   await store.writeSession(session);
-  const recommendation = consensusRecommendation(result);
-  if (status !== "completed" || recommendation === undefined) {
-    return { session: true, resolution: false };
-  }
-  const resolutionBase = {
-    resolutionId: deterministicId("resolution", options.command, options.motion, now),
-    runId: options.runId,
-    motionId: options.motionId,
-    title: options.motion.replace(/[\r\n]+/g, " ").trim().slice(0, 200),
-    decision: recommendation,
-    createdAt: now
-  };
-  try {
-    await store.appendResolution(options.scope === "general" ? { ...resolutionBase, scope: "general" } : {
-      ...resolutionBase,
-      scope: "project",
-      projectId: options.projectId
-    });
-    return { session: true, resolution: true };
-  } catch (error51) {
-    const message = error51 instanceof Error ? error51.message : "";
-    const resolutionBlockReason = /motion already has a resolution/i.test(message) ? "motion-already-resolved" : /duplicate resolution id/i.test(message) ? "resolution-id-conflict" : "resolution-append-failed";
-    return { session: true, resolution: false, resolutionBlockReason };
-  }
+  return { session: true, decisionState, dataAvailability: "captured" };
 }
 async function resolveCouncilProviders(options, adapters, context) {
   const candidateAdapters = options.providerFamilies.flatMap((provider) => {
@@ -21716,6 +21997,7 @@ async function runCouncilCommand(command, args, environment) {
     redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
   };
   const runner = new CouncilRunner({ adapters, context });
+  const startedAt = (environment.now ?? (() => new Date().toISOString()))();
   const execution = await runner.run({
     runId: executionOptions.runId,
     motion: executionOptions.motion,
@@ -21725,10 +22007,9 @@ async function runCouncilCommand(command, args, environment) {
     ...executionOptions.refinementTrigger === undefined ? {} : { refinementTrigger: executionOptions.refinementTrigger }
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const records = await persistRun(executionOptions, policyDecision, manifest, execution, roleAssignments, now);
-  const resolutionPersistenceFailed = records?.resolutionBlockReason === "resolution-append-failed";
-  const status = resolutionPersistenceFailed ? "record-failure" : execution.outcome;
-  return output(resolutionPersistenceFailed ? 5 : status === "completed" ? 0 : 4, {
+  const records = await persistRun(executionOptions, policyDecision, manifest, execution, roleAssignments, startedAt, now);
+  const status = execution.outcome;
+  return output(status === "completed" ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     status,
@@ -21906,6 +22187,120 @@ async function migrationCommand(args, environment) {
   }
   throw new Error(`Unknown migrate-general action: ${action}`);
 }
+async function adjudicateCommand(args, environment) {
+  const parsed = parseArguments(args, ADJUDICATE_FLAGS);
+  if (hasFlag(parsed, "help")) {
+    return output(0, {
+      command: "adjudicate",
+      summary: "Record a chair ruling on an executed motion and append the resulting resolution.",
+      required: ["--run-id", "--decision", "--rationale", "--authorised-by", "--records-root"],
+      dissent: "Exactly one of --dissent-acknowledged or --no-dissent is required. A ruling must state whether the panel disagreed, because textual agreement across a shared schema is a prompt-quality signal rather than a mandate.",
+      degraded: "A degraded session additionally requires --accept-degraded with --acceptance-rationale.",
+      optional: ["--scope", "--project-id", "--followed-seats", "--set-aside-seats"]
+    });
+  }
+  const recordsRoot = oneFlag(parsed, "records-root");
+  if (recordsRoot === undefined)
+    throw new Error("adjudicate requires --records-root");
+  const scope = CouncilScopeSchema.parse(oneFlag(parsed, "scope") ?? "general");
+  const projectIdValue = oneFlag(parsed, "project-id");
+  if (scope === "general" && projectIdValue !== undefined) {
+    throw new Error("Project id requires --scope project");
+  }
+  if (scope === "project" && projectIdValue === undefined) {
+    throw new Error("Project scope requires --project-id");
+  }
+  const projectId = projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, "Project id");
+  const runIdValue = oneFlag(parsed, "run-id");
+  if (runIdValue === undefined)
+    throw new Error("adjudicate requires --run-id");
+  const runId = safeStorageId(runIdValue, "Run id");
+  const decision = oneFlag(parsed, "decision");
+  const rationale = oneFlag(parsed, "rationale");
+  const authorisedBy = oneFlag(parsed, "authorised-by");
+  if (decision === undefined || rationale === undefined || authorisedBy === undefined) {
+    throw new Error("adjudicate requires --decision, --rationale and --authorised-by");
+  }
+  const acknowledged = hasFlag(parsed, "dissent-acknowledged");
+  const noDissent = hasFlag(parsed, "no-dissent");
+  if (acknowledged === noDissent) {
+    throw new Error("adjudicate requires exactly one of --dissent-acknowledged or --no-dissent");
+  }
+  const seatList = (name) => {
+    const raw = parsed.flags.get(name);
+    if (raw === undefined)
+      return [];
+    const seats = raw.flatMap((value) => value.split(",")).map((value) => value.trim()).filter((value) => value.length > 0);
+    return [...new Set(seats)];
+  };
+  const store = CouncilStore.open(recordsRoot);
+  const states = await store.readDecisionStates(scope, projectId);
+  const state = states.find((candidate) => candidate.runId === runId);
+  if (state === undefined)
+    throw new Error(`No persisted session for run id: ${runId}`);
+  if (state.decisionState === "not-adjudicable") {
+    throw new Error(`Run ${runId} has status ${state.status}; there is no quorum outcome to rule on. Re-run the motion instead.`);
+  }
+  if (state.decisionState === "adjudicated") {
+    throw new Error(`Run ${runId} already has a chair ruling: ${state.rulingId}`);
+  }
+  const now = (environment.now ?? (() => new Date().toISOString()))();
+  const title = decision.replace(/[\r\n]+/g, " ").trim().slice(0, 200);
+  if (state.status === "degraded") {
+    const acceptanceRationale = oneFlag(parsed, "acceptance-rationale");
+    if (!hasFlag(parsed, "accept-degraded") || acceptanceRationale === undefined) {
+      throw new Error(`Run ${runId} is degraded; ruling on it requires --accept-degraded and --acceptance-rationale`);
+    }
+    const acceptanceBase = {
+      acceptanceId: deterministicId("acceptance", "adjudicate", runId, now),
+      runId,
+      motionId: state.motionId,
+      rationale: acceptanceRationale,
+      authorisedBy,
+      createdAt: now
+    };
+    await store.appendChairAcceptance(scope === "general" ? { ...acceptanceBase, scope: "general" } : { ...acceptanceBase, scope: "project", projectId });
+  }
+  const rulingId = safeStorageId(oneFlag(parsed, "ruling-id") ?? deterministicId("ruling", "adjudicate", runId, now), "Ruling id");
+  const rulingBase = {
+    rulingId,
+    runId,
+    motionId: state.motionId,
+    title,
+    decision,
+    rationale,
+    authorisedBy,
+    followedSeats: seatList("followed-seats"),
+    setAsideSeats: seatList("set-aside-seats"),
+    dissentAcknowledged: acknowledged,
+    createdAt: now
+  };
+  await store.appendChairRuling(scope === "general" ? { ...rulingBase, scope: "general" } : { ...rulingBase, scope: "project", projectId });
+  const resolutionId = safeStorageId(oneFlag(parsed, "resolution-id") ?? deterministicId("resolution", "adjudicate", runId, now), "Resolution id");
+  const resolutionBase = {
+    resolutionId,
+    runId,
+    motionId: state.motionId,
+    rulingId,
+    title,
+    decision,
+    createdAt: now
+  };
+  await store.appendResolution(scope === "general" ? { ...resolutionBase, scope: "general" } : { ...resolutionBase, scope: "project", projectId });
+  return output(0, {
+    schemaVersion: SCHEMA_VERSION,
+    command: "adjudicate",
+    status: "adjudicated",
+    runId,
+    motionId: state.motionId,
+    rulingId,
+    resolutionId,
+    decisionState: "adjudicated",
+    dataAvailability: state.dataAvailability,
+    sessionStatus: state.status,
+    dissentAcknowledged: acknowledged
+  });
+}
 function help() {
   return output(0, {
     name: "claude-council",
@@ -21916,6 +22311,7 @@ function help() {
       "result",
       "jobs",
       "cancel",
+      "adjudicate",
       "health",
       "doctor",
       "migrate-general",
@@ -21968,6 +22364,8 @@ async function runCliFacade(argv, environment = {}) {
         ...engineIdentity(configured, environment)
       });
     }
+    if (command === "adjudicate")
+      return await adjudicateCommand(args, environment);
     if (command === "self-check") {
       const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0)

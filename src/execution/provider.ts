@@ -2,7 +2,14 @@ import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, resolve } from 'node:path';
 import { z } from 'zod';
-import type { ModelRoute, ModelTransport, ProviderFamily, SeatResponse } from '../domain/schemas';
+import type {
+  CredentialPath,
+  ModelRoute,
+  ModelTransport,
+  ProviderFamily,
+  SeatResponse,
+  SeatUsage,
+} from '../domain/schemas';
 import type { ModelRegistry } from '../models/registry';
 import { scanAndRedact } from '../policy/secrets';
 import { runIsolatedCli, type CliRequest, type CliResult } from './cli';
@@ -179,6 +186,39 @@ interface ObservedSeatIdentity {
   route?: 'primary' | 'same-provider-fallback';
 }
 
+/**
+ * Non-identity facts about how a seat was served: the effort we asked for, the effort the provider
+ * attested, which credential paid, and token/cost usage. Kept separate from {@link
+ * ObservedSeatIdentity} because none of it may influence whether a seat counts as verified.
+ */
+interface SeatAttribution {
+  requestedEffort?: string;
+  observedEffort?: string;
+  credentialPath?: CredentialPath;
+  usage?: SeatUsage;
+}
+
+function attributionFields(attribution: SeatAttribution | undefined): Partial<{
+  requestedEffort: string;
+  observedEffort: string;
+  credentialPath: CredentialPath;
+  usage: SeatUsage;
+}> {
+  if (attribution === undefined) return {};
+  return {
+    ...(attribution.requestedEffort === undefined
+      ? {}
+      : { requestedEffort: attribution.requestedEffort }),
+    ...(attribution.observedEffort === undefined
+      ? {}
+      : { observedEffort: attribution.observedEffort }),
+    ...(attribution.credentialPath === undefined
+      ? {}
+      : { credentialPath: attribution.credentialPath }),
+    ...(attribution.usage === undefined ? {} : { usage: attribution.usage }),
+  };
+}
+
 function seatError(
   request: ProviderRequest,
   family: ProviderFamily,
@@ -189,6 +229,7 @@ function seatError(
   latencyMs: number,
   retryable = false,
   observedIdentity?: ObservedSeatIdentity,
+  attribution?: SeatAttribution,
 ): SeatResponse {
   const actualModel =
     observedIdentity === undefined
@@ -208,6 +249,7 @@ function seatError(
         }),
     role: request.role,
     latencyMs,
+    ...attributionFields(attribution),
     error: { code, message, retryable },
   };
 }
@@ -220,6 +262,7 @@ function seatSuccess(
   route: 'primary' | 'same-provider-fallback',
   answer: string,
   latencyMs: number,
+  attribution?: SeatAttribution,
 ): SeatResponse {
   return {
     status: 'ok',
@@ -231,6 +274,7 @@ function seatSuccess(
     route,
     role: request.role,
     latencyMs,
+    ...attributionFields(attribution),
     answer,
   };
 }
@@ -337,7 +381,6 @@ export function createHttpAdapter(
 
       let model = configuredRoute.primary;
       let providerResult = await invokeModel(model);
-      let seatRoute: 'primary' | 'same-provider-fallback' = 'primary';
       const fallback = configuredRoute.fallbacks[0];
       if (
         config.allowRegistryFallback &&
@@ -345,7 +388,6 @@ export function createHttpAdapter(
         fallback !== undefined
       ) {
         model = fallback;
-        seatRoute = 'same-provider-fallback';
         providerResult = await invokeModel(model);
       }
       const latencyMs = Date.now() - startedAt;
@@ -392,14 +434,33 @@ export function createHttpAdapter(
           latencyMs,
         );
       }
+      // Verify the responding model before the seat can count. `body.model` was previously
+      // extracted and recorded but never compared, so a silent server-side reroute produced a
+      // `verified` vote for a model nobody selected. A drifted route is an integrity failure, not
+      // a transport hiccup: it is reported non-retryable so no fallback path can launder it.
+      const observed = observedRoute(configuredRoute, extracted.actualModel);
+      if (observed === undefined) {
+        return seatError(
+          request,
+          config.family,
+          configuredRoute.primary,
+          'failed',
+          'identity-unverified',
+          'provider responded with a model outside the configured route',
+          latencyMs,
+          false,
+          { actualModel: extracted.actualModel, modelIdentity: 'unverified' },
+        );
+      }
       return seatSuccess(
         request,
         config.family,
         configuredRoute.primary,
         extracted.actualModel,
-        seatRoute,
+        observed,
         answer,
         latencyMs,
+        { credentialPath: 'api-key' },
       );
     },
     async probe(context) {
@@ -420,6 +481,13 @@ interface SubscriptionCliOutput {
   status: 'ok';
   actualModel: string;
   rawAnswer: string;
+  /**
+   * Effort the CLI itself attested in its stream. Only set where the transport genuinely reports it
+   * — Codex echoes `reasoning effort` in its identity frame. Absent means unattested, never
+   * "assumed to match what we asked for".
+   */
+  observedEffort?: string;
+  usage?: SeatUsage;
 }
 
 interface SubscriptionCliOutputFailure {
@@ -433,6 +501,7 @@ type SubscriptionCliParseResult = SubscriptionCliOutput | SubscriptionCliOutputF
 interface SubscriptionCliAdapterConfig {
   family: Extract<ProviderFamily, 'openai' | 'xai' | 'google'>;
   executableName: string;
+  requestedEffort: string;
   request(executable: string, route: ModelRoute, prompt: string, timeoutMs: number): CliRequest;
   output(
     stdout: string,
@@ -478,6 +547,14 @@ const OmpAgentEndSchema = z.object({
   type: z.literal('agent_end'),
   messages: z.array(OmpMessageSchema).min(1),
 });
+// Reasoning effort requested per seat. Codex is the only one that attests it back (see
+// `CodexIdentitySchema` below), so it is the only seat where `observedEffort` may be set. The others
+// are recorded as `requestedEffort` only — sent, unconfirmed, and never presented as confirmed.
+const anthropicReasoningEffort = 'max';
+const agyReasoningEffort = 'high';
+// grok's CLI exposes no effort flag, so the seat records the model's own fixed budget as requested.
+const grokReasoningEffort = 'default';
+const ompThinkingLevel = 'max';
 const codexReasoningEffort = 'xhigh';
 const CodexIdentitySchema = z.object({
   workdir: z.string().min(1),
@@ -569,6 +646,9 @@ const GrokResultEventSchema = z.object({
   stop_reason: z.literal('end_turn'),
   modelUsage: z.record(z.string().min(1), z.unknown()),
   session_id: z.string().min(1),
+  // Observed verbatim from grok 1.0.4's result frame. Optional because it is attribution, not
+  // identity: a missing cost must not fail a seat whose model identity verified.
+  total_cost_usd: z.number().nonnegative().optional(),
 });
 
 const councilAnswerJsonSchema = JSON.stringify({
@@ -688,7 +768,20 @@ function extractCodexOutput(
   if (!rawAnswer || answers.at(-1) !== normalisedAnswer) {
     return parseFailure('identity-unverified', actualModel);
   }
-  return { status: 'ok', actualModel: identity.data.model, rawAnswer };
+  // Codex is the one seat that attests its own reasoning effort: `CodexIdentitySchema` pins the
+  // header field to `codexReasoningEffort`, so reaching here proves the provider confirmed it.
+  // `tokens used` is the run total the renderer prints, so it is recorded as total input tokens
+  // rather than split — inventing a split would be fabrication.
+  const tokensUsed = Number.parseInt(tokenSuffix[1]?.replace(/,/g, '') ?? '', 10);
+  return {
+    status: 'ok',
+    actualModel: identity.data.model,
+    rawAnswer,
+    observedEffort: identity.data['reasoning effort'],
+    ...(Number.isSafeInteger(tokensUsed) && tokensUsed >= 0
+      ? { usage: { inputTokens: tokensUsed } }
+      : {}),
+  };
 }
 
 function containsUnsafeToolNode(value: unknown): boolean {
@@ -996,6 +1089,7 @@ function extractGrokOutput(
   let sessionId: string | undefined;
   let actualModel: string | undefined;
   let rawAnswer: string | undefined;
+  let totalCostUsd: number | undefined;
 
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -1075,6 +1169,7 @@ function extractGrokOutput(
       if (usageModels.length !== 1 || usageModels[0] !== actualModel) {
         return parseFailure('identity-unverified', actualModel);
       }
+      totalCostUsd = result.data.total_cost_usd;
       state = 'closed';
       continue;
     }
@@ -1083,7 +1178,12 @@ function extractGrokOutput(
   }
 
   return state === 'closed' && actualModel !== undefined && rawAnswer !== undefined
-    ? { status: 'ok', actualModel, rawAnswer }
+    ? {
+        status: 'ok',
+        actualModel,
+        rawAnswer,
+        ...(totalCostUsd === undefined ? {} : { usage: { totalCostUsd } }),
+      }
     : parseFailure('identity-unverified', actualModel);
 }
 
@@ -1254,6 +1354,7 @@ function createSubscriptionCliAdapter(
           output.actualModel === undefined
             ? undefined
             : { actualModel: output.actualModel, modelIdentity: 'unverified' },
+          { requestedEffort: config.requestedEffort, credentialPath: 'subscription' },
         );
       }
       const seatRoute = observedRoute(configuredRoute, output.actualModel);
@@ -1268,6 +1369,7 @@ function createSubscriptionCliAdapter(
           result.durationMs,
           false,
           { actualModel: output.actualModel, modelIdentity: 'unverified' },
+          { requestedEffort: config.requestedEffort, credentialPath: 'subscription' },
         );
       }
       const answer = parseAnswer(request, config.family, output.rawAnswer, false);
@@ -1286,6 +1388,7 @@ function createSubscriptionCliAdapter(
             modelIdentity: 'verified',
             route: seatRoute,
           },
+          { requestedEffort: config.requestedEffort, credentialPath: 'subscription' },
         );
       }
       return seatSuccess(
@@ -1296,6 +1399,12 @@ function createSubscriptionCliAdapter(
         seatRoute,
         answer,
         result.durationMs,
+        {
+          requestedEffort: config.requestedEffort,
+          ...(output.observedEffort === undefined ? {} : { observedEffort: output.observedEffort }),
+          credentialPath: 'subscription',
+          ...(output.usage === undefined ? {} : { usage: output.usage }),
+        },
       );
     },
     async probe(context) {
@@ -1355,6 +1464,7 @@ export function createOpenAiCodexAdapter(
     {
       family: 'openai',
       executableName: 'codex',
+      requestedEffort: codexReasoningEffort,
       request: (executable, route, prompt, timeoutMs) => {
         const councilPrompt = structuredPrompt(prompt);
         return {
@@ -1446,6 +1556,7 @@ export function createOpenAiSubscriptionAdapter(
     {
       family: 'openai',
       executableName: 'omp',
+      requestedEffort: ompThinkingLevel,
       configurationError: profileConfigurationError,
       request: (executable, route, prompt, timeoutMs) => ({
         executable,
@@ -1458,7 +1569,7 @@ export function createOpenAiSubscriptionAdapter(
           '--model',
           `openai-codex/${route.primary}`,
           '--thinking',
-          'max',
+          ompThinkingLevel,
           '--no-tools',
           '--no-lsp',
           '--no-extensions',
@@ -1505,6 +1616,7 @@ export function createGoogleSubscriptionAdapter(
     {
       family: 'google',
       executableName: 'agy',
+      requestedEffort: agyReasoningEffort,
       request: (executable, route, prompt, timeoutMs) => ({
         executable,
         args: [
@@ -1512,7 +1624,7 @@ export function createGoogleSubscriptionAdapter(
           '--mode',
           'plan',
           '--effort',
-          'high',
+          agyReasoningEffort,
           '--output-format',
           'stream-json',
           '--json-schema',
@@ -1589,6 +1701,7 @@ export function createXaiSubscriptionAdapter(
     {
       family: 'xai',
       executableName: 'grok',
+      requestedEffort: grokReasoningEffort,
       request: (executable, _route, prompt, timeoutMs) => {
         const councilPrompt = `${grokInlineAnswerGuard}\n\n${structuredPrompt(prompt)}`;
         const override = modelOverride()?.trim();
@@ -1832,7 +1945,7 @@ export function createAnthropicAdapter(
           '--model',
           route.primary,
           '--effort',
-          'max',
+          anthropicReasoningEffort,
           '--safe-mode',
           '--no-session-persistence',
           '--tools',
@@ -1884,9 +1997,15 @@ export function createAnthropicAdapter(
           result.durationMs,
         );
       }
+      // `modelUsage` is keyed by every model the CLI billed for this turn. Exactly one key is the
+      // only shape that attributes an answer to a model: two or more means some other model also
+      // ran (a subagent, a compaction pass, a silent reroute) and nothing in the payload says which
+      // one wrote `result`. The previous code took `actualModels[0]` when the primary was absent
+      // and stamped it `verified` on route `primary`, which reported a model nobody selected as
+      // confirmed. Both shapes now fail closed.
       const actualModels = Object.keys(parsed.data.modelUsage).sort();
-      const actualModel = actualModels.includes(route.primary) ? route.primary : actualModels[0];
-      if (!actualModel) {
+      const actualModel = actualModels[0];
+      if (actualModel === undefined) {
         return seatError(
           request,
           family,
@@ -1895,6 +2014,35 @@ export function createAnthropicAdapter(
           'identity-unverified',
           'claude output did not include model identity',
           result.durationMs,
+        );
+      }
+      if (actualModels.length > 1) {
+        return seatError(
+          request,
+          family,
+          route.primary,
+          'failed',
+          'identity-unverified',
+          `claude billed ${actualModels.length} models for one seat, so the responding model is not attributable`,
+          result.durationMs,
+          false,
+          { actualModel, modelIdentity: 'unverified' },
+          { requestedEffort: anthropicReasoningEffort, credentialPath: 'subscription' },
+        );
+      }
+      const observed = observedRoute(route, actualModel);
+      if (observed === undefined) {
+        return seatError(
+          request,
+          family,
+          route.primary,
+          'failed',
+          'identity-unverified',
+          'claude responded with a model outside the configured route',
+          result.durationMs,
+          false,
+          { actualModel, modelIdentity: 'unverified' },
+          { requestedEffort: anthropicReasoningEffort, credentialPath: 'subscription' },
         );
       }
       const answer = parseAnswer(request, family, parsed.data.result);
@@ -1914,9 +2062,13 @@ export function createAnthropicAdapter(
         family,
         route.primary,
         actualModel,
-        'primary',
+        observed,
         answer,
         result.durationMs,
+        // `--effort max` is sent but the CLI attests no effort in its JSON, so `observedEffort` is
+        // deliberately absent rather than echoed back. An unattested request must never read as a
+        // confirmation.
+        { requestedEffort: anthropicReasoningEffort, credentialPath: 'subscription' },
       );
     },
     async probe(context) {

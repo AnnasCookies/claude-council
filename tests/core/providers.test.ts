@@ -468,6 +468,32 @@ describe('HTTP provider adapters', () => {
     expect(response.route).toBe('same-provider-fallback');
   });
 
+  test('rejects an HTTPS seat whose response model is outside the configured route', async () => {
+    const transport = new FakeHttp([okHttp('deepseek-experimental-preview')]);
+    const response = await deepseekAdapter(transport).invoke(
+      request(context({ COUNCIL_DEEPSEEK_API_KEY: 'test-deepseek-key' })),
+    );
+
+    // `body.model` was extracted and recorded but never compared, so a server-side reroute produced
+    // a 'verified' seat for a model outside the route. It is now an integrity failure.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('HTTP route drift unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.retryable).toBe(false);
+    expect(response.actualModel).toBe('deepseek-experimental-preview');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('attributes a successful HTTPS seat to the metered credential path', async () => {
+    const transport = new FakeHttp([okHttp('deepseek-v4-pro')]);
+    const response = await deepseekAdapter(transport).invoke(
+      request(context({ COUNCIL_DEEPSEEK_API_KEY: 'test-deepseek-key' })),
+    );
+
+    expect(response.status).toBe('ok');
+    expect(response.credentialPath).toBe('api-key');
+  });
+
   test('missing credentials skip rather than substitute another family', async () => {
     for (const adapter of [deepseekAdapter, moonshotAdapter]) {
       const response = await adapter(new FakeHttp([])).invoke(request(context({})));
@@ -1533,6 +1559,82 @@ describe('Anthropic CLI adapter', () => {
     );
     expect(transport.calls[0]?.stdin).toContain('Evaluate the supplied evidence pack.');
     expect(transport.calls[0]?.cwd).not.toContain('C:/private/project-root');
+  });
+
+  test('records the requested effort without claiming the provider attested it', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({ result: answer, modelUsage: { 'claude-opus-5': {} } }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter(transport, () => process.execPath).invoke(
+      request(context({})),
+    );
+
+    expect(response.status).toBe('ok');
+    expect(transport.calls[0]?.args).toEqual(expect.arrayContaining(['--effort', 'max']));
+    expect(response.requestedEffort).toBe('max');
+    // The claude CLI reports no effort in its JSON, so echoing 'max' back would fabricate an
+    // attestation. Absence here is the honest answer.
+    expect(response.observedEffort).toBeUndefined();
+    expect(response.credentialPath).toBe('subscription');
+  });
+
+  test('rejects a responding model outside the configured route', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({ result: answer, modelUsage: { 'claude-haiku-9': {} } }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter(transport, () => process.execPath).invoke(
+      request(context({})),
+    );
+
+    // Previously this returned status 'ok' with modelIdentity 'verified' and route 'primary' for a
+    // model nobody selected, because the primary-absent branch fell back to the first key.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('route drift unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.retryable).toBe(false);
+    expect(response.actualModel).toBe('claude-haiku-9');
+    expect(response.modelIdentity).toBe('unverified');
+  });
+
+  test('rejects a seat whose turn billed more than one model', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({
+        result: answer,
+        modelUsage: { 'claude-opus-5': {}, 'claude-haiku-9': {} },
+      }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    const response = await anthropicAdapter(transport, () => process.execPath).invoke(
+      request(context({})),
+    );
+
+    // Two billed models means nothing in the payload says which one wrote `result`, so the answer
+    // is not attributable even though the configured primary is among them.
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('multi-model usage unexpectedly succeeded');
+    expect(response.error.code).toBe('identity-unverified');
+    expect(response.error.message).toMatch(/not attributable/i);
+    expect(response.modelIdentity).toBe('unverified');
   });
 
   test('sanitises CLI stderr before returning or retaining it', async () => {
