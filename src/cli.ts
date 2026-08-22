@@ -72,7 +72,14 @@ import {
 
 export const ADAPTER_CONTRACT_VERSION = 1 as const;
 const SCHEMA_VERSION = 1;
-const DEFAULT_TIMEOUT_MS = 300_000;
+// Whole-run budget, which the runner then divides PER ROUND (see runner.ts): a two-round
+// council gives each seat half of it. At the previous 300_000 that was 150s per seat, which
+// this engine's own settings cannot meet — codex is invoked at xhigh and claude at effort
+// max, and on a substantial motion both reliably exceeded it, timing out whichever seat was
+// asked to think hardest. Every provider then looked broken in turn while the fast seats
+// passed, which is exactly how the failure presented. 1_200_000 leaves 10 minutes per seat
+// per round; --timeout-ms still overrides, up to the one-hour ceiling.
+const DEFAULT_TIMEOUT_MS = 1_200_000;
 const DEFAULT_SEAT_COUNT = 5;
 const DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
 const REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
