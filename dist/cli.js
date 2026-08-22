@@ -16078,7 +16078,7 @@ var SeatResponseSchema = exports_external.discriminatedUnion("status", [
 ]);
 
 // src/execution/provider.ts
-import { existsSync as existsSync2 } from "fs";
+import { existsSync as existsSync2, readFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { isAbsolute as isAbsolute2, join as join2, normalize, resolve as resolve2 } from "path";
 
@@ -17070,6 +17070,17 @@ var councilAnswerJsonSchema = JSON.stringify({
     decisiveTest: { type: "string", minLength: 1 }
   }
 });
+function skipBenignNotices(renderedMessages) {
+  const benignNotice = /^(?:warning|note|notice|info): [^\n]*$/i;
+  const lines = renderedMessages.split(`
+`);
+  let index = 0;
+  while (index < lines.length && (lines[index] === "" || benignNotice.test(lines[index] ?? ""))) {
+    index += 1;
+  }
+  return lines.slice(index).join(`
+`);
+}
 function parseFailure(code, actualModel) {
   return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
 }
@@ -17125,10 +17136,11 @@ ${expectedPrompt.replace(/\r\n/g, `
   if (/(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(renderedMessages)) {
     return parseFailure("unsafe-tool-isolation", actualModel);
   }
-  if (!renderedMessages.startsWith(answerMarker)) {
+  const answerTranscript = skipBenignNotices(renderedMessages);
+  if (!answerTranscript.startsWith(answerMarker)) {
     return parseFailure("identity-unverified", actualModel);
   }
-  const answers = renderedMessages.slice(answerMarker.length).split(`
+  const answers = answerTranscript.slice(answerMarker.length).split(`
 ${answerMarker}`).map((value) => value.trim());
   for (const renderedAnswer of answers) {
     let value;
@@ -17551,6 +17563,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
       cwd: tmpdir(),
       files: {
         "council-prompt.txt": structuredPrompt(prompt),
+        ...stagedAgyCredential(),
         ".gemini/antigravity-cli/settings.json": (workingDirectory) => JSON.stringify({
           enableTelemetry: false,
           trustedWorkspaces: [workingDirectory],
@@ -17563,6 +17576,15 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
     }),
     output: extractAgyOutput
   }, transport, resolveExecutable);
+}
+function stagedAgyCredential() {
+  const base = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
+  const source = join2(base, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  try {
+    return { ".gemini/antigravity-cli/antigravity-oauth-token": readFileSync(source, "utf8") };
+  } catch {
+    return {};
+  }
 }
 function resolveGrokExecutable() {
   return Bun.which("grok") ?? undefined;
