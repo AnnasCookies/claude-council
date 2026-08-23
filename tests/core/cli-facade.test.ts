@@ -15,7 +15,7 @@ import type {
   ProviderRequest,
 } from '../../src/execution/provider';
 import { loadModelRegistry } from '../../src/models/registry';
-import { runCliFacade, type CliFacadeEnvironment } from '../../src/cli';
+import { runCliFacade, shouldReadStdin, type CliFacadeEnvironment } from '../../src/cli';
 import { assignLenses, selectLenses } from '../../src/roles/allocator';
 
 const NOW = '2026-07-28T12:00:00.000Z';
@@ -1144,5 +1144,32 @@ describe('public CLI facade', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('stdin consumption', () => {
+  // Reading stdin unconditionally blocked every command behind an open pipe, which is how
+  // agent harnesses and CI invoke a CLI. It cost a 16-hour silent hang on a council whose
+  // motion was already supplied as a flag.
+  test('a motion-taking command with no --motion still reads stdin', () => {
+    expect(shouldReadStdin(['council', '--scope', 'general'], false)).toBe(true);
+    expect(shouldReadStdin(['second-opinion'], false)).toBe(true);
+    expect(shouldReadStdin(['run'], false)).toBe(true);
+  });
+
+  test('an explicit --motion means stdin is never consumed', () => {
+    expect(shouldReadStdin(['council', '--motion', 'x'], false)).toBe(false);
+    expect(shouldReadStdin(['council', '--motion=x'], false)).toBe(false);
+  });
+
+  test('commands that never take a motion do not touch stdin', () => {
+    for (const command of ['doctor', 'health', 'version', 'jobs', 'result', 'self-check']) {
+      expect(shouldReadStdin([command], false)).toBe(false);
+    }
+    expect(shouldReadStdin([], false)).toBe(false);
+  });
+
+  test('an interactive terminal never blocks', () => {
+    expect(shouldReadStdin(['council'], true)).toBe(false);
   });
 });

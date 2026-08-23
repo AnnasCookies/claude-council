@@ -1581,8 +1581,32 @@ export async function runCliFacade(
   }
 }
 
+/** Commands that accept the motion on stdin when --motion is absent. */
+const STDIN_MOTION_COMMANDS: ReadonlySet<string> = new Set(['run', 'council', 'second-opinion']);
+
+/**
+ * Whether this invocation should consume stdin.
+ *
+ * Reading stdin unconditionally makes every command block forever when stdin is an open
+ * pipe that never reaches EOF — which is exactly how a CLI is invoked from an agent harness,
+ * a CI step or `cmd &` with job control off. The failure is silent and total: no output, no
+ * error, no timeout, because the process blocks before it has parsed a single argument.
+ * Observed as a 16-hour hang on `council --motion ...`, where the motion was supplied on the
+ * command line and stdin was never wanted in the first place.
+ *
+ * So read it only when it can actually be used: a motion-taking command with no --motion.
+ */
+export function shouldReadStdin(argv: readonly string[], isTty: boolean): boolean {
+  if (isTty) return false;
+  const command = argv[0];
+  if (command === undefined || !STDIN_MOTION_COMMANDS.has(command)) return false;
+  return !argv.some((argument) => argument === '--motion' || argument.startsWith('--motion='));
+}
+
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
-  const stdin = process.stdin.isTTY ? undefined : await Bun.stdin.text();
+  const stdin = shouldReadStdin(argv, process.stdin.isTTY === true)
+    ? await Bun.stdin.text()
+    : undefined;
   const result = await runCliFacade(argv, stdin === undefined ? {} : { stdin });
   if (result.stdout.length > 0) process.stdout.write(result.stdout);
   if (result.stderr.length > 0) process.stderr.write(result.stderr);

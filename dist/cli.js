@@ -22727,8 +22727,17 @@ async function runCliFacade(argv, environment = {}) {
     });
   }
 }
+var STDIN_MOTION_COMMANDS = new Set(["run", "council", "second-opinion"]);
+function shouldReadStdin(argv, isTty) {
+  if (isTty)
+    return false;
+  const command = argv[0];
+  if (command === undefined || !STDIN_MOTION_COMMANDS.has(command))
+    return false;
+  return !argv.some((argument) => argument === "--motion" || argument.startsWith("--motion="));
+}
 async function main(argv = Bun.argv.slice(2)) {
-  const stdin = process.stdin.isTTY ? undefined : await Bun.stdin.text();
+  const stdin = shouldReadStdin(argv, process.stdin.isTTY === true) ? await Bun.stdin.text() : undefined;
   const result = await runCliFacade(argv, stdin === undefined ? {} : { stdin });
   if (result.stdout.length > 0)
     process.stdout.write(result.stdout);
@@ -22739,6 +22748,7 @@ async function main(argv = Bun.argv.slice(2)) {
 if (import.meta.main)
   process.exit(await main());
 export {
+  shouldReadStdin,
   runCliFacade,
   main,
   ADAPTER_CONTRACT_VERSION
