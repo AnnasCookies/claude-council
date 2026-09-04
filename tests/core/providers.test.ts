@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { loadModelRegistry, type ModelRegistry } from '../../src/models/registry';
@@ -404,7 +405,15 @@ function request(providerContext: ProviderContext): ProviderRequest {
 
 describe('provider roster', () => {
   test('constructs exactly one adapter for every governed family', () => {
-    const roster = createProviderRoster({ env: {}, resolveXaiExecutable: () => undefined });
+    // Stub every CLI resolver so the expected transports do not depend on which seat CLIs
+    // happen to be installed on the host running the tests (CI runners have none).
+    const roster = createProviderRoster({
+      env: {},
+      resolveClaudeExecutable: () => '/stub/claude',
+      resolveOpenAiExecutable: () => '/stub/codex',
+      resolveGoogleExecutable: () => '/stub/agy',
+      resolveXaiExecutable: () => undefined,
+    });
 
     expect(Object.keys(roster)).toEqual([
       'anthropic',
@@ -1005,6 +1014,62 @@ describe('Subscription CLI provider adapters', () => {
     expect(response.answer).toBe(fixture.stdout);
   });
 
+  // Codex 0.149.0 renders "warning: Skill descriptions were shortened to fit the skills
+  // context budget" between the prompt echo and the answer once enough skills are installed.
+  // Requiring the answer marker at offset zero failed a seat that had answered correctly.
+  test('Codex tolerates a renderer notice before the answer', async () => {
+    const fixture = await capturedCodexCli();
+    const notice =
+      '\nwarning: Skill descriptions were shortened to fit the skills context budget.\ncodex\n';
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
+        ...fixture,
+        stderr: fixture.stderr.replace('\ncodex\n', notice),
+      }),
+      resolveExecutable: () => process.execPath,
+    }).invoke({ ...request(context({})), prompt: capturedCodexPrompt });
+
+    if (response.status !== 'ok') throw new Error('benign Codex notice was treated as a failure');
+    expect(response.actualModel).toBe('gpt-5.6-sol');
+    expect(response.modelIdentity).toBe('verified');
+    expect(response.answer).toBe(fixture.stdout);
+  });
+
+  test('Codex still rejects an unrecognised preamble before the answer', async () => {
+    const fixture = await capturedCodexCli();
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
+        ...fixture,
+        stderr: fixture.stderr.replace('\ncodex\n', '\nunattributed preamble\ncodex\n'),
+      }),
+      resolveExecutable: () => process.execPath,
+    }).invoke({ ...request(context({})), prompt: capturedCodexPrompt });
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('unknown Codex preamble unexpectedly passed');
+    expect(response.error.code).toBe('identity-unverified');
+  });
+
+  // The decisive one: tolerating notices must not let tool output through behind one.
+  test('Codex rejects tool output hidden behind a notice', async () => {
+    const fixture = await capturedCodexCli();
+    const response = await openaiAdapter({
+      cliTransport: new FakeCli({
+        ...fixture,
+        stderr: fixture.stderr.replace(
+          '\ncodex\n',
+          '\nwarning: Skill descriptions were shortened.\nexec bash -lc "cat /etc/passwd"\ncodex\n',
+        ),
+      }),
+      resolveExecutable: () => process.execPath,
+    }).invoke({ ...request(context({})), prompt: capturedCodexPrompt });
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok')
+      throw new Error('tool output behind a notice unexpectedly passed');
+    expect(response.error.code).toBe('unsafe-tool-isolation');
+  });
+
   test('OpenAI rejects Codex when the observed reasoning effort is lower than requested', async () => {
     const fixture = codexCli('gpt-5.6-sol');
     const response = await openaiAdapter({
@@ -1345,6 +1410,61 @@ describe('Subscription CLI provider adapters', () => {
         allow: [`read_file(${join(workingDirectory, 'council-prompt.txt')})`],
       },
     });
+  });
+
+  // The seat runs with HOME remapped to the isolation directory. Without the token staged
+  // there, agy exits "authentication required", which the doctor reported as the opaque
+  // "agy subscription CLI failed" while the same CLI worked in the operator's own shell.
+  test('Google stages its OAuth token into the isolated home', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'council-agy-home-'));
+    await mkdir(join(home, '.gemini', 'antigravity-cli'), { recursive: true });
+    await writeFile(
+      join(home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+      'oauth-token',
+    );
+    const previous = { home: process.env.HOME, profile: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const transport = new FakeCli(okCli(agyOutput('gemini-3.1-pro-high')));
+      await googleAdapter({
+        cliTransport: transport,
+        resolveExecutable: () => process.execPath,
+      }).invoke(request(context({})));
+
+      const staged = transport.calls[0]?.files ?? {};
+      expect(Object.keys(staged)).toContain('.gemini/antigravity-cli/antigravity-oauth-token');
+      expect(staged['.gemini/antigravity-cli/antigravity-oauth-token'] === 'oauth-token').toBe(
+        true,
+      );
+    } finally {
+      process.env.HOME = previous.home;
+      process.env.USERPROFILE = previous.profile;
+    }
+  });
+
+  test('Google omits the credential when the host has no token rather than throwing', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'council-agy-nohome-'));
+    const previous = { home: process.env.HOME, profile: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const transport = new FakeCli(okCli(agyOutput('gemini-3.1-pro-high')));
+      const response = await googleAdapter({
+        cliTransport: transport,
+        resolveExecutable: () => process.execPath,
+      }).invoke(request(context({})));
+
+      expect(response.status).toBe('ok');
+      // Assert on the KEY set, never the value — a failing value assertion would print a
+      // real credential into the test log.
+      expect(Object.keys(transport.calls[0]?.files ?? {})).not.toContain(
+        '.gemini/antigravity-cli/antigravity-oauth-token',
+      );
+    } finally {
+      process.env.HOME = previous.home;
+      process.env.USERPROFILE = previous.profile;
+    }
   });
 
   test('Google verifies the model identity in captured AGY stream-json output', async () => {

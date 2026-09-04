@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.8.20",
+  version: "2026.9.4",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -16078,7 +16078,7 @@ var SeatResponseSchema = exports_external.discriminatedUnion("status", [
 ]);
 
 // src/execution/provider.ts
-import { existsSync as existsSync2 } from "fs";
+import { existsSync as existsSync2, readFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { isAbsolute as isAbsolute2, join as join2, normalize, resolve as resolve2 } from "path";
 
@@ -17070,6 +17070,17 @@ var councilAnswerJsonSchema = JSON.stringify({
     decisiveTest: { type: "string", minLength: 1 }
   }
 });
+function skipBenignNotices(renderedMessages) {
+  const benignNotice = /^(?:warning|note|notice|info): [^\n]*$/i;
+  const lines = renderedMessages.split(`
+`);
+  let index = 0;
+  while (index < lines.length && (lines[index] === "" || benignNotice.test(lines[index] ?? ""))) {
+    index += 1;
+  }
+  return lines.slice(index).join(`
+`);
+}
 function parseFailure(code, actualModel) {
   return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
 }
@@ -17125,10 +17136,11 @@ ${expectedPrompt.replace(/\r\n/g, `
   if (/(?:^|\n)(?:exec|apply(?:_| )patch|patch:|view(?:_| )image|web(?:_| )search:|browser|computer|image(?:_| )generation|mcp:|collab:|hook:|tool)(?:[^\n]*\n|$)/i.test(renderedMessages)) {
     return parseFailure("unsafe-tool-isolation", actualModel);
   }
-  if (!renderedMessages.startsWith(answerMarker)) {
+  const answerTranscript = skipBenignNotices(renderedMessages);
+  if (!answerTranscript.startsWith(answerMarker)) {
     return parseFailure("identity-unverified", actualModel);
   }
-  const answers = renderedMessages.slice(answerMarker.length).split(`
+  const answers = answerTranscript.slice(answerMarker.length).split(`
 ${answerMarker}`).map((value) => value.trim());
   for (const renderedAnswer of answers) {
     let value;
@@ -17551,6 +17563,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
       cwd: tmpdir(),
       files: {
         "council-prompt.txt": structuredPrompt(prompt),
+        ...stagedAgyCredential(),
         ".gemini/antigravity-cli/settings.json": (workingDirectory) => JSON.stringify({
           enableTelemetry: false,
           trustedWorkspaces: [workingDirectory],
@@ -17563,6 +17576,15 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
     }),
     output: extractAgyOutput
   }, transport, resolveExecutable);
+}
+function stagedAgyCredential() {
+  const base = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
+  const source = join2(base, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  try {
+    return { ".gemini/antigravity-cli/antigravity-oauth-token": readFileSync(source, "utf8") };
+  } catch {
+    return {};
+  }
 }
 function resolveGrokExecutable() {
   return Bun.which("grok") ?? undefined;
@@ -21691,7 +21713,7 @@ async function applyGeneralMigration(input) {
 // src/cli.ts
 var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
-var DEFAULT_TIMEOUT_MS = 300000;
+var DEFAULT_TIMEOUT_MS = 1200000;
 var DEFAULT_SEAT_COUNT = 5;
 var DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
 var REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
@@ -22705,8 +22727,17 @@ async function runCliFacade(argv, environment = {}) {
     });
   }
 }
+var STDIN_MOTION_COMMANDS = new Set(["run", "council", "second-opinion"]);
+function shouldReadStdin(argv, isTty) {
+  if (isTty)
+    return false;
+  const command = argv[0];
+  if (command === undefined || !STDIN_MOTION_COMMANDS.has(command))
+    return false;
+  return !argv.some((argument) => argument === "--motion" || argument.startsWith("--motion="));
+}
 async function main(argv = Bun.argv.slice(2)) {
-  const stdin = process.stdin.isTTY ? undefined : await Bun.stdin.text();
+  const stdin = shouldReadStdin(argv, process.stdin.isTTY === true) ? await Bun.stdin.text() : undefined;
   const result = await runCliFacade(argv, stdin === undefined ? {} : { stdin });
   if (result.stdout.length > 0)
     process.stdout.write(result.stdout);
@@ -22717,6 +22748,7 @@ async function main(argv = Bun.argv.slice(2)) {
 if (import.meta.main)
   process.exit(await main());
 export {
+  shouldReadStdin,
   runCliFacade,
   main,
   ADAPTER_CONTRACT_VERSION

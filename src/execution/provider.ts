@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, resolve } from 'node:path';
 import { z } from 'zod';
@@ -839,6 +839,24 @@ const councilAnswerJsonSchema = JSON.stringify({
   },
 });
 
+/**
+ * Codex renders informational notices between the echoed prompt and the answer — for
+ * example "warning: Skill descriptions were shortened to fit the skills context budget"
+ * once enough skills are installed. Requiring the answer marker at offset zero turned that
+ * benign line into `identity-unverified` on a seat that had answered correctly. Skip blank
+ * lines and single-line notices only; every other prefix stays fatal, and the tool-isolation
+ * check above still runs over the whole transcript, so tool output cannot hide behind one.
+ */
+function skipBenignNotices(renderedMessages: string): string {
+  const benignNotice = /^(?:warning|note|notice|info): [^\n]*$/i;
+  const lines = renderedMessages.split('\n');
+  let index = 0;
+  while (index < lines.length && (lines[index] === '' || benignNotice.test(lines[index] ?? ''))) {
+    index += 1;
+  }
+  return lines.slice(index).join('\n');
+}
+
 function parseFailure(
   code: SubscriptionCliOutputFailure['code'],
   actualModel?: string,
@@ -916,11 +934,12 @@ function extractCodexOutput(
   ) {
     return parseFailure('unsafe-tool-isolation', actualModel);
   }
-  if (!renderedMessages.startsWith(answerMarker)) {
+  const answerTranscript = skipBenignNotices(renderedMessages);
+  if (!answerTranscript.startsWith(answerMarker)) {
     return parseFailure('identity-unverified', actualModel);
   }
 
-  const answers = renderedMessages
+  const answers = answerTranscript
     .slice(answerMarker.length)
     .split(`\n${answerMarker}`)
     .map((value) => value.trim());
@@ -1816,6 +1835,13 @@ export function createGoogleSubscriptionAdapter(
         cwd: tmpdir(),
         files: {
           'council-prompt.txt': structuredPrompt(prompt),
+          // This seat runs with HOME remapped to the isolation directory, so agy cannot
+          // reach the operator's OAuth token and exits "authentication required" — which
+          // surfaces as the opaque "agy subscription CLI failed". Stage a copy beside the
+          // settings file: stageRequestFiles writes it 0600 into a 0700 directory that is
+          // removed when the seat finishes. Omitted when the token is absent so an
+          // unauthenticated host still reports agy's own error instead of throwing here.
+          ...stagedAgyCredential(),
           '.gemini/antigravity-cli/settings.json': (workingDirectory) =>
             JSON.stringify({
               enableTelemetry: false,
@@ -1832,6 +1858,24 @@ export function createGoogleSubscriptionAdapter(
     transport,
     resolveExecutable,
   );
+}
+
+/**
+ * The operator's antigravity OAuth token, read at request time so a login performed after
+ * this process started is picked up. Returns an empty map when unreadable.
+ */
+function stagedAgyCredential(): Record<string, string> {
+  // Resolve the operator's home the way agy itself does, from the environment, so the
+  // parent's real profile is used and a test can point this at a fixture directory.
+  // Bun's os.homedir() ignores a reassigned HOME, which would otherwise read the live
+  // credential during tests.
+  const base = process.env.HOME ?? process.env.USERPROFILE ?? homedir();
+  const source = join(base, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+  try {
+    return { '.gemini/antigravity-cli/antigravity-oauth-token': readFileSync(source, 'utf8') };
+  } catch {
+    return {};
+  }
 }
 
 function resolveGrokExecutable(): string | undefined {
