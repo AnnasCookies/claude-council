@@ -405,7 +405,15 @@ function request(providerContext: ProviderContext): ProviderRequest {
 
 describe('provider roster', () => {
   test('constructs exactly one adapter for every governed family', () => {
-    const roster = createProviderRoster({ env: {}, resolveXaiExecutable: () => undefined });
+    // Stub every CLI resolver so the expected transports do not depend on which seat CLIs
+    // happen to be installed on the host running the tests (CI runners have none).
+    const roster = createProviderRoster({
+      env: {},
+      resolveClaudeExecutable: () => '/stub/claude',
+      resolveOpenAiExecutable: () => '/stub/codex',
+      resolveGoogleExecutable: () => '/stub/agy',
+      resolveXaiExecutable: () => undefined,
+    });
 
     expect(Object.keys(roster)).toEqual([
       'anthropic',
