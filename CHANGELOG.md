@@ -4,6 +4,24 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## 2026.9.5
+
+### Fixed
+
+- **The Anthropic seat died on real motions and reported only "claude process failed".** Observed
+  on 2026-09-04 and 2026-09-07: at `--effort max` the seat wrote a ~11 KB markdown-heavy answer
+  inside the JSON strings, Claude Code's structured-output step could not parse it, and after five
+  internal retries `claude -p` exited 1 with the reason on **stdout**
+  (`subtype: error_max_structured_output_retries`) and nothing on stderr — the only stream the
+  adapter read. The answer existed; the harness discarded it, and every council since ran without a
+  Claude voice while looking like a provider outage. Three changes: the adapter now reads the CLI's
+  own JSON reason on a non-zero exit and reports it as the seat error (`structured-output-failed`,
+  or `claude-<subtype>`); the seat prompt asks for plain single-paragraph string values with a length
+  cap so the CLI can parse its own output; and when structured output still fails, the seat makes
+  one schema-free attempt with the remaining budget, parsed by the same local strict validator.
+  Reproduced live before the fix (404 s, exit 1, empty stderr) and covered by five tests, two of
+  which fail with the fallback disabled.
+
 ## 2026.8.20
 
 ### Fixed

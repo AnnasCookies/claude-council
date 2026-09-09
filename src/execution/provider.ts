@@ -119,6 +119,64 @@ function structuredPrompt(prompt: string): string {
   return `${answerInstruction}\n\n${prompt}`;
 }
 
+/**
+ * The claude CLI's structured-output step parses the model's JSON itself, and a long answer with
+ * markdown, headings or raw line breaks inside a string value fails that parse. Observed live at
+ * `--effort max`: a ~11 KB `recommendation` failed five internal retries and the seat died with the
+ * answer discarded. Plain single-paragraph strings are cheap to ask for and remove the failure
+ * class; the schema keeps the shape, this keeps the content parseable.
+ */
+const claudeAnswerFormatGuard =
+  'Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string. Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.';
+
+function claudeStructuredPrompt(prompt: string): string {
+  return `${answerInstruction}\n${claudeAnswerFormatGuard}\n\n${prompt}`;
+}
+
+/** Below this remaining budget a schema-free retry cannot finish, so the seat fails honestly instead. */
+const claudeFallbackMinimumMs = 60_000;
+
+const ClaudeCliErrorSchema = z.object({
+  is_error: z.literal(true),
+  subtype: z.string().optional(),
+  errors: z.array(z.string()).optional(),
+});
+
+interface ClaudeCliFailure {
+  code: string;
+  message: string;
+}
+
+/**
+ * On a non-zero exit the claude CLI reports why on STDOUT as JSON (`is_error`, `subtype`, `errors`)
+ * and leaves stderr empty. Reading only stderr produced the bare "claude process failed" that hid a
+ * structured-output failure across two council runs; this turns the CLI's own reason into the seat
+ * error, redacted like every other external string.
+ */
+function describeClaudeCliFailure(stdout: string): ClaudeCliFailure | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  const parsed = ClaudeCliErrorSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const subtype = parsed.data.subtype ?? 'error';
+  const detail = parsed.data.errors?.[0] ?? '';
+  const code =
+    subtype === 'error_max_structured_output_retries'
+      ? 'structured-output-failed'
+      : `claude-${subtype.replace(/[^a-z0-9_-]+/gi, '-').toLowerCase()}`;
+  return {
+    code,
+    message: safeExternalMessage(
+      `claude exited with ${subtype}${detail ? `: ${detail}` : ''}`,
+      'claude process failed',
+    ),
+  };
+}
+
 function stripOuterJsonFence(text: string): string {
   const match = text.match(/^\s*```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i);
   return match?.[1] ?? text;
@@ -2331,41 +2389,68 @@ export function createAnthropicAdapter(
           0,
         );
       }
-      const result = await transport.run({
+      const baseArgs = [
+        '-p',
+        '--model',
+        route.primary,
+        '--effort',
+        anthropicReasoningEffort,
+        '--safe-mode',
+        '--no-session-persistence',
+        '--tools',
+        '',
+      ];
+      const stdin = claudeStructuredPrompt(request.prompt);
+      // Constrain decoding to the council answer shape instead of asking for JSON in prose. The
+      // prose-only form was observed failing a real motion with `invalid-structured-answer` while
+      // the same seat passed the trivial health prompt, so the seat that always sits was the one
+      // most exposed. The local strict parse still runs: native constrained decoding is a
+      // transport guarantee, not semantic truth, and a non-conforming answer must still fail.
+      let result = await transport.run({
         executable,
-        args: [
-          '-p',
-          '--model',
-          route.primary,
-          '--effort',
-          anthropicReasoningEffort,
-          '--safe-mode',
-          '--no-session-persistence',
-          '--tools',
-          '',
-          // Constrain decoding to the council answer shape instead of asking for JSON in prose. The
-          // prose-only form was observed failing a real motion with `invalid-structured-answer` while
-          // the same seat passed the trivial health prompt, so the seat that always sits was the one
-          // most exposed. The local strict parse still runs: native constrained decoding is a
-          // transport guarantee, not semantic truth, and a non-conforming answer must still fail.
-          '--json-schema',
-          councilAnswerJsonSchema,
-          '--output-format',
-          'json',
-        ],
-        stdin: structuredPrompt(request.prompt),
+        args: [...baseArgs, '--json-schema', councilAnswerJsonSchema, '--output-format', 'json'],
+        stdin,
         timeoutMs: request.context.timeoutMs,
         cwd: tmpdir(),
       });
+      let failure = result.status === 'ok' ? undefined : describeClaudeCliFailure(result.stdout);
+      let fallbackAttempted = false;
+      if (
+        result.status !== 'ok' &&
+        failure?.code === 'structured-output-failed' &&
+        request.context.timeoutMs - result.durationMs >= claudeFallbackMinimumMs
+      ) {
+        // Observed live (2026-09-04 and 2026-09-07): at `--effort max` the seat wrote an answer of
+        // ~11 KB of markdown inside the JSON strings, Claude Code's structured-output step could
+        // not parse it, and after five internal retries the CLI exited 1 with the reason on
+        // STDOUT (`subtype: error_max_structured_output_retries`) and nothing on stderr — which this
+        // adapter reported as a bare "claude process failed" on both runs. The answer existed; the
+        // schema step threw it away. One schema-free attempt keeps the seat while the local strict
+        // parse still decides whether the prose answer conforms.
+        capture(request, family, 'provider-failure', result.stdout);
+        fallbackAttempted = true;
+        result = await transport.run({
+          executable,
+          args: [...baseArgs, '--output-format', 'json'],
+          stdin,
+          timeoutMs: request.context.timeoutMs - result.durationMs,
+          cwd: tmpdir(),
+        });
+        failure = result.status === 'ok' ? undefined : describeClaudeCliFailure(result.stdout);
+      }
       if (result.status !== 'ok') {
         if (result.stderr) capture(request, family, 'provider-failure', result.stderr);
+        else if (failure) capture(request, family, 'provider-failure', result.stdout);
+        const attemptNote = fallbackAttempted ? ' (schema-free retry also failed)' : '';
         return seatError(
           request,
           family,
           route.primary,
           result.status === 'timed-out' ? 'timed-out' : 'failed',
-          result.errorCode ?? 'provider-failed',
-          safeExternalMessage(result.stderr, 'claude process failed'),
+          failure?.code ?? result.errorCode ?? 'provider-failed',
+          failure
+            ? `${failure.message}${attemptNote}`
+            : safeExternalMessage(result.stderr, 'claude process failed'),
           result.durationMs,
         );
       }

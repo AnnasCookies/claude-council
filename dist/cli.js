@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "claude-council",
-  version: "2026.9.4",
+  version: "2026.9.5",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -16654,6 +16654,37 @@ function structuredPrompt(prompt) {
   return `${answerInstruction}
 
 ${prompt}`;
+}
+var claudeAnswerFormatGuard = "Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string. Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.";
+function claudeStructuredPrompt(prompt) {
+  return `${answerInstruction}
+${claudeAnswerFormatGuard}
+
+${prompt}`;
+}
+var claudeFallbackMinimumMs = 60000;
+var ClaudeCliErrorSchema = exports_external.object({
+  is_error: exports_external.literal(true),
+  subtype: exports_external.string().optional(),
+  errors: exports_external.array(exports_external.string()).optional()
+});
+function describeClaudeCliFailure(stdout) {
+  let value;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    return;
+  }
+  const parsed = ClaudeCliErrorSchema.safeParse(value);
+  if (!parsed.success)
+    return;
+  const subtype = parsed.data.subtype ?? "error";
+  const detail = parsed.data.errors?.[0] ?? "";
+  const code = subtype === "error_max_structured_output_retries" ? "structured-output-failed" : `claude-${subtype.replace(/[^a-z0-9_-]+/gi, "-").toLowerCase()}`;
+  return {
+    code,
+    message: safeExternalMessage(`claude exited with ${subtype}${detail ? `: ${detail}` : ""}`, "claude process failed")
+  };
 }
 function stripOuterJsonFence(text) {
   const match = text.match(/^\s*```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```\s*$/i);
@@ -17834,31 +17865,46 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
       if (!isAbsolute2(executable)) {
         return seatError(request, family, route.primary, "skipped", "unsafe-transport", "claude executable is not absolute", 0);
       }
-      const result = await transport.run({
+      const baseArgs = [
+        "-p",
+        "--model",
+        route.primary,
+        "--effort",
+        anthropicReasoningEffort,
+        "--safe-mode",
+        "--no-session-persistence",
+        "--tools",
+        ""
+      ];
+      const stdin = claudeStructuredPrompt(request.prompt);
+      let result = await transport.run({
         executable,
-        args: [
-          "-p",
-          "--model",
-          route.primary,
-          "--effort",
-          anthropicReasoningEffort,
-          "--safe-mode",
-          "--no-session-persistence",
-          "--tools",
-          "",
-          "--json-schema",
-          councilAnswerJsonSchema,
-          "--output-format",
-          "json"
-        ],
-        stdin: structuredPrompt(request.prompt),
+        args: [...baseArgs, "--json-schema", councilAnswerJsonSchema, "--output-format", "json"],
+        stdin,
         timeoutMs: request.context.timeoutMs,
         cwd: tmpdir()
       });
+      let failure = result.status === "ok" ? undefined : describeClaudeCliFailure(result.stdout);
+      let fallbackAttempted = false;
+      if (result.status !== "ok" && failure?.code === "structured-output-failed" && request.context.timeoutMs - result.durationMs >= claudeFallbackMinimumMs) {
+        capture(request, family, "provider-failure", result.stdout);
+        fallbackAttempted = true;
+        result = await transport.run({
+          executable,
+          args: [...baseArgs, "--output-format", "json"],
+          stdin,
+          timeoutMs: request.context.timeoutMs - result.durationMs,
+          cwd: tmpdir()
+        });
+        failure = result.status === "ok" ? undefined : describeClaudeCliFailure(result.stdout);
+      }
       if (result.status !== "ok") {
         if (result.stderr)
           capture(request, family, "provider-failure", result.stderr);
-        return seatError(request, family, route.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", safeExternalMessage(result.stderr, "claude process failed"), result.durationMs);
+        else if (failure)
+          capture(request, family, "provider-failure", result.stdout);
+        const attemptNote = fallbackAttempted ? " (schema-free retry also failed)" : "";
+        return seatError(request, family, route.primary, result.status === "timed-out" ? "timed-out" : "failed", failure?.code ?? result.errorCode ?? "provider-failed", failure ? `${failure.message}${attemptNote}` : safeExternalMessage(result.stderr, "claude process failed"), result.durationMs);
       }
       let output;
       try {

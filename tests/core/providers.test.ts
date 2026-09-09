@@ -50,6 +50,38 @@ class FakeHttp implements HttpTransport {
   }
 }
 
+class SequenceCli implements CliTransport {
+  readonly calls: CliRequest[] = [];
+  constructor(private readonly results: CliResult[]) {}
+
+  async run(request: CliRequest): Promise<CliResult> {
+    this.calls.push(request);
+    const result = this.results[Math.min(this.calls.length - 1, this.results.length - 1)];
+    if (result === undefined) throw new Error('SequenceCli has no results');
+    return result;
+  }
+}
+
+/** What `claude -p --json-schema` wrote on 2026-09-07 after five failed structured-output attempts. */
+const structuredOutputFailure: CliResult = {
+  status: 'failed',
+  executable: process.execPath,
+  exitCode: 1,
+  stdout: JSON.stringify({
+    is_error: true,
+    subtype: 'error_max_structured_output_retries',
+    result: null,
+    errors: [
+      'Failed to provide valid structured output after 5 attempts — last StructuredOutput error: InputValidationError: StructuredOutput was called with input that could not be parsed as JSON.',
+    ],
+    modelUsage: { 'claude-opus-5': {} },
+  }),
+  stderr: '',
+  durationMs: 346_537,
+  treeTerminated: false,
+  errorCode: 'non-zero-exit',
+};
+
 class FakeCli implements CliTransport {
   readonly calls: CliRequest[] = [];
   constructor(private readonly result: CliResult) {}
@@ -2006,6 +2038,120 @@ describe('Anthropic CLI adapter', () => {
     // attestation. Absence here is the honest answer.
     expect(response.observedEffort).toBeUndefined();
     expect(response.credentialPath).toBe('subscription');
+  });
+
+  test('surfaces the CLI\'s own structured-output failure instead of "claude process failed"', async () => {
+    // Observed live on 2026-09-04 and 2026-09-07: at `--effort max` the seat wrote ~11 KB of
+    // markdown inside the JSON strings, the CLI's structured-output step could not parse it, and
+    // after five internal retries `claude` exited 1 with the reason on STDOUT and nothing on
+    // stderr. Both runs were reported as a bare "claude process failed"; the reason was in hand.
+    const diagnostics: ProviderDiagnostic[] = [];
+    const transport = new SequenceCli([structuredOutputFailure, structuredOutputFailure]);
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request({ ...context({}, diagnostics), timeoutMs: 600_000 }));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok')
+      throw new Error('structured-output failure unexpectedly succeeded');
+    expect(response.error.code).toBe('structured-output-failed');
+    expect(response.error.message).toContain('error_max_structured_output_retries');
+    expect(response.error.message).toContain('schema-free retry also failed');
+    expect(diagnostics.map((d) => d.code)).toEqual(['provider-failure', 'provider-failure']);
+  });
+
+  test('retries once without the schema when structured output fails, then parses the prose answer', async () => {
+    const transport = new SequenceCli([
+      structuredOutputFailure,
+      {
+        status: 'ok',
+        executable: process.execPath,
+        exitCode: 0,
+        stdout: JSON.stringify({
+          result: '```json\n' + answer + '\n```',
+          modelUsage: { 'claude-opus-5': {} },
+        }),
+        stderr: '',
+        durationMs: 10,
+        treeTerminated: false,
+        errorCode: null,
+      },
+    ]);
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request({ ...context({}), timeoutMs: 600_000 }));
+
+    expect(response.status).toBe('ok');
+    expect(response.actualModel).toBe('claude-opus-5');
+    expect(transport.calls).toHaveLength(2);
+    expect(transport.calls[0]?.args).toContain('--json-schema');
+    expect(transport.calls[1]?.args).not.toContain('--json-schema');
+    expect(transport.calls[1]?.args).toEqual(expect.arrayContaining(['--output-format', 'json']));
+    // The retry budget is what was left of the seat's budget, never a fresh full allowance.
+    expect(transport.calls[1]?.timeoutMs).toBe(600_000 - structuredOutputFailure.durationMs);
+  });
+
+  test('does not retry when the remaining seat budget could not finish a schema-free attempt', async () => {
+    const transport = new SequenceCli([structuredOutputFailure]);
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({}))); // 1 s budget in the test context
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok')
+      throw new Error('structured-output failure unexpectedly succeeded');
+    expect(response.error.code).toBe('structured-output-failed');
+    expect(response.error.message).not.toContain('schema-free retry');
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  test('keeps the generic message when a non-zero exit carries no JSON reason', async () => {
+    const transport = new FakeCli({
+      status: 'failed',
+      executable: process.execPath,
+      exitCode: 1,
+      stdout: 'not json',
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: 'non-zero-exit',
+    });
+    const response = await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request({ ...context({}), timeoutMs: 600_000 }));
+
+    expect(response.status).toBe('failed');
+    if (response.status === 'ok') throw new Error('non-zero exit unexpectedly succeeded');
+    expect(response.error.code).toBe('non-zero-exit');
+    expect(response.error.message).toBe('claude process failed');
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  test('asks the seat for plain single-paragraph strings so the CLI can parse its own output', async () => {
+    const transport = new FakeCli({
+      status: 'ok',
+      executable: process.execPath,
+      exitCode: 0,
+      stdout: JSON.stringify({ result: answer, modelUsage: { 'claude-opus-5': {} } }),
+      stderr: '',
+      durationMs: 10,
+      treeTerminated: false,
+      errorCode: null,
+    });
+    await anthropicAdapter({
+      cliTransport: transport,
+      resolveExecutable: () => process.execPath,
+    }).invoke(request(context({})));
+
+    expect(transport.calls[0]?.stdin).toContain(stagedCouncilPrompt.split('\n\n')[0]);
+    expect(transport.calls[0]?.stdin).toContain(
+      'no line breaks or tab characters inside any string',
+    );
+    expect(transport.calls[0]?.stdin).toContain('Evaluate the supplied evidence pack.');
   });
 
   test('rejects a responding model outside the configured route', async () => {
