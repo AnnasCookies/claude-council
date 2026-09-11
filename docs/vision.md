@@ -1,8 +1,9 @@
 # Vision: the council suite
 
-Working name. The project's own name and repository are the first decision after this page and
-`docs/modes.md` are accepted. Upstream `hex/claude-council` is credited as the starting scaffold;
-this is a different program.
+The project is named **convene**. That name replaces `claude-council` for the repository, the CLI,
+the plugin id and the Atlas project slug. The rename is its own chore PR after the substrate is
+extracted, and until it lands the docs use `council` as the CLI name. Upstream `hex/claude-council`
+is credited as the starting scaffold; this is a different program.
 
 Written 2026-09-10 from the brainstorm on `docs/council-suite-brief.md`. Every build brief cites
 this page and `docs/modes.md`. A run that cannot map its output to a mode in `modes.md` stops and
@@ -12,7 +13,8 @@ asks.
 
 Two consumers, and every call says which one it is.
 
-- **You**, working from any harness you run (Claude Code, omp, pi, codex) on any of your machines,
+- **You**, working from any harness you run (Claude Code, omp, pi, codex, agy, grok) on any of your
+  machines,
   when you want more than one perspective before deciding, or a room to think in.
 - **The agent you are working with**, when it needs a second view in seconds (an advisor) or a
   batch sorted (triage), and will act on the answer itself.
@@ -41,7 +43,8 @@ A **mode** is a named setting of five knobs, plus its own invariants and its own
 
 Eight forms are specified in `docs/modes.md`: advisor, second opinion, consultants, forum,
 committee, ideation, triage, audience. The committee is what exists today. Advisor and ideation
-are the furthest from it.
+are the furthest from it. They ship first, in that order, once the substrate is extracted and the
+committee runs as the first mode on it.
 
 ## Principles
 

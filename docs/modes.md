@@ -4,7 +4,7 @@ Each mode is a named setting of the five knobs from `docs/vision.md`, plus its o
 its own `output` shape inside the shared result envelope, and an example invocation. The
 substrate underneath is shared and described first.
 
-`council` is the working CLI name until the rename. Examples show the CLI form; the skill, slash
+`council` is the CLI name until the rename to `convene` lands in its own chore PR. Examples show the CLI form; the skill, slash
 command or hook in each harness wraps it and holds no logic of its own. Flags marked _new_ do not
 exist yet. Everything else in an example already runs today.
 
@@ -160,8 +160,12 @@ skipped and the log records `skipped` with the reason.
 }
 ```
 
-**Placement.** In-harness seat (omp style) or a sidecar the harnesses call is an open decision.
-This spec is placement-neutral: transcript window in, note out, `heed` back.
+**Placement.** Decided 2026-09-12: a sidecar. The CLI holds the advisor. Claude Code, pi, codex,
+agy and grok each wire a hook that pipes the transcript window in and reads the note out. omp
+keeps its native `advisor:` seat and posts its notes into the shared log through the CLI, so one
+note log covers every harness. A harness with no pre-tool hook gets cadence and on-demand only,
+and its notes record that holds were unavailable. The contract is the same everywhere:
+transcript window in, note out, `heed` back.
 
 **Example.**
 
@@ -170,6 +174,7 @@ council advise --session s1 --watch --every 3 --transcript -            # new; w
 council advise --session s1 --hold --class destructive-git --tool "git push --force origin main"   # new
 council advise --session s1 --ask "Is there a simpler route than a migration here?"                # new
 council advise --session s1 --heed n-42 yes                                                        # new
+council advise --session s1 --note --from omp \"…\"   # new; omp's native seat posts into the shared log
 ```
 
 ## Second opinion
@@ -467,21 +472,38 @@ council audience --personas ops-manager,new-starter,sceptic --draft docs/announc
 
 ## Entry points
 
-| Entry point          | Today                                                    | Under the suite                                                        |
-| -------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `/council`           | committee run                                            | committee, unchanged                                                   |
-| `/second-opinion`    | one blind round                                          | second opinion, unchanged                                              |
-| `/ask`               | routes to committee with `--debate`, else second opinion | unchanged for now; may later route across modes                        |
-| `/result`, `/status` | records and doctor                                       | unchanged                                                              |
-| omp `advisor:` seat  | omp's own advisor                                        | reference feel for advisor mode; integration is the placement decision |
-| new skills per mode  | none                                                     | named after the rename decision                                        |
+| Entry point          | Today                                                    | Under the suite                                                         |
+| -------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `/council`           | committee run                                            | committee, unchanged                                                    |
+| `/second-opinion`    | one blind round                                          | second opinion, unchanged                                               |
+| `/ask`               | routes to committee with `--debate`, else second opinion | unchanged for now; may later route across modes                         |
+| `/result`, `/status` | records and doctor                                       | unchanged                                                               |
+| omp `advisor:` seat  | omp's own advisor                                        | keeps its native seat and posts notes to the shared log through the CLI |
+| new skills per mode  | none                                                     | named under `convene` after the rename                                  |
 
-## Open decisions
+## Decisions taken
 
-These are the user's, taken after this document is accepted, per the brief.
+Taken with the user on 2026-09-12, after this document was accepted.
 
-1. The project's name and repository.
-2. Refactor the committee kernel in place, or extract the substrate first.
-3. Which subscription is primary per family, and the metered fallback for each.
-4. Advisor placement: in-harness seat or sidecar.
-5. Which two modes ship first. The brief's candidates are advisor and ideation.
+1. **Name: `convene`.** Repository, CLI, plugin id and Atlas project slug. The rename is one chore
+   PR of its own, after the substrate PR, with a one-line credit to `hex/claude-council` as the
+   starting scaffold.
+2. **Extract the substrate first.** One PR moves seats, transports, policy, records and health
+   under a substrate boundary and runs the committee as the first mode on top, behaviour unchanged
+   and tests green. Later modes add files instead of editing the committee runner.
+3. **Provider routes stay as the kernel resolves them today.** Per family the subscription CLI is
+   primary and the same family's `COUNCIL_<FAMILY>_API_KEY` is the metered fallback: Anthropic via
+   `claude`, OpenAI via `codex exec`, xAI via `grok`, Google via the Antigravity CLI (`agy`).
+   DeepSeek and Moonshot are metered only. Cross-family fallback stays prohibited.
+4. **Advisor placement: sidecar, with omp keeping its native seat.** See Placement under Advisor.
+5. **Ship order.** Advisor first, then ideation, then the remaining modes in the order the user
+   picks.
+
+## Build order
+
+1. Substrate extraction (committee unchanged).
+2. Rename to `convene`, including distribution through `annascookies-plugins` and dotagents.
+3. Advisor mode.
+4. Ideation mode.
+
+Each step is one brief citing this document and `docs/vision.md`, sized to one mode or one chore.
