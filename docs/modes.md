@@ -84,8 +84,9 @@ Two stores, one role each. Neither replaces the other.
 - **Findability is Atlas.** Each terminal record is also rendered as a minutes file into the
   vault's raw writing tree, where the existing ingest picks it up as a `document`. The kernel
   never calls Atlas directly; the vault pipeline does the work.
-- **Decisions are distilled.** A committee ruling is written to Atlas as a `decision` naming the
-  run id and record path. Any other mode's synthesis goes to Atlas only when the caller asks.
+- **Decisions are distilled.** When a chair records a ruling, the wrapper that took it (the
+  harness holds the Atlas tools, the kernel does not) writes a `decision` to Atlas naming the run
+  id and record path. Any other mode's synthesis goes to Atlas only when the caller asks.
 - **Raw harness transcripts never enter the store.** What a harness sends a seat as input is not
   what the store keeps. The store keeps what the seats said.
 
