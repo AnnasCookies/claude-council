@@ -54,3 +54,6 @@ autoresearch-results.tsv
 .claude/settings.local.json
 .obsidian/
 CLAUDE.local.md
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
