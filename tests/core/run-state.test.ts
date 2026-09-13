@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { transitionRun } from '../../src/domain/run-state';
+import { transitionRun } from '../../src/substrate/domain/run-state';
 
 describe('run-state transitions', () => {
   test('allows only declared queued and running transitions', () => {

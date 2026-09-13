@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
-import type { ProjectPolicy } from '../../src/domain/schemas';
+import type { ProjectPolicy } from '../../src/substrate/domain/schemas';
 import {
   createOverrideRecord,
   evaluateOutbound,
   type DataPolicyOverride,
-} from '../../src/policy/data-guard';
+} from '../../src/substrate/policy/data-guard';
 
 const TIMESTAMP = '2026-07-27T00:00:00.000Z';
 

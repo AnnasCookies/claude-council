@@ -18,7 +18,7 @@ import {
   type ProviderFamily,
   type RefinementTrigger,
   type RunManifest,
-} from './domain/schemas';
+} from './substrate/domain/schemas';
 import {
   BillingModeSchema,
   DEFAULT_BILLING_MODE,
@@ -27,31 +27,31 @@ import {
   type ProviderContext,
   type ProviderDiagnostic,
   type ProviderTransportResolution,
-} from './execution/provider';
+} from './substrate/execution/provider';
 import {
   CouncilRunner,
   type CouncilRunResult,
   type CouncilSeatAssignment,
-} from './execution/runner';
-import { snapshot } from './health/baseline';
-import { doctor } from './health/doctor';
-import { probeRoster, type ProviderProbe } from './health/probe';
+} from './substrate/execution/runner';
+import { snapshot } from './substrate/health/baseline';
+import { doctor } from './substrate/health/doctor';
+import { probeRoster, type ProviderProbe } from './substrate/health/probe';
 import {
   loadModelRegistryWithProvenance,
   ModelRegistrySchema,
   resolveModelRegistry,
   type LoadedModelRegistry,
   type ModelRegistry,
-} from './models/registry';
-import { evaluateOutbound, type PolicyDecision } from './policy/data-guard';
-import { scanAndRedact } from './policy/secrets';
-import { createProviderRoster, type ProviderRoster } from './providers';
+} from './substrate/models/registry';
+import { evaluateOutbound, type PolicyDecision } from './substrate/policy/data-guard';
+import { scanAndRedact } from './substrate/policy/secrets';
+import { createProviderRoster, type ProviderRoster } from './substrate/providers';
 import {
   MigrationPlanSchema,
   MigrationRuleSchema,
   applyGeneralMigration,
   planGeneralMigration,
-} from './records/migrate-general';
+} from './substrate/records/migrate-general';
 import {
   CouncilStore,
   SessionRecordSchema,
@@ -59,7 +59,7 @@ import {
   type PersistedDecisionState,
   type SessionRecord,
   writeTextAtomically,
-} from './records/store';
+} from './substrate/records/store';
 import {
   AssignmentHistorySchema,
   assignLenses,
@@ -68,7 +68,7 @@ import {
   selectLenses,
   type AssignmentHistory,
   type RoleAssignment,
-} from './roles/allocator';
+} from './substrate/roles/allocator';
 
 export const ADAPTER_CONTRACT_VERSION = 1 as const;
 const SCHEMA_VERSION = 1;

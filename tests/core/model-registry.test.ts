@@ -7,7 +7,7 @@ import {
   loadModelRegistry,
   loadModelRegistryWithProvenance,
   resolveModelRegistry,
-} from '../../src/models/registry';
+} from '../../src/substrate/models/registry';
 
 async function withRegistryOverride<T>(
   override: unknown,

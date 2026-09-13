@@ -4,8 +4,8 @@ import type {
   ProviderFamily,
   RoleCategory,
   SeatResponse,
-} from '../../src/domain/schemas';
-import type { ModelRegistry } from '../../src/models/registry';
+} from '../../src/substrate/domain/schemas';
+import type { ModelRegistry } from '../../src/substrate/models/registry';
 import type {
   Availability,
   HealthResult,
@@ -13,13 +13,13 @@ import type {
   ProviderContext,
   ProviderDiagnostic,
   ProviderRequest,
-} from '../../src/execution/provider';
+} from '../../src/substrate/execution/provider';
 import {
   CouncilRunInputSchema,
   CouncilRunResultSchema,
   CouncilRunner,
   type CouncilRunInput,
-} from '../../src/execution/runner';
+} from '../../src/substrate/execution/runner';
 
 const families = ['anthropic', 'openai', 'xai', 'google', 'deepseek', 'moonshot'] as const;
 

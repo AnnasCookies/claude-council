@@ -6,17 +6,17 @@ import {
   ProviderFamilySchema,
   type ProjectPolicy,
   type ProviderFamily,
-} from '../../src/domain/schemas';
+} from '../../src/substrate/domain/schemas';
 import type {
   Availability,
   HealthResult,
   ProviderAdapter,
   ProviderContext,
   ProviderRequest,
-} from '../../src/execution/provider';
-import { loadModelRegistry } from '../../src/models/registry';
+} from '../../src/substrate/execution/provider';
+import { loadModelRegistry } from '../../src/substrate/models/registry';
 import { runCliFacade, shouldReadStdin, type CliFacadeEnvironment } from '../../src/cli';
-import { assignLenses, selectLenses } from '../../src/roles/allocator';
+import { assignLenses, selectLenses } from '../../src/substrate/roles/allocator';
 
 const NOW = '2026-07-28T12:00:00.000Z';
 const REDUCED_QUORUM_WARNING =

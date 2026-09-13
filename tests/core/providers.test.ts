@@ -2,10 +2,10 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
-import { loadModelRegistry, type ModelRegistry } from '../../src/models/registry';
-import type { CliRequest, CliResult } from '../../src/execution/cli';
-import type { HttpRequest, HttpResult, RetryPolicy } from '../../src/execution/http';
-import { doctor } from '../../src/health/doctor';
+import { loadModelRegistry, type ModelRegistry } from '../../src/substrate/models/registry';
+import type { CliRequest, CliResult } from '../../src/substrate/execution/cli';
+import type { HttpRequest, HttpResult, RetryPolicy } from '../../src/substrate/execution/http';
+import { doctor } from '../../src/substrate/health/doctor';
 import {
   createOpenAiSubscriptionAdapter,
   type CliTransport,
@@ -13,14 +13,14 @@ import {
   type ProviderContext,
   type ProviderDiagnostic,
   type ProviderRequest,
-} from '../../src/execution/provider';
-import { createProviderRoster } from '../../src/providers';
-import { anthropicAdapter } from '../../src/providers/anthropic-cli';
-import { deepseekAdapter } from '../../src/providers/deepseek';
-import { googleAdapter } from '../../src/providers/google';
-import { moonshotAdapter } from '../../src/providers/moonshot';
-import { openaiAdapter } from '../../src/providers/openai';
-import { xaiAdapter } from '../../src/providers/xai';
+} from '../../src/substrate/execution/provider';
+import { createProviderRoster } from '../../src/substrate/providers';
+import { anthropicAdapter } from '../../src/substrate/providers/anthropic-cli';
+import { deepseekAdapter } from '../../src/substrate/providers/deepseek';
+import { googleAdapter } from '../../src/substrate/providers/google';
+import { moonshotAdapter } from '../../src/substrate/providers/moonshot';
+import { openaiAdapter } from '../../src/substrate/providers/openai';
+import { xaiAdapter } from '../../src/substrate/providers/xai';
 
 const answer = JSON.stringify({
   recommendation: 'Proceed carefully.',

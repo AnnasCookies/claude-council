@@ -3,7 +3,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CLI_OUTPUT_LIMIT_BYTES, runIsolatedCli } from '../../src/execution/cli';
+import { CLI_OUTPUT_LIMIT_BYTES, runIsolatedCli } from '../../src/substrate/execution/cli';
 
 const fixtures = join(import.meta.dir, 'fixtures');
 setDefaultTimeout(20_000);
@@ -145,7 +145,7 @@ describe('isolated CLI execution', () => {
       await copyFile(process.execPath, externalExecutable);
       await chmod(externalExecutable, 0o755);
       const build = await Bun.build({
-        entrypoints: [join(import.meta.dir, '../../src/execution/cli.ts')],
+        entrypoints: [join(import.meta.dir, '../../src/substrate/execution/cli.ts')],
         outdir: outputDirectory,
         target: 'bun',
         format: 'esm',
@@ -154,7 +154,7 @@ describe('isolated CLI execution', () => {
 
       const bundled = (await import(
         `${pathToFileURL(join(outputDirectory, 'cli.js')).href}?test=${Date.now()}`
-      )) as typeof import('../../src/execution/cli');
+      )) as typeof import('../../src/substrate/execution/cli');
       const result = await bundled.runIsolatedCli({
         executable: externalExecutable,
         args: [join(fixtures, 'cli-ok.ts')],

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { RoundExecutionSchema } from '../../src/execution/runner';
+import { RoundExecutionSchema } from '../../src/substrate/execution/runner';
 import {
   CouncilStore,
   CurrentSessionRecordSchema,
@@ -15,7 +15,7 @@ import {
   type CurrentSessionRecord,
   type ExecutionSnapshot,
   type ResolutionRecord,
-} from '../../src/records/store';
+} from '../../src/substrate/records/store';
 const GENERAL_LEDGER = '# General ledger\n';
 const STARTED_AT = '2026-07-27T09:00:00.000Z';
 const ORDINARY_PROTOCOL = {

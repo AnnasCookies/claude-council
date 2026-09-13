@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { requestWithPolicy, type RetryPolicy } from '../../src/execution/http';
+import { requestWithPolicy, type RetryPolicy } from '../../src/substrate/execution/http';
 import { fakeProvider, hangingProvider } from './fixtures/fake-provider';
 
 const testRetryPolicy: RetryPolicy = {
