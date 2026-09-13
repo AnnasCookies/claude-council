@@ -6,7 +6,7 @@ import {
   applyGeneralMigration,
   planGeneralMigration,
   type MigrationPlan,
-} from '../../src/records/migrate-general';
+} from '../../src/substrate/records/migrate-general';
 
 const SOURCE_LEDGER =
   '# General ledger\n\n' +

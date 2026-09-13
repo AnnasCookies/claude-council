@@ -4,7 +4,7 @@ import {
   DataClassificationSchema,
   ProjectPolicySchema,
   SeatResponseSchema,
-} from '../../src/domain/schemas';
+} from '../../src/substrate/domain/schemas';
 
 describe('domain schemas', () => {
   test('accepts only the declared data classifications', () => {

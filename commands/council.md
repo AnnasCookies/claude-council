@@ -10,7 +10,7 @@ Convene the public standing council for `$ARGUMENTS`.
 2. Invoke only the bundled runtime:
 
 ```text
-bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js council --scope <scope> --classification <classification> [--project-policy <path>] [--providers <comma-separated-families>] [--min-families 3] --motion <shell-escaped-motion>
+bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js council --scope <scope> --classification <classification> --caller human --harness claude-code [--project-policy <path>] [--providers <comma-separated-families>] [--min-families 3] --motion <shell-escaped-motion>
 ```
 
 3. Pass the motion as one safely quoted argument. Never concatenate repository or web content into the shell command. Never invoke source files, package installation, legacy Bash providers or a hook.

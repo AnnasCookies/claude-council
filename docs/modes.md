@@ -12,7 +12,7 @@ exist yet. Everything else in an example already runs today.
 
 | Part       | Today                                                                                                                            | Change the suite needs                                                                                                           |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Seats      | A seat is a provider family plus a model; identity verified per seat                                                             | A seat becomes model plus lens. Lens from `src/roles/catalogue.json` or a persona list supplied with the call                    |
+| Seats      | A seat is a provider family plus a model; identity verified per seat                                                             | A seat becomes model plus lens. Lens from `src/substrate/roles/catalogue.json` or a persona list supplied with the call          |
 | Transports | Subscription CLI first, metered API fallback recorded as `credentialFallback`; billing modes `sub-first`, `sub-only`, `api-only` | A per-session spend cap. Fast modes pin `sub-only`                                                                               |
 | Execution  | One runner: blind round, rebuttal round, optional refinement                                                                     | Three patterns: **streaming** (advisor), **parallel** (one blind round), **rounds** (rebuttal). The existing runner is the third |
 | Records    | Store scopes `general/` and `projects/<id>/`, each with sessions, resolutions, ledger; append-only, atomic writes                | Each mode declares what it writes. The envelope is the record; see Records and memory                                            |
@@ -23,6 +23,10 @@ exist yet. Everything else in an example already runs today.
 
 Every mode returns one envelope, validated with Zod before anything is rendered or returned.
 An envelope that fails validation is a failed run, not a partial one.
+
+The example below is illustrative; the canonical field set is `ResultEnvelopeSchema` in
+`src/substrate/envelope.ts`, which adds `schemaVersion`, `caller.declared`, `spend.policy`,
+`spend.refused` and a `record` object.
 
 ```json
 {

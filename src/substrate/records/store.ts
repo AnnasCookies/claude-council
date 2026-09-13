@@ -14,6 +14,7 @@ import {
   SeatResponseSchema,
 } from '../domain/schemas';
 import type { CouncilScope } from '../domain/schemas';
+import { ResultEnvelopeSchema } from '../envelope';
 import { AssignmentHistorySchema, type AssignmentHistory } from '../roles/allocator';
 
 const NonEmptyStringSchema = z.string().trim().min(1);
@@ -179,6 +180,9 @@ const CurrentSessionRecordShape = {
   schemaVersion: z.literal(2),
   decisionState: PersistedDecisionStateSchema,
   execution: ExecutionSnapshotSchema,
+  // Additive. Records written before the envelope existed stay valid, and the envelope is the
+  // same object the caller received, so what an agent consumed and what is stored do not drift.
+  envelope: ResultEnvelopeSchema.optional(),
 };
 
 const LegacyGeneralSessionRecordSchema = z.strictObject({
@@ -413,6 +417,11 @@ interface PersistedScopeState {
   chairAcceptances: readonly ChairAcceptanceRecord[];
   chairRulings: readonly ChairRulingRecord[];
   resolutions: readonly ResolutionRecord[];
+}
+
+/** The absolute paths a record write committed, so a caller can commit exactly those files. */
+export interface RecordWrite {
+  readonly paths: readonly string[];
 }
 
 export interface AtomicTextWriteOptions {
@@ -954,14 +963,14 @@ export class CouncilStore {
     return AssignmentHistorySchema.parse(state.sessions.flatMap(({ assignments }) => assignments));
   }
 
-  async writeSession(input: CurrentSessionRecord): Promise<void> {
+  async writeSession(input: CurrentSessionRecord): Promise<RecordWrite> {
     const record = CurrentSessionRecordSchema.parse(input);
     const directory = scopeDirectory(
       this.root,
       CouncilScopeSchema.parse(record.scope),
       record.scope === 'project' ? record.projectId : undefined,
     );
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
 
       if (state.sessions.some((session) => session.runId === record.runId)) {
@@ -1009,17 +1018,18 @@ export class CouncilStore {
         if (markdownCommitted) await removeCommittedFile(markdownPath, error);
         throw error;
       }
+      return { paths: [markdownPath, jsonPath] };
     });
   }
 
-  async appendChairAcceptance(input: ChairAcceptanceRecord): Promise<void> {
+  async appendChairAcceptance(input: ChairAcceptanceRecord): Promise<RecordWrite> {
     const record = ChairAcceptanceRecordSchema.parse(input);
     const directory = scopeDirectory(
       this.root,
       CouncilScopeSchema.parse(record.scope),
       record.scope === 'project' ? record.projectId : undefined,
     );
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       const session = state.sessions.find((candidate) => candidate.runId === record.runId);
       if (
@@ -1071,6 +1081,7 @@ export class CouncilStore {
         if (markdownCommitted) await removeCommittedFile(markdownPath, error);
         throw error;
       }
+      return { paths: [markdownPath, jsonPath] };
     });
   }
 
@@ -1079,14 +1090,14 @@ export class CouncilStore {
    * decision: nothing in the execution path may write one. A degraded session must already carry a
    * chair acceptance, so accepting a weak result and ruling on it stay two deliberate acts.
    */
-  async appendChairRuling(input: ChairRulingRecord): Promise<void> {
+  async appendChairRuling(input: ChairRulingRecord): Promise<RecordWrite> {
     const record = ChairRulingRecordSchema.parse(input);
     const directory = scopeDirectory(
       this.root,
       CouncilScopeSchema.parse(record.scope),
       record.scope === 'project' ? record.projectId : undefined,
     );
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       const session = state.sessions.find((candidate) => candidate.runId === record.runId);
       if (
@@ -1144,6 +1155,7 @@ export class CouncilStore {
         if (markdownCommitted) await removeCommittedFile(markdownPath, error);
         throw error;
       }
+      return { paths: [markdownPath, jsonPath] };
     });
   }
 
@@ -1188,14 +1200,14 @@ export class CouncilStore {
     });
   }
 
-  async appendResolution(input: ResolutionRecord): Promise<void> {
+  async appendResolution(input: ResolutionRecord): Promise<RecordWrite> {
     const record = ResolutionRecordSchema.parse(input);
     const directory = scopeDirectory(
       this.root,
       CouncilScopeSchema.parse(record.scope),
       record.scope === 'project' ? record.projectId : undefined,
     );
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       const session = state.sessions.find((candidate) => candidate.runId === record.runId);
 
@@ -1290,6 +1302,7 @@ export class CouncilStore {
         if (markdownCommitted) await removeCommittedFile(markdownPath, error);
         throw error;
       }
+      return { paths: [markdownPath, jsonPath, ledgerPath] };
     });
   }
 }

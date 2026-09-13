@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import type { ModelTransport, SeatResponse } from '../../src/domain/schemas';
+import type { ModelTransport, SeatResponse } from '../../src/substrate/domain/schemas';
 import type {
   Availability,
   HealthResult,
   ProviderAdapter,
   ProviderContext,
   ProviderRequest,
-} from '../../src/execution/provider';
-import { compareBaseline, snapshot } from '../../src/health/baseline';
-import { probeRoster } from '../../src/health/probe';
-import { loadModelRegistry, type ModelRegistry } from '../../src/models/registry';
+} from '../../src/substrate/execution/provider';
+import { compareBaseline, snapshot } from '../../src/substrate/health/baseline';
+import { probeRoster } from '../../src/substrate/health/probe';
+import { loadModelRegistry, type ModelRegistry } from '../../src/substrate/models/registry';
 
 const CAPTURED_AT = '2026-07-28T00:00:00.000Z';
 

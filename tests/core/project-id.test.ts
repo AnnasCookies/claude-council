@@ -6,7 +6,7 @@ import {
   canonicaliseRemote,
   projectIdFromRemote,
   resolveProjectIdentity,
-} from '../../src/records/project-id';
+} from '../../src/substrate/records/project-id';
 
 setDefaultTimeout(15_000);
 

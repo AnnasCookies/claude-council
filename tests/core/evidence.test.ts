@@ -3,8 +3,8 @@ import {
   EvidenceInputSchema,
   EvidencePackSchema,
   type EvidenceInput,
-} from '../../src/evidence/schema';
-import { normaliseEvidence } from '../../src/evidence/normalise';
+} from '../../src/substrate/evidence/schema';
+import { normaliseEvidence } from '../../src/substrate/evidence/normalise';
 
 const RETRIEVED_AT = '2026-07-28T09:30:00.000Z';
 

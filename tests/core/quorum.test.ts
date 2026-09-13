@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import type { ProviderFamily, QuorumPolicy, SeatResponse } from '../../src/domain/schemas';
-import { evaluateQuorum, QuorumEvaluationSchema } from '../../src/domain/quorum';
+import type {
+  ProviderFamily,
+  QuorumPolicy,
+  SeatResponse,
+} from '../../src/substrate/domain/schemas';
+import { evaluateQuorum, QuorumEvaluationSchema } from '../../src/substrate/domain/quorum';
 
 const normalPolicy = {
   minimumDistinctFamilies: 3,

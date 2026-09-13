@@ -1,13 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { z } from 'zod';
-import { RoleLensSchema } from '../../src/domain/schemas';
+import { RoleLensSchema } from '../../src/substrate/domain/schemas';
 import {
   assignLenses,
   RoleAssignmentSchema,
   roleCatalogue,
   selectLenses,
   type MotionMetadata,
-} from '../../src/roles/allocator';
+} from '../../src/substrate/roles/allocator';
 
 const ARCHITECTURE_MOTION = {
   domains: ['architecture'],

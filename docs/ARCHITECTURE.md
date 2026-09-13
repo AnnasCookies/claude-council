@@ -18,15 +18,86 @@ flowchart TD
   H --> I[Round response validation and redaction]
   I --> J[Distinct-family quorum]
   J -->|failed| K[blocked-quorum result]
-  J -->|passed| L[Completed result / chair adjudication]
+  J -->|passed| L[Envelope, record commit, minutes / chair adjudication]
   L --> M[Scoped atomic session and resolution records]
 ```
 
+## Substrate and modes
+
+`src/substrate/` is everything a mode needs and nothing a mode decides: seats and lenses
+(`roles/`, `models/`), transports and provider adapters (`execution/`, `providers/`), policy and
+secrets (`policy/`, `evidence/`), records (`records/`), health (`health/`), the execution
+patterns (`patterns/`), the spend ledger (`spend.ts`), the result envelope (`envelope.ts`) and
+the session helpers (`session.ts`). Its only public entry is `src/substrate/index.ts`.
+
+`src/modes/` is a registry of `ModeDefinition`s. A mode declares the five knobs from
+`docs/vision.md`, its execution pattern, its defaults, its spend policy, how it prepares a
+session (the committee's health preflight lives here) and the shape of its `output` block.
+`committee` and `second-opinion` are registered; `docs/modes.md` specifies the rest.
+
+`src/cli.ts` parses flags, resolves the mode for the command, builds the envelope, persists the
+session and prints. `tests/core/dependency-direction.test.ts` enforces that modes reach the
+substrate only through its index, that the substrate never imports a mode or the CLI, and that no
+mode imports another.
+
+## Result envelope
+
+Every executed run returns one `ResultEnvelope` (`src/substrate/envelope.ts`), validated before it
+is printed or stored: mode, session, declared caller, pattern, rounds, one entry per seat with
+verified identity and the transport that answered, the mode's `output`, attributed synthesis and
+dissent (both `null` until the synthesis brief), a unanimity flag to be suspicious of, spend,
+`degraded` reasons and the record location. The same object is embedded in the session record.
+
+## Spend
+
+A mode's spend policy is `capped` or `never-metered`. `never-metered` pins `sub-only`. `capped`
+takes a per-session cap on metered fallback calls (`--spend-cap`, default seats × rounds, which is
+the historical behaviour of one metered retry per seat per round). The cap is enforced inside the
+credential fallback wrapper, so a refused metered call shows as a `spend-cap` seat failure and the
+envelope reports `stoppedAtCap` with a non-zero exit.
+
+The cap only ever governs `sub-first`, because that is the only billing mode where a fallback call
+crosses credential paths at all: under `--billing api-only` every call is metered by deliberate
+choice, `withCredentialFallback` is not reachable, and the cap does not apply, though
+`envelope.spend.used` still reports the true metered count; under `sub-only` no metered call is
+possible, so there is nothing for a cap to refuse.
+
+A run that reaches the spend cap exits 4 even when its outcome is `completed`: the envelope carries
+`spend-cap-reached` in `degraded` and `stoppedAtCap: true` in `spend`, and the CLI result adds a
+top-level `spendWarning`. Exit 0 requires both an outcome of `completed` and an unreached cap.
+
+A metered call that the runner retries after a transient failure reserves a second unit of the cap;
+the reservation is not refunded, because a failed metered call may still have billed tokens.
+
+## Records and memory
+
+A terminal record is committed in the records repository before the run reports success, with
+`--no-verify`, never pushed, and never into the kernel's own repository. If the records root is
+not a Git work tree the envelope says `records-not-committed` with the reason. When
+`COUNCIL_MINUTES_DIR` is set, a Markdown minutes file is rendered beside it for the vault's ingest.
+The kernel never calls Atlas. `--no-verify` skips the records repository's own hooks, so a
+pre-commit secret scan there does not run on a records commit; the run's own secrets guard has
+already blocked any high-confidence secret before a record exists.
+
+A run that has written and committed its record never fails afterwards. A commit that cannot
+happen — the records root is not a Git work tree, a record path resolves outside that work tree,
+or `git` itself errors — adds `records-not-committed: <reason>` to `degraded` rather than failing
+the run; a minutes file that cannot be written adds `minutes-not-written: <reason>` to `degraded`
+and sets `record.minutes` to `null`. Both leave the run reporting success. The records commit runs
+`git` with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_OBJECT_DIRECTORY` stripped from
+its environment, so an invocation from inside a Git hook, `git rebase -x` or `git bisect run`
+cannot redirect it at a different repository, and every path comparison resolves symlinks first so
+a symlinked records root is not mistaken for lying outside its own work tree. `adjudicate` commits
+its ruling, resolution and ledger update the same way, reporting `records: { committed, commitSha
+}` on success or `records: { committed: false, reason }` otherwise. The persisted envelope's
+`record` block holds only the session path; whether the commit and the minutes succeeded is visible
+on the emitted envelope and in git, not inside the record.
+
 ## Domain and policy
 
-`src/domain/` owns strict Zod contracts for classification, model routes, lenses, manifests, seat responses, quorum and run-state transitions.
+`src/substrate/domain/` owns strict Zod contracts for classification, model routes, lenses, manifests, seat responses, quorum and run-state transitions.
 
-`src/policy/data-guard.ts` evaluates the complete outbound request before any adapter is called. It combines:
+`src/substrate/policy/data-guard.ts` evaluates the complete outbound request before any adapter is called. It combines:
 
 - the motion classification;
 - project provider allowlists and per-provider ceilings;
@@ -36,11 +107,11 @@ flowchart TD
 
 Invalid or missing project policy, restricted data, an unknown provider, an exceeded ceiling or a high-confidence secret blocks transmission. Overrides cannot cover secret detection or unrestricted policy failures.
 
-`src/policy/secrets.ts` uses deterministic high-confidence detectors. Redaction markers carry only a secret kind and an eight-character digest; raw secret values never enter errors, diagnostics or records.
+`src/substrate/policy/secrets.ts` uses deterministic high-confidence detectors. Redaction markers carry only a secret kind and an eight-character digest; raw secret values never enter errors, diagnostics or records.
 
 ## Evidence boundary
 
-`src/evidence/schema.ts` admits four explicit source shapes:
+`src/substrate/evidence/schema.ts` admits four explicit source shapes:
 
 - trusted local instruction;
 - untrusted local instruction;
@@ -53,7 +124,7 @@ Evidence collection itself is read-only. It does not run repository code, shell 
 
 ## Provider execution
 
-`src/providers/index.ts` constructs one adapter per governed provider family:
+`src/substrate/providers/index.ts` constructs one adapter per governed provider family:
 
 | Family    | Transport                                                | Identity rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | --------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -72,7 +143,7 @@ Structured provider answers contain recommendation, evidence, assumptions, risks
 
 ## Lenses, rounds and quorum
 
-`src/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. Its standing coverage requires domain, maintainer, risk and contrarian categories, plus systems for architecture, infrastructure and performance motions. An explicitly reduced three-seat council deterministically retains domain, risk and contrarian; maintainer and conditional systems coverage yield. Four-or-more-seat selection is unchanged. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
+`src/substrate/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. Its standing coverage requires domain, maintainer, risk and contrarian categories, plus systems for architecture, infrastructure and performance motions. An explicitly reduced three-seat council deterministically retains domain, risk and contrarian; maintainer and conditional systems coverage yield. Four-or-more-seat selection is unchanged. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
 
 `CouncilRunner` executes all seats in a round concurrently and preserves canonical family/seat ordering in the result. Round one is blind analysis; round two is rebuttal; round three is optional refinement. Prior responses are carried as explicitly untrusted data.
 
@@ -87,7 +158,7 @@ Quorum counts successful distinct provider families across the run. Ordinary res
 <root>/projects/<project-id>/
 ```
 
-Each scope has its own sessions, resolutions and ledger. Inputs are Zod-validated, identifiers are path-safe and writes use same-directory temporary files, fsync, atomic rename and a scoped cross-process lock. Duplicate run, motion and resolution identifiers fail. A project record cannot mutate general history or another project.
+Each scope has its own sessions, resolutions and ledger. Inputs are Zod-validated, identifiers are path-safe and writes use same-directory temporary files, fsync, atomic rename and a scoped cross-process lock. Every write method returns the paths it wrote, which is what the CLI commits. Duplicate run, motion and resolution identifiers fail. A project record cannot mutate general history or another project.
 
 General-history migration is a two-step boundary:
 

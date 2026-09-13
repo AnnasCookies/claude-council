@@ -1491,12 +1491,12 @@ var require_adapter = __commonJS((exports, module) => {
     return newFs;
   }
   function toPromise(method) {
-    return (...args) => new Promise((resolve4, reject) => {
+    return (...args) => new Promise((resolve5, reject) => {
       args.push((err, result) => {
         if (err) {
           reject(err);
         } else {
-          resolve4(result);
+          resolve5(result);
         }
       });
       method(...args);
@@ -1568,7 +1568,7 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 // src/cli.ts
 import { createHash as createHash5 } from "crypto";
 import { readdir as readdir2 } from "fs/promises";
-import { isAbsolute as isAbsolute5, join as join5, resolve as resolve6 } from "path";
+import { dirname as dirname2, isAbsolute as isAbsolute7, join as join6, resolve as resolve8 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -15880,7 +15880,17 @@ var package_default = {
   }
 };
 
-// src/domain/schemas.ts
+// src/substrate/domain/classification.ts
+var classificationRank = {
+  public: 0,
+  internal: 1,
+  confidential: 2,
+  restricted: 3
+};
+function classificationAtMost(value, ceiling) {
+  return classificationRank[value] <= classificationRank[ceiling];
+}
+// src/substrate/domain/schemas.ts
 var NonEmptyStringSchema = exports_external.string().min(1);
 var TimestampSchema = exports_external.string().datetime({ offset: true });
 var DataClassificationSchema = exports_external.enum([
@@ -16077,12 +16087,142 @@ var SeatResponseSchema = exports_external.discriminatedUnion("status", [
   CancelledSeatResponseSchema
 ]);
 
-// src/execution/provider.ts
+// src/substrate/domain/quorum.ts
+var PROVIDER_FAMILY_ORDER = Object.freeze([
+  ...ProviderFamilySchema.options
+]);
+var familyOrder = {
+  anthropic: 0,
+  openai: 1,
+  xai: 2,
+  google: 3,
+  deepseek: 4,
+  moonshot: 5
+};
+function minimumQuorumFamilyFloor(policy) {
+  return policy.requiresContrarian && policy.reducedQuorum === undefined ? 4 : 3;
+}
+var QuorumFailureReasonSchema = exports_external.enum([
+  "insufficient-provider-families",
+  "missing-successful-contrarian"
+]);
+var SuccessfulFamiliesSchema = exports_external.array(ProviderFamilySchema).superRefine((families, context) => {
+  let previousIndex = -1;
+  for (const [index, family] of families.entries()) {
+    const currentIndex = familyOrder[family];
+    if (currentIndex <= previousIndex) {
+      context.addIssue({
+        code: "custom",
+        path: [index],
+        message: "Successful provider families must be unique and in canonical order"
+      });
+    }
+    previousIndex = currentIndex;
+  }
+});
+var QuorumEvaluationSchema = exports_external.strictObject({
+  passed: exports_external.boolean(),
+  minimumDistinctFamilies: exports_external.number().int().min(3).max(ProviderFamilySchema.options.length),
+  successfulFamilies: SuccessfulFamiliesSchema,
+  requiresContrarian: exports_external.boolean(),
+  contrarianSatisfied: exports_external.boolean(),
+  reducedQuorum: ReducedQuorumNoticeSchema.optional(),
+  failureReasons: exports_external.array(QuorumFailureReasonSchema).max(2)
+}).superRefine((evaluation, context) => {
+  if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4 && evaluation.reducedQuorum === undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["minimumDistinctFamilies"],
+      message: "Significant motions require at least four distinct provider families"
+    });
+  }
+  if (evaluation.reducedQuorum !== undefined && (!evaluation.requiresContrarian || evaluation.minimumDistinctFamilies < 3 || evaluation.minimumDistinctFamilies >= evaluation.reducedQuorum.standingDefaultMinimumDistinctFamilies)) {
+    context.addIssue({
+      code: "custom",
+      path: ["reducedQuorum"],
+      message: "Reduced quorum must be an explicit significant-council floor below four"
+    });
+  }
+  const insufficientFamilies = evaluation.successfulFamilies.length < evaluation.minimumDistinctFamilies;
+  const missingContrarian = evaluation.requiresContrarian && !evaluation.contrarianSatisfied;
+  const expectedReasons = [];
+  if (insufficientFamilies)
+    expectedReasons.push("insufficient-provider-families");
+  if (missingContrarian)
+    expectedReasons.push("missing-successful-contrarian");
+  if (evaluation.failureReasons.length !== expectedReasons.length || evaluation.failureReasons.some((reason, index) => reason !== expectedReasons[index])) {
+    context.addIssue({
+      code: "custom",
+      path: ["failureReasons"],
+      message: "Quorum failure reasons do not match the reported evidence"
+    });
+  }
+  if (evaluation.passed !== (expectedReasons.length === 0)) {
+    context.addIssue({
+      code: "custom",
+      path: ["passed"],
+      message: "Quorum pass state does not match the reported evidence"
+    });
+  }
+});
+function evaluateQuorum(policy, responses, contrarianSeatIds) {
+  const parsedPolicy = QuorumPolicySchema.parse(policy);
+  const parsedResponses = exports_external.array(SeatResponseSchema).parse(responses);
+  const parsedContrarianSeatIds = exports_external.array(exports_external.string().trim().min(1)).superRefine((seatIds, context) => {
+    if (new Set(seatIds).size !== seatIds.length) {
+      context.addIssue({
+        code: "custom",
+        message: "Contrarian seat IDs must be unique"
+      });
+    }
+  }).parse(contrarianSeatIds);
+  const minimumDistinctFamilies = Math.max(minimumQuorumFamilyFloor(parsedPolicy), parsedPolicy.minimumDistinctFamilies);
+  const successfulResponses = parsedResponses.filter((response) => response.status === "ok" && response.modelIdentity === "verified");
+  const successfulFamilySet = new Set(successfulResponses.map(({ provider }) => provider));
+  const successfulFamilies = PROVIDER_FAMILY_ORDER.filter((family) => successfulFamilySet.has(family));
+  const contrarianSeatIdSet = new Set(parsedContrarianSeatIds);
+  const contrarianSatisfied = successfulResponses.some(({ seatId }) => contrarianSeatIdSet.has(seatId));
+  const failureReasons = [];
+  if (successfulFamilies.length < minimumDistinctFamilies) {
+    failureReasons.push("insufficient-provider-families");
+  }
+  if (parsedPolicy.requiresContrarian && !contrarianSatisfied) {
+    failureReasons.push("missing-successful-contrarian");
+  }
+  return QuorumEvaluationSchema.parse({
+    passed: failureReasons.length === 0,
+    minimumDistinctFamilies,
+    successfulFamilies,
+    requiresContrarian: parsedPolicy.requiresContrarian,
+    contrarianSatisfied,
+    ...parsedPolicy.reducedQuorum === undefined ? {} : { reducedQuorum: parsedPolicy.reducedQuorum },
+    failureReasons
+  });
+}
+// src/substrate/domain/run-state.ts
+var transitions = {
+  queued: new Set(["running", "cancelled", "blocked-policy"]),
+  running: new Set([
+    "completed",
+    "failed",
+    "cancelled",
+    "blocked-policy",
+    "blocked-quorum"
+  ])
+};
+var terminalStatuses = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "blocked-policy",
+  "blocked-quorum"
+]);
+// src/substrate/execution/provider.ts
 import { existsSync as existsSync2, readFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { isAbsolute as isAbsolute2, join as join2, normalize, resolve as resolve2 } from "path";
 
-// src/policy/secrets.ts
+// src/substrate/policy/secrets.ts
 import { createHash } from "crypto";
 var SECRET_KINDS = [
   "PEM_PRIVATE_KEY",
@@ -16255,7 +16395,46 @@ function scanAndRedact(text) {
   };
 }
 
-// src/execution/cli.ts
+// src/substrate/spend.ts
+var SpendPolicySchema = exports_external.enum(["never-metered", "capped"]);
+function createSpendLedger(cap) {
+  if (!Number.isInteger(cap) || cap < 0) {
+    throw new RangeError(`Spend cap must be a non-negative integer; received ${cap}`);
+  }
+  let used = 0;
+  let refused = 0;
+  return {
+    cap,
+    get used() {
+      return used;
+    },
+    get refused() {
+      return refused;
+    },
+    reserve() {
+      if (used >= cap) {
+        refused += 1;
+        return false;
+      }
+      used += 1;
+      return true;
+    }
+  };
+}
+function effectiveBillingMode(policy, requested) {
+  if (policy === "never-metered") {
+    if (requested === "api-only") {
+      throw new Error("This mode never spends a metered key; --billing api-only is not allowed");
+    }
+    return "sub-only";
+  }
+  return requested;
+}
+function spendCapExhaustedMessage(cap) {
+  return `Metered fallback refused: the session spend cap of ${cap} metered call(s) is exhausted. Raise it with --spend-cap <n>.`;
+}
+
+// src/substrate/execution/cli.ts
 import { existsSync, realpathSync } from "fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
 import { isAbsolute, join, relative, resolve } from "path";
@@ -16499,7 +16678,7 @@ async function runIsolatedCli(request) {
   }
 }
 
-// src/execution/http.ts
+// src/substrate/execution/http.ts
 var retryableStatuses = new Set([429, 500, 502, 503, 504]);
 function validatePolicy(policy) {
   if (!Number.isInteger(policy.maxAttempts) || policy.maxAttempts < 1) {
@@ -16621,7 +16800,7 @@ async function requestWithPolicy(request, policy) {
   throw new Error("retry loop exhausted without a result");
 }
 
-// src/execution/provider.ts
+// src/substrate/execution/provider.ts
 var CouncilAnswerSchema = exports_external.strictObject({
   recommendation: exports_external.string().min(1),
   evidence: exports_external.array(exports_external.string().min(1)),
@@ -17555,17 +17734,22 @@ function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecuta
     output: extractCodexOutput
   }, transport, resolveExecutable);
 }
-function resolveAgyExecutable() {
-  const onPath = Bun.which("agy");
+function executableOnPath(name, env) {
+  const key = Object.keys(env).find((candidate) => candidate.toUpperCase() === "PATH");
+  const path = key === undefined ? undefined : env[key];
+  return Bun.which(name, { PATH: path ?? "" }) ?? undefined;
+}
+function resolveAgyExecutable(env) {
+  const onPath = executableOnPath("agy", env);
   if (onPath)
     return onPath;
-  const localAppData = process.env.LOCALAPPDATA;
+  const localAppData = env.LOCALAPPDATA;
   if (!localAppData || process.platform !== "win32")
     return;
   const candidate = join2(localAppData, "agy", "bin", "agy.exe");
   return existsSync2(candidate) ? candidate : undefined;
 }
-function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveAgyExecutable) {
+function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = () => resolveAgyExecutable(process.env)) {
   return createSubscriptionCliAdapter({
     family: "google",
     executableName: "agy",
@@ -17617,8 +17801,8 @@ function stagedAgyCredential() {
     return {};
   }
 }
-function resolveGrokExecutable() {
-  return Bun.which("grok") ?? undefined;
+function resolveGrokExecutable(env) {
+  return executableOnPath("grok", env);
 }
 var GROK_DISALLOWED_TOOLS = [
   "run_terminal_command",
@@ -17636,7 +17820,7 @@ var GROK_DISALLOWED_TOOLS = [
   "image_to_video",
   "reference_to_video"
 ];
-function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = resolveGrokExecutable, modelOverride = () => process.env.GROK_CLI_MODEL?.trim() || undefined) {
+function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExecutable = () => resolveGrokExecutable(process.env), modelOverride = () => process.env.GROK_CLI_MODEL?.trim() || undefined) {
   return createSubscriptionCliAdapter({
     family: "xai",
     executableName: "grok",
@@ -17756,8 +17940,19 @@ function withCredentialFallback(primary, secondary, fallbackTransport) {
     ...primary,
     async invoke(request) {
       const first = await primary.invoke(request);
-      if (!permitsCredentialFallback(first))
+      if (first.status === "ok" || !permitsCredentialFallback(first))
         return first;
+      const ledger = request.context.spend;
+      if (ledger !== undefined && !ledger.reserve()) {
+        return {
+          ...first,
+          error: {
+            code: "spend-cap",
+            message: `${spendCapExhaustedMessage(ledger.cap)} Original failure: ${first.error.code}.`,
+            retryable: false
+          }
+        };
+      }
       const second = await secondary().invoke(request);
       if (second.status === "ok") {
         return {
@@ -17765,7 +17960,7 @@ function withCredentialFallback(primary, secondary, fallbackTransport) {
           credentialFallback: {
             fromTransport: primary.transport,
             toTransport: fallbackTransport,
-            reason: first.status === "ok" ? "unknown" : first.error.code
+            reason: first.error.code
           }
         };
       }
@@ -17823,7 +18018,7 @@ function resolveDualCredentialSeat(seat) {
 }
 function createXaiAdapter(options = {}) {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
+  const executable = (options.resolveExecutable ?? (() => resolveGrokExecutable(env)))();
   return resolveDualCredentialSeat({
     family: "xai",
     credential: "COUNCIL_XAI_API_KEY",
@@ -17948,7 +18143,7 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
 }
 function createAnthropicDualAdapter(options = {}) {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? (() => Bun.which("claude") ?? undefined))();
+  const executable = (options.resolveExecutable ?? (() => executableOnPath("claude", env)))();
   return resolveDualCredentialSeat({
     family: "anthropic",
     credential: "COUNCIL_ANTHROPIC_API_KEY",
@@ -17968,7 +18163,7 @@ function createAnthropicDualAdapter(options = {}) {
 }
 function createOpenAiDualAdapter(options = {}) {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? (() => Bun.which("codex") ?? undefined))();
+  const executable = (options.resolveExecutable ?? (() => executableOnPath("codex", env)))();
   return resolveDualCredentialSeat({
     family: "openai",
     credential: "COUNCIL_OPENAI_API_KEY",
@@ -17988,7 +18183,7 @@ function createOpenAiDualAdapter(options = {}) {
 }
 function createGoogleDualAdapter(options = {}) {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? resolveAgyExecutable)();
+  const executable = (options.resolveExecutable ?? (() => resolveAgyExecutable(env)))();
   return resolveDualCredentialSeat({
     family: "google",
     credential: "COUNCIL_GEMINI_API_KEY",
@@ -18007,120 +18202,141 @@ function createGoogleDualAdapter(options = {}) {
   });
 }
 
-// src/domain/quorum.ts
-var PROVIDER_FAMILY_ORDER = Object.freeze([
-  ...ProviderFamilySchema.options
-]);
-var familyOrder = {
-  anthropic: 0,
-  openai: 1,
-  xai: 2,
-  google: 3,
-  deepseek: 4,
-  moonshot: 5
-};
-function minimumQuorumFamilyFloor(policy) {
-  return policy.requiresContrarian && policy.reducedQuorum === undefined ? 4 : 3;
+// src/substrate/envelope.ts
+var NonEmptyStringSchema2 = exports_external.string().trim().min(1);
+var CallerKindSchema = exports_external.enum(["human", "agent"]);
+var CallerSchema = exports_external.strictObject({
+  kind: CallerKindSchema,
+  harness: NonEmptyStringSchema2,
+  purpose: NonEmptyStringSchema2.optional(),
+  declared: exports_external.boolean()
+});
+var UNDECLARED_CALLER = Object.freeze({
+  kind: "human",
+  harness: "unknown",
+  declared: false
+});
+var ExecutionPatternSchema = exports_external.enum(["streaming", "parallel", "rounds"]);
+var SpendSchema = exports_external.strictObject({
+  billing: BillingModeSchema,
+  policy: SpendPolicySchema,
+  cap: exports_external.number().int().nonnegative(),
+  used: exports_external.number().int().nonnegative(),
+  fallbacks: exports_external.number().int().nonnegative(),
+  refused: exports_external.number().int().nonnegative(),
+  stoppedAtCap: exports_external.boolean()
+});
+var EnvelopeSeatSchema = exports_external.strictObject({
+  id: NonEmptyStringSchema2,
+  family: ProviderFamilySchema,
+  model: exports_external.strictObject({
+    requested: NonEmptyStringSchema2.nullable(),
+    verified: NonEmptyStringSchema2.nullable(),
+    verification: exports_external.enum(["verified", "unverified"])
+  }),
+  lens: NonEmptyStringSchema2,
+  transport: exports_external.enum(["subscription", "api"]).nullable(),
+  fallback: exports_external.boolean(),
+  status: exports_external.enum(["ok", "skipped", "failed", "timed-out", "cancelled"]),
+  reason: exports_external.string().nullable()
+});
+var EnvelopeRecordSchema = exports_external.strictObject({
+  session: exports_external.string().nullable(),
+  committed: exports_external.boolean().optional(),
+  commitSha: exports_external.string().regex(/^[a-f0-9]{7,40}$/).optional(),
+  minutes: exports_external.string().nullable().optional()
+});
+var ResultEnvelopeSchema = exports_external.strictObject({
+  schemaVersion: exports_external.literal(1),
+  mode: NonEmptyStringSchema2,
+  session: NonEmptyStringSchema2,
+  caller: CallerSchema,
+  pattern: ExecutionPatternSchema,
+  rounds: exports_external.number().int().min(0).max(3),
+  seats: exports_external.array(EnvelopeSeatSchema),
+  output: exports_external.record(exports_external.string(), exports_external.unknown()),
+  synthesis: exports_external.strictObject({ by: NonEmptyStringSchema2, text: NonEmptyStringSchema2 }).nullable(),
+  dissent: exports_external.array(exports_external.strictObject({ seat: NonEmptyStringSchema2, position: NonEmptyStringSchema2 })).nullable(),
+  unanimous: exports_external.boolean(),
+  spend: SpendSchema,
+  degraded: exports_external.array(NonEmptyStringSchema2),
+  record: EnvelopeRecordSchema
+});
+function responsesFor(seatId, rounds) {
+  return rounds.flatMap((round) => round.responses.filter((response) => response.seatId === seatId));
 }
-var QuorumFailureReasonSchema = exports_external.enum([
-  "insufficient-provider-families",
-  "missing-successful-contrarian"
-]);
-var SuccessfulFamiliesSchema = exports_external.array(ProviderFamilySchema).superRefine((families, context) => {
-  let previousIndex = -1;
-  for (const [index, family] of families.entries()) {
-    const currentIndex = familyOrder[family];
-    if (currentIndex <= previousIndex) {
-      context.addIssue({
-        code: "custom",
-        path: [index],
-        message: "Successful provider families must be unique and in canonical order"
-      });
-    }
-    previousIndex = currentIndex;
-  }
-});
-var QuorumEvaluationSchema = exports_external.strictObject({
-  passed: exports_external.boolean(),
-  minimumDistinctFamilies: exports_external.number().int().min(3).max(ProviderFamilySchema.options.length),
-  successfulFamilies: SuccessfulFamiliesSchema,
-  requiresContrarian: exports_external.boolean(),
-  contrarianSatisfied: exports_external.boolean(),
-  reducedQuorum: ReducedQuorumNoticeSchema.optional(),
-  failureReasons: exports_external.array(QuorumFailureReasonSchema).max(2)
-}).superRefine((evaluation, context) => {
-  if (evaluation.requiresContrarian && evaluation.minimumDistinctFamilies < 4 && evaluation.reducedQuorum === undefined) {
-    context.addIssue({
-      code: "custom",
-      path: ["minimumDistinctFamilies"],
-      message: "Significant motions require at least four distinct provider families"
-    });
-  }
-  if (evaluation.reducedQuorum !== undefined && (!evaluation.requiresContrarian || evaluation.minimumDistinctFamilies < 3 || evaluation.minimumDistinctFamilies >= evaluation.reducedQuorum.standingDefaultMinimumDistinctFamilies)) {
-    context.addIssue({
-      code: "custom",
-      path: ["reducedQuorum"],
-      message: "Reduced quorum must be an explicit significant-council floor below four"
-    });
-  }
-  const insufficientFamilies = evaluation.successfulFamilies.length < evaluation.minimumDistinctFamilies;
-  const missingContrarian = evaluation.requiresContrarian && !evaluation.contrarianSatisfied;
-  const expectedReasons = [];
-  if (insufficientFamilies)
-    expectedReasons.push("insufficient-provider-families");
-  if (missingContrarian)
-    expectedReasons.push("missing-successful-contrarian");
-  if (evaluation.failureReasons.length !== expectedReasons.length || evaluation.failureReasons.some((reason, index) => reason !== expectedReasons[index])) {
-    context.addIssue({
-      code: "custom",
-      path: ["failureReasons"],
-      message: "Quorum failure reasons do not match the reported evidence"
-    });
-  }
-  if (evaluation.passed !== (expectedReasons.length === 0)) {
-    context.addIssue({
-      code: "custom",
-      path: ["passed"],
-      message: "Quorum pass state does not match the reported evidence"
-    });
-  }
-});
-function evaluateQuorum(policy, responses, contrarianSeatIds) {
-  const parsedPolicy = QuorumPolicySchema.parse(policy);
-  const parsedResponses = exports_external.array(SeatResponseSchema).parse(responses);
-  const parsedContrarianSeatIds = exports_external.array(exports_external.string().trim().min(1)).superRefine((seatIds, context) => {
-    if (new Set(seatIds).size !== seatIds.length) {
-      context.addIssue({
-        code: "custom",
-        message: "Contrarian seat IDs must be unique"
-      });
-    }
-  }).parse(contrarianSeatIds);
-  const minimumDistinctFamilies = Math.max(minimumQuorumFamilyFloor(parsedPolicy), parsedPolicy.minimumDistinctFamilies);
-  const successfulResponses = parsedResponses.filter((response) => response.status === "ok" && response.modelIdentity === "verified");
-  const successfulFamilySet = new Set(successfulResponses.map(({ provider }) => provider));
-  const successfulFamilies = PROVIDER_FAMILY_ORDER.filter((family) => successfulFamilySet.has(family));
-  const contrarianSeatIdSet = new Set(parsedContrarianSeatIds);
-  const contrarianSatisfied = successfulResponses.some(({ seatId }) => contrarianSeatIdSet.has(seatId));
-  const failureReasons = [];
-  if (successfulFamilies.length < minimumDistinctFamilies) {
-    failureReasons.push("insufficient-provider-families");
-  }
-  if (parsedPolicy.requiresContrarian && !contrarianSatisfied) {
-    failureReasons.push("missing-successful-contrarian");
-  }
-  return QuorumEvaluationSchema.parse({
-    passed: failureReasons.length === 0,
-    minimumDistinctFamilies,
-    successfulFamilies,
-    requiresContrarian: parsedPolicy.requiresContrarian,
-    contrarianSatisfied,
-    ...parsedPolicy.reducedQuorum === undefined ? {} : { reducedQuorum: parsedPolicy.reducedQuorum },
-    failureReasons
+function envelopeSeats(source) {
+  return source.assignments.map((assignment) => {
+    const responses = responsesFor(assignment.seatId, source.rounds);
+    const last = responses.at(-1);
+    const verified = responses.find((response) => response.status === "ok");
+    const requested = last?.requestedModel ?? null;
+    return {
+      id: `${assignment.provider}/${requested ?? "unresolved"}#${assignment.lensName}`,
+      family: assignment.provider,
+      model: {
+        requested,
+        verified: verified?.actualModel ?? null,
+        verification: verified === undefined ? "unverified" : "verified"
+      },
+      lens: assignment.lensName,
+      transport: last?.credentialPath === undefined ? null : last.credentialPath === "api-key" ? "api" : "subscription",
+      fallback: responses.some((response) => response.credentialFallback !== undefined),
+      status: last === undefined ? "skipped" : last.status,
+      reason: last === undefined ? "no response recorded" : last.status === "ok" ? null : last.error.message
+    };
   });
 }
-
-// src/evidence/schema.ts
+function detectUnanimity(rounds) {
+  const final = rounds.at(-1);
+  if (final === undefined)
+    return false;
+  const recommendations = final.responses.flatMap((response) => {
+    if (response.status !== "ok")
+      return [];
+    let parsed;
+    try {
+      parsed = JSON.parse(response.answer);
+    } catch {
+      return [];
+    }
+    const answer = CouncilAnswerSchema.safeParse(parsed);
+    return answer.success ? [answer.data.recommendation.trim().toLowerCase()] : [];
+  });
+  const first = recommendations[0];
+  return recommendations.length >= 2 && first !== undefined && recommendations.every((recommendation) => recommendation === first);
+}
+function spendFromRounds(rounds, input) {
+  const responses = rounds.flatMap((round) => round.responses);
+  return {
+    billing: input.billing,
+    policy: input.policy,
+    cap: input.cap,
+    used: responses.filter((response) => response.credentialPath === "api-key").length,
+    fallbacks: responses.filter((response) => response.credentialFallback !== undefined).length,
+    refused: input.refused,
+    stoppedAtCap: input.refused > 0
+  };
+}
+function buildEnvelope(input) {
+  return ResultEnvelopeSchema.parse({
+    schemaVersion: 1,
+    mode: input.mode,
+    session: input.session,
+    caller: input.caller,
+    pattern: input.pattern,
+    rounds: input.rounds.length,
+    seats: envelopeSeats({ assignments: input.assignments, rounds: input.rounds }),
+    output: input.output,
+    synthesis: null,
+    dissent: null,
+    unanimous: detectUnanimity(input.rounds),
+    spend: input.spend,
+    degraded: [...input.degraded],
+    record: input.record
+  });
+}
+// src/substrate/evidence/schema.ts
 var UNSAFE_XML_OR_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029<>"']/;
 var WINDOWS_ABSOLUTE_PATH = /^[A-Za-z]:[\\/]/;
 var URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
@@ -18290,12 +18506,11 @@ var EvidencePackSchema = exports_external.strictObject({
   }
 });
 
-// src/evidence/normalise.ts
+// src/substrate/evidence/normalise.ts
 function escapeUntrustedPromptText(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
-
-// src/execution/runner.ts
+// src/substrate/execution/runner.ts
 var NonBlankIdentifierSchema = exports_external.string().min(1).refine((value) => value.trim() === value && value.trim().length > 0, {
   message: "Must be a non-blank string without surrounding whitespace"
 });
@@ -18773,12 +18988,11 @@ class CouncilRunner {
     return response;
   }
 }
-
-// src/models/registry.ts
+// src/substrate/models/registry.ts
 import { createHash as createHash2 } from "crypto";
 import { homedir as homedir2 } from "os";
 import { isAbsolute as isAbsolute3, join as join3, resolve as resolve3 } from "path";
-// src/models/registry.json
+// src/substrate/models/registry.json
 var registry_default = {
   anthropic: {
     primary: "claude-opus-5",
@@ -18813,7 +19027,7 @@ var registry_default = {
   }
 };
 
-// src/models/registry.ts
+// src/substrate/models/registry.ts
 var ModelRegistrySchema = exports_external.strictObject({
   anthropic: ModelRouteSchema,
   openai: ModelRouteSchema,
@@ -18959,7 +19173,7 @@ async function resolveModelRegistry(options = {}) {
   return builtInRegistry();
 }
 
-// src/health/probe.ts
+// src/substrate/health/probe.ts
 var AvailabilityStatusSchema = exports_external.enum(["available", "unconfigured", "unsafe-transport"]);
 var HealthStatusSchema = exports_external.enum([
   "healthy",
@@ -19080,7 +19294,7 @@ async function probeRoster(adapters, context) {
   return ProviderRosterProbeSchema.parse(await Promise.all(adapters.map((adapter) => probeAdapter(adapter, context))));
 }
 
-// src/health/baseline.ts
+// src/substrate/health/baseline.ts
 var TimestampSchema2 = exports_external.string().datetime({ offset: true });
 var ModelIdentifierSchema2 = exports_external.string().min(1).max(512);
 var ModelIdentityStateSchema = exports_external.enum(["verified", "unverified", "unavailable"]);
@@ -19221,8 +19435,7 @@ function snapshot(probes, registry2, capturedAt = new Date().toISOString()) {
   }).sort((left, right) => PROVIDER_ORDER[left.provider] - PROVIDER_ORDER[right.provider]);
   return HealthBaselineSchema.parse({ schemaVersion: 1, capturedAt, providers });
 }
-
-// src/health/doctor.ts
+// src/substrate/health/doctor.ts
 var TimestampSchema3 = exports_external.string().datetime({ offset: true });
 var ModelIdentifierSchema3 = exports_external.string().min(1).max(512);
 var DoctorStatusSchema = exports_external.enum(["healthy", "degraded", "unavailable"]);
@@ -19384,24 +19597,33 @@ async function doctor(adapters, context, capturedAt = new Date().toISOString(), 
     remediations
   });
 }
-
-// src/policy/data-guard.ts
-import { createHash as createHash3 } from "crypto";
-
-// src/domain/classification.ts
-var classificationRank = {
-  public: 0,
-  internal: 1,
-  confidential: 2,
-  restricted: 3
-};
-function classificationAtMost(value, ceiling) {
-  return classificationRank[value] <= classificationRank[ceiling];
+// src/substrate/patterns/index.ts
+async function executeRounds(runner, input) {
+  return runner.run(input);
 }
-
-// src/policy/data-guard.ts
-var NonEmptyStringSchema2 = exports_external.string().min(1);
-var RunIdSchema = NonEmptyStringSchema2.max(256);
+async function executeParallel(runner, input) {
+  if (input.rounds !== 1) {
+    throw new Error(`The parallel pattern is exactly one blind round; received rounds=${input.rounds}`);
+  }
+  return runner.run(input);
+}
+function executeStreaming() {
+  throw new Error("The streaming pattern is declared for the advisor mode and is not implemented in this build");
+}
+async function executePattern(pattern, runner, input) {
+  switch (pattern) {
+    case "rounds":
+      return executeRounds(runner, input);
+    case "parallel":
+      return executeParallel(runner, input);
+    case "streaming":
+      return executeStreaming();
+  }
+}
+// src/substrate/policy/data-guard.ts
+import { createHash as createHash3 } from "crypto";
+var NonEmptyStringSchema3 = exports_external.string().min(1);
+var RunIdSchema = NonEmptyStringSchema3.max(256);
 var TimestampSchema4 = exports_external.string().datetime({ offset: true });
 var PayloadHashSchema = exports_external.string().regex(/^[a-f0-9]{64}$/);
 var OutboundDestinationSchema = exports_external.strictObject({
@@ -19419,8 +19641,8 @@ var OverrideRuleSchema = exports_external.enum([
 ]);
 var DataPolicyOverrideSchema = exports_external.strictObject({
   runId: RunIdSchema,
-  reason: NonEmptyStringSchema2.max(2000),
-  authorisingSource: NonEmptyStringSchema2.max(256),
+  reason: NonEmptyStringSchema3.max(2000),
+  authorisingSource: NonEmptyStringSchema3.max(256),
   affectedRule: OverrideRuleSchema,
   affectedProviders: exports_external.array(ProviderFamilySchema).min(1),
   classification: DataClassificationSchema,
@@ -19430,8 +19652,8 @@ var DataPolicyOverrideSchema = exports_external.strictObject({
 });
 var OverrideInputSchema = exports_external.strictObject({
   runId: RunIdSchema,
-  reason: NonEmptyStringSchema2.max(2000),
-  authorisingSource: NonEmptyStringSchema2.max(256),
+  reason: NonEmptyStringSchema3.max(2000),
+  authorisingSource: NonEmptyStringSchema3.max(256),
   affectedRule: OverrideRuleSchema,
   affectedProviders: exports_external.array(ProviderFamilySchema).min(1),
   classification: DataClassificationSchema,
@@ -19699,13 +19921,12 @@ function evaluateOutbound(request) {
     ...override === undefined ? {} : { override }
   });
 }
-
-// src/providers/anthropic-cli.ts
+// src/substrate/providers/anthropic-cli.ts
 function anthropicAdapter(options = {}) {
   return createAnthropicDualAdapter(options);
 }
 
-// src/providers/deepseek.ts
+// src/substrate/providers/deepseek.ts
 function deepseekAdapter(transport) {
   return createHttpAdapter({
     family: "deepseek",
@@ -19715,12 +19936,12 @@ function deepseekAdapter(transport) {
   }, transport);
 }
 
-// src/providers/google.ts
+// src/substrate/providers/google.ts
 function googleAdapter(options = {}) {
   return createGoogleDualAdapter(options);
 }
 
-// src/providers/moonshot.ts
+// src/substrate/providers/moonshot.ts
 function moonshotAdapter(transport) {
   return createHttpAdapter({
     family: "moonshot",
@@ -19730,17 +19951,17 @@ function moonshotAdapter(transport) {
   }, transport);
 }
 
-// src/providers/openai.ts
+// src/substrate/providers/openai.ts
 function openaiAdapter(options = {}) {
   return createOpenAiDualAdapter(options);
 }
 
-// src/providers/xai.ts
+// src/substrate/providers/xai.ts
 function xaiAdapter(options = {}) {
   return createXaiAdapter(options);
 }
 
-// src/providers/index.ts
+// src/substrate/providers/index.ts
 function createProviderRoster(options = {}) {
   const billingMode = options.billingMode ?? DEFAULT_BILLING_MODE;
   return {
@@ -19778,21 +19999,129 @@ function createProviderRoster(options = {}) {
     moonshot: moonshotAdapter(options.httpTransport)
   };
 }
-
-// src/records/migrate-general.ts
+// src/substrate/records/commit.ts
+import { realpath as realpath2 } from "fs/promises";
+import { isAbsolute as isAbsolute4, relative as relative2, resolve as resolve4, sep } from "path";
+var INHERITED_GIT_REDIRECTS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY"
+];
+function childEnvironment(env) {
+  const merged = {
+    ...process.env,
+    ...env,
+    GIT_TERMINAL_PROMPT: "0"
+  };
+  for (const key of INHERITED_GIT_REDIRECTS)
+    delete merged[key];
+  return merged;
+}
+var defaultRunner = async (argv, cwd, env) => {
+  let child;
+  try {
+    child = Bun.spawn({
+      cmd: [...argv],
+      cwd,
+      env: childEnvironment(env),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+  } catch (error51) {
+    return {
+      exitCode: 127,
+      stdout: "",
+      stderr: error51 instanceof Error ? error51.message : String(error51)
+    };
+  }
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited
+  ]);
+  return { exitCode, stdout, stderr };
+};
+function redacted(text) {
+  return scanAndRedact(text).redacted.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+async function canonicalise(path) {
+  try {
+    return { path: await realpath2(path), canonical: true };
+  } catch {
+    return { path: resolve4(path), canonical: false };
+  }
+}
+function isInside(path, root) {
+  const relation = relative2(root, path);
+  if (relation === "")
+    return true;
+  return !(relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute4(relation));
+}
+async function commitRecordFiles(input) {
+  const run = input.run ?? ((argv, cwd) => defaultRunner(argv, cwd, input.env));
+  const root = (await canonicalise(input.root)).path;
+  const toplevel = await run(["git", "rev-parse", "--show-toplevel"], root);
+  if (toplevel.exitCode !== 0) {
+    return { committed: false, reason: "records root is not inside a Git work tree" };
+  }
+  const workTree = await canonicalise(toplevel.stdout.trim());
+  if (input.forbiddenRoot !== undefined) {
+    const forbidden = await canonicalise(input.forbiddenRoot);
+    if (workTree.path === forbidden.path) {
+      return {
+        committed: false,
+        reason: "records root is the kernel repository; refusing to commit records into it"
+      };
+    }
+  }
+  const relativePaths = [];
+  for (const path of input.paths) {
+    const record2 = await canonicalise(path);
+    if (!isInside(record2.path, workTree.path)) {
+      const uncanonical = !record2.canonical || !workTree.canonical;
+      return {
+        committed: false,
+        reason: `record path is outside the records work tree: ${record2.path}${uncanonical ? " (compared without realpath, which rejected the path)" : ""}`
+      };
+    }
+    relativePaths.push(relative2(workTree.path, record2.path));
+  }
+  const added = await run(["git", "add", "--", ...relativePaths], workTree.path);
+  if (added.exitCode !== 0) {
+    return { committed: false, reason: `git add failed: ${redacted(added.stderr)}` };
+  }
+  const committed = await run(["git", "commit", "--quiet", "--no-verify", "-m", input.message, "--", ...relativePaths], workTree.path);
+  if (committed.exitCode !== 0) {
+    return {
+      committed: false,
+      reason: `git commit failed: ${redacted(committed.stderr || committed.stdout)}`
+    };
+  }
+  const head = await run(["git", "rev-parse", "HEAD"], workTree.path);
+  if (head.exitCode !== 0 || !/^[a-f0-9]{40}$/.test(head.stdout.trim())) {
+    return {
+      committed: false,
+      reason: `commit succeeded but HEAD could not be read: ${redacted(head.stderr)}`
+    };
+  }
+  return { committed: true, sha: head.stdout.trim() };
+}
+// src/substrate/records/migrate-general.ts
 import { chmod } from "fs/promises";
-import { isAbsolute as isAbsolute4, relative as relative2, resolve as resolve5, win32 } from "path";
+import { isAbsolute as isAbsolute5, relative as relative3, resolve as resolve6, win32 } from "path";
 
-// src/records/store.ts
+// src/substrate/records/store.ts
 import { randomUUID } from "crypto";
-import { dirname, basename, join as join4, resolve as resolve4 } from "path";
+import { dirname, basename, join as join4, resolve as resolve5 } from "path";
 import { link, mkdir as mkdir2, open, readdir, rename, rm as rm2 } from "fs/promises";
 var import_proper_lockfile = __toESM(require_proper_lockfile(), 1);
 
-// src/roles/allocator.ts
+// src/substrate/roles/allocator.ts
 import { createHash as createHash4 } from "crypto";
 
-// src/roles/catalogue.json
+// src/substrate/roles/catalogue.json
 var catalogue_default = [
   {
     category: "domain",
@@ -19916,7 +20245,7 @@ var catalogue_default = [
   }
 ];
 
-// src/roles/allocator.ts
+// src/substrate/roles/allocator.ts
 var GOVERNED_LENS_NAMES = [
   "strategist",
   "architect",
@@ -20338,8 +20667,8 @@ function assignLenses(runId, motionId, seatIds, lenses, history) {
   })));
 }
 
-// src/records/store.ts
-var NonEmptyStringSchema3 = exports_external.string().trim().min(1);
+// src/substrate/records/store.ts
+var NonEmptyStringSchema4 = exports_external.string().trim().min(1);
 var SingleLineStringSchema = exports_external.string().trim().min(1).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var TimestampSchema5 = exports_external.string().datetime({ offset: true });
 var StorageIdSchema = exports_external.string().trim().min(1).max(128).regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/).refine((value) => value !== "." && value !== "..", "must be a safe storage identifier");
@@ -20395,9 +20724,9 @@ var SessionProtocolSchema = exports_external.strictObject({
   }
 });
 var PersistedSeatRetrySchema = exports_external.strictObject({
-  seatId: NonEmptyStringSchema3,
+  seatId: NonEmptyStringSchema4,
   provider: ProviderFamilySchema,
-  role: NonEmptyStringSchema3,
+  role: NonEmptyStringSchema4,
   attempt: exports_external.literal(2),
   reason: exports_external.strictObject({
     status: exports_external.enum(["failed", "timed-out", "cancelled"]),
@@ -20431,20 +20760,21 @@ var SessionRecordShape = {
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
   status: SessionStatusSchema,
-  motion: NonEmptyStringSchema3,
+  motion: NonEmptyStringSchema4,
   startedAt: TimestampSchema5,
   completedAt: TimestampSchema5.optional(),
   policyDecision: PersistedPolicyDecisionSchema,
   destinations: exports_external.array(ExternalDestinationRecordSchema),
   protocol: SessionProtocolSchema,
   assignments: AssignmentHistorySchema.default([]),
-  summary: NonEmptyStringSchema3.optional()
+  summary: NonEmptyStringSchema4.optional()
 };
 var CurrentSessionRecordShape = {
   ...SessionRecordShape,
   schemaVersion: exports_external.literal(2),
   decisionState: PersistedDecisionStateSchema,
-  execution: ExecutionSnapshotSchema
+  execution: ExecutionSnapshotSchema,
+  envelope: ResultEnvelopeSchema.optional()
 };
 var LegacyGeneralSessionRecordSchema = exports_external.strictObject({
   ...SessionRecordShape,
@@ -20548,7 +20878,7 @@ var ChairAcceptanceRecordShape = {
   acceptanceId: StorageIdSchema,
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
-  rationale: NonEmptyStringSchema3,
+  rationale: NonEmptyStringSchema4,
   authorisedBy: SingleLineStringSchema,
   createdAt: TimestampSchema5
 };
@@ -20570,11 +20900,11 @@ var ChairRulingRecordShape = {
   runId: StorageIdSchema,
   motionId: StorageIdSchema,
   title: SingleLineStringSchema,
-  decision: NonEmptyStringSchema3,
-  rationale: NonEmptyStringSchema3,
+  decision: NonEmptyStringSchema4,
+  rationale: NonEmptyStringSchema4,
   authorisedBy: SingleLineStringSchema,
-  followedSeats: exports_external.array(NonEmptyStringSchema3),
-  setAsideSeats: exports_external.array(NonEmptyStringSchema3),
+  followedSeats: exports_external.array(NonEmptyStringSchema4),
+  setAsideSeats: exports_external.array(NonEmptyStringSchema4),
   dissentAcknowledged: exports_external.boolean(),
   createdAt: TimestampSchema5
 };
@@ -20603,7 +20933,7 @@ var ResolutionRecordShape = {
   motionId: StorageIdSchema,
   rulingId: StorageIdSchema,
   title: SingleLineStringSchema,
-  decision: NonEmptyStringSchema3,
+  decision: NonEmptyStringSchema4,
   createdAt: TimestampSchema5
 };
 var GeneralResolutionRecordSchema = exports_external.strictObject({
@@ -20990,13 +21320,13 @@ class CouncilStore {
     this.root = root;
   }
   static open(root) {
-    return new CouncilStore(resolve4(NonEmptyStringSchema3.parse(root)));
+    return new CouncilStore(resolve5(NonEmptyStringSchema4.parse(root)));
   }
   async readAssignmentHistory(scope, expectedMotion, projectId) {
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(scope), projectId);
     const state = await validatePersistedScope(directory);
     const motionId = StorageIdSchema.parse(expectedMotion.motionId);
-    const motion = NonEmptyStringSchema3.parse(expectedMotion.motion);
+    const motion = NonEmptyStringSchema4.parse(expectedMotion.motion);
     if (state.sessions.some((session) => session.motionId === motionId && session.motion !== motion)) {
       throw new Error(`Motion id ${motionId} already identifies a different motion`);
     }
@@ -21005,7 +21335,7 @@ class CouncilStore {
   async writeSession(input) {
     const record2 = CurrentSessionRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       if (state.sessions.some((session) => session.runId === record2.runId)) {
         throw new Error(`Duplicate session id: ${record2.runId}`);
@@ -21049,12 +21379,13 @@ class CouncilStore {
           await removeCommittedFile(markdownPath, error51);
         throw error51;
       }
+      return { paths: [markdownPath, jsonPath] };
     });
   }
   async appendChairAcceptance(input) {
     const record2 = ChairAcceptanceRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       const session = state.sessions.find((candidate) => candidate.runId === record2.runId);
       if (!session || session.status !== "degraded" || session.motionId !== record2.motionId || session.scope !== record2.scope || session.scope === "project" && record2.scope === "project" && session.projectId !== record2.projectId) {
@@ -21097,12 +21428,13 @@ class CouncilStore {
           await removeCommittedFile(markdownPath, error51);
         throw error51;
       }
+      return { paths: [markdownPath, jsonPath] };
     });
   }
   async appendChairRuling(input) {
     const record2 = ChairRulingRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       const session = state.sessions.find((candidate) => candidate.runId === record2.runId);
       if (!session || session.status !== "completed" && session.status !== "degraded" || session.motionId !== record2.motionId || session.scope !== record2.scope || session.scope === "project" && record2.scope === "project" && session.projectId !== record2.projectId) {
@@ -21146,6 +21478,7 @@ class CouncilStore {
           await removeCommittedFile(markdownPath, error51);
         throw error51;
       }
+      return { paths: [markdownPath, jsonPath] };
     });
   }
   async readDecisionStates(scope, projectId) {
@@ -21169,7 +21502,7 @@ class CouncilStore {
   async appendResolution(input) {
     const record2 = ResolutionRecordSchema.parse(input);
     const directory = scopeDirectory(this.root, CouncilScopeSchema.parse(record2.scope), record2.scope === "project" ? record2.projectId : undefined);
-    await withScopeWriteLock(directory, async () => {
+    return withScopeWriteLock(directory, async () => {
       const state = await validatePersistedScope(directory);
       const session = state.sessions.find((candidate) => candidate.runId === record2.runId);
       if (!session) {
@@ -21250,17 +21583,18 @@ class CouncilStore {
           await removeCommittedFile(markdownPath, error51);
         throw error51;
       }
+      return { paths: [markdownPath, jsonPath, ledgerPath] };
     });
   }
 }
 
-// src/records/migrate-general.ts
-var NonEmptyStringSchema4 = exports_external.string().trim().min(1);
+// src/substrate/records/migrate-general.ts
+var NonEmptyStringSchema5 = exports_external.string().trim().min(1);
 var SingleLineStringSchema2 = exports_external.string().trim().min(1).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var TimestampSchema6 = exports_external.string().datetime({ offset: true });
 var Sha256Schema = exports_external.string().regex(/^[a-f0-9]{64}$/);
 var StorageIdSchema2 = exports_external.string().trim().min(1).max(128).regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/).refine((value) => value !== "." && value !== "..", "must be a safe storage identifier");
-var RelativePathSchema = exports_external.string().trim().min(1).transform((value) => value.replace(/\\/g, "/").replace(/\/+/g, "/")).refine((value) => !isAbsolute4(value) && !win32.isAbsolute(value) && !value.startsWith("/") && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== ".."), "must be a safe relative path");
+var RelativePathSchema = exports_external.string().trim().min(1).transform((value) => value.replace(/\\/g, "/").replace(/\/+/g, "/")).refine((value) => !isAbsolute5(value) && !win32.isAbsolute(value) && !value.startsWith("/") && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== ".."), "must be a safe relative path");
 var GeneralMigrationDestinationSchema = exports_external.strictObject({
   scope: exports_external.literal("general")
 });
@@ -21274,7 +21608,7 @@ var MigrationDestinationSchema = exports_external.discriminatedUnion("scope", [
 ]);
 var MigrationRuleSchema = exports_external.strictObject({
   id: StorageIdSchema2,
-  contains: NonEmptyStringSchema4,
+  contains: NonEmptyStringSchema5,
   caseSensitive: exports_external.boolean().default(false),
   destination: MigrationDestinationSchema
 });
@@ -21283,10 +21617,10 @@ var MigrationApprovalSchema = exports_external.strictObject({
   planSha256: Sha256Schema,
   approvedBy: SingleLineStringSchema2,
   approvedAt: TimestampSchema6,
-  reason: NonEmptyStringSchema4
+  reason: NonEmptyStringSchema5
 });
 var MigrationPlanInputSchema = exports_external.strictObject({
-  root: NonEmptyStringSchema4,
+  root: NonEmptyStringSchema5,
   sourceRelativePath: RelativePathSchema.default("general/ledger.md"),
   sourceContent: exports_external.string(),
   plannedAt: TimestampSchema6,
@@ -21307,7 +21641,7 @@ var MigrationPlanInputSchema = exports_external.strictObject({
 var MigrationItemSchema = exports_external.strictObject({
   sourceIndex: exports_external.number().int().nonnegative(),
   heading: SingleLineStringSchema2,
-  markdown: NonEmptyStringSchema4,
+  markdown: NonEmptyStringSchema5,
   sha256: Sha256Schema,
   matchedRuleId: StorageIdSchema2,
   destination: MigrationDestinationSchema
@@ -21315,7 +21649,7 @@ var MigrationItemSchema = exports_external.strictObject({
 var UnresolvedMigrationItemSchema = exports_external.strictObject({
   sourceIndex: exports_external.number().int().nonnegative(),
   heading: SingleLineStringSchema2,
-  markdown: NonEmptyStringSchema4,
+  markdown: NonEmptyStringSchema5,
   sha256: Sha256Schema,
   reason: exports_external.enum(["no-match", "ambiguous-match"]),
   matchedRuleIds: exports_external.array(StorageIdSchema2)
@@ -21328,7 +21662,7 @@ var MigrationCountsSchema = exports_external.strictObject({
 });
 var MigrationPlanBodySchema = exports_external.strictObject({
   schemaVersion: exports_external.literal(1),
-  root: NonEmptyStringSchema4,
+  root: NonEmptyStringSchema5,
   sourceRelativePath: RelativePathSchema,
   sourceContent: exports_external.string(),
   sourceSha256: Sha256Schema,
@@ -21544,7 +21878,7 @@ function planGeneralMigration(input) {
   const archiveRelativePath = `archive/${date5}-general/ledger-${sourceSha256.slice(0, 12)}.md`;
   const body = MigrationPlanBodySchema.parse({
     schemaVersion: 1,
-    root: resolve5(parsed.root),
+    root: resolve6(parsed.root),
     sourceRelativePath: parsed.sourceRelativePath,
     sourceContent: parsed.sourceContent,
     sourceSha256,
@@ -21566,10 +21900,10 @@ function planGeneralMigration(input) {
   });
 }
 function absolutePathInsideRoot(root, relativePath) {
-  const absoluteRoot = resolve5(root);
-  const destination = resolve5(absoluteRoot, relativePath);
-  const fromRoot = relative2(absoluteRoot, destination);
-  if (fromRoot === "" || !fromRoot.startsWith("..") && !isAbsolute4(fromRoot))
+  const absoluteRoot = resolve6(root);
+  const destination = resolve6(absoluteRoot, relativePath);
+  const fromRoot = relative3(absoluteRoot, destination);
+  if (fromRoot === "" || !fromRoot.startsWith("..") && !isAbsolute5(fromRoot))
     return destination;
   throw new Error(`Migration path escapes its root: ${relativePath}`);
 }
@@ -21755,17 +22089,408 @@ async function applyGeneralMigration(input) {
   });
   return manifest;
 }
+// src/substrate/records/minutes.ts
+import { isAbsolute as isAbsolute6, join as join5, resolve as resolve7 } from "path";
+function cell(value) {
+  return String(value ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+function renderMinutes(input) {
+  const { envelope } = input;
+  const lines = [
+    `# Minutes: ${envelope.mode} ${envelope.session}`,
+    "",
+    `- Mode: ${envelope.mode} (${envelope.pattern}, ${envelope.rounds} round${envelope.rounds === 1 ? "" : "s"})`,
+    `- Caller: ${envelope.caller.kind} via ${envelope.caller.harness}${envelope.caller.purpose === undefined ? "" : `, purpose: ${envelope.caller.purpose}`}${envelope.caller.declared ? "" : " (undeclared)"}`,
+    `- Started: ${input.startedAt}`,
+    `- Completed: ${input.completedAt}`,
+    `- Unanimous: ${envelope.unanimous ? "yes, treat with suspicion" : "no"}`,
+    `- Degraded: ${envelope.degraded.length === 0 ? "none" : envelope.degraded.join(", ")}`,
+    `- Record: ${envelope.record.session ?? "not persisted"}`,
+    "",
+    "## Motion",
+    "",
+    input.motion,
+    "",
+    "## Seats",
+    "",
+    "| Seat | Family | Lens | Model | Verification | Transport | Fallback | Status | Reason |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ...envelope.seats.map((seat) => `| ${cell(seat.id)} | ${cell(seat.family)} | ${cell(seat.lens)} | ${cell(seat.model.verified ?? seat.model.requested)} | ${cell(seat.model.verification)} | ${cell(seat.transport)} | ${seat.fallback ? "yes" : "no"} | ${cell(seat.status)} | ${cell(seat.reason)} |`),
+    ""
+  ];
+  for (const round of input.rounds) {
+    lines.push(`## Round ${round.round} (${round.phase})`, "");
+    for (const response of round.responses) {
+      lines.push(`### ${response.seatId} (${response.provider}, ${response.role})`, "");
+      if (response.status === "ok") {
+        lines.push("```json", response.answer, "```", "");
+      } else {
+        lines.push(`Status: ${response.status}. ${response.error.code}: ${response.error.message}`, "");
+      }
+    }
+  }
+  lines.push("## Synthesis", "", envelope.synthesis === null ? "Not computed in this mode." : `By ${envelope.synthesis.by}:
+
+${envelope.synthesis.text}`, "", "## Dissent", "", envelope.dissent === null ? "Not computed in this mode." : envelope.dissent.length === 0 ? "None recorded." : envelope.dissent.map((entry) => `- ${entry.seat}: ${entry.position}`).join(`
+`), "", "## Spend", "", `- Billing: ${envelope.spend.billing} (${envelope.spend.policy})`, `- Cap: ${envelope.spend.cap}; metered calls: ${envelope.spend.used}; fallbacks: ${envelope.spend.fallbacks}; refused: ${envelope.spend.refused}`, `- Stopped at cap: ${envelope.spend.stoppedAtCap ? "yes" : "no"}`, "");
+  return `${lines.join(`
+`)}
+`;
+}
+function minutesFileName(envelope, startedAt) {
+  const day = startedAt.slice(0, 10);
+  const safe = (value) => value.replace(/[^A-Za-z0-9._-]+/g, "-");
+  return `${day}-${safe(envelope.mode)}-${safe(envelope.session)}.md`;
+}
+function minutesDirectory(env, cwd) {
+  const value = env.COUNCIL_MINUTES_DIR?.trim();
+  if (value === undefined || value.length === 0)
+    return null;
+  return isAbsolute6(value) ? resolve7(value) : resolve7(cwd, value);
+}
+async function writeMinutes(input) {
+  const path = join5(input.directory, minutesFileName(input.envelope, input.startedAt));
+  await writeTextAtomically(path, renderMinutes(input), { replace: false });
+  return path;
+}
+// src/substrate/records/project-id.ts
+var NonEmptyStringSchema6 = exports_external.string().trim().min(1);
+var ProjectIdSchema = exports_external.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?-[a-f0-9]{12}$/);
+var RemoteProjectIdentitySchema = exports_external.strictObject({
+  source: exports_external.literal("remote"),
+  projectId: ProjectIdSchema,
+  displayName: NonEmptyStringSchema6,
+  root: NonEmptyStringSchema6,
+  canonicalRemote: NonEmptyStringSchema6
+});
+var PathProjectIdentitySchema = exports_external.strictObject({
+  source: exports_external.literal("path"),
+  projectId: ProjectIdSchema,
+  displayName: NonEmptyStringSchema6,
+  root: NonEmptyStringSchema6
+});
+var ProjectIdentitySchema = exports_external.discriminatedUnion("source", [
+  RemoteProjectIdentitySchema,
+  PathProjectIdentitySchema
+]);
+// src/substrate/session.ts
+var DEFAULT_SEAT_COUNT = 5;
+var DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
+var REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
+var REDUCED_QUORUM_WARNING = "REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.";
+function quorumPolicy(options) {
+  const significant = options.chaired || options.impact === "high" || options.contested;
+  const minimumDistinctFamilies = options.chaired ? options.minimumFamilies ?? DEFAULT_COUNCIL_MINIMUM_FAMILIES : significant ? 4 : 3;
+  return {
+    minimumDistinctFamilies,
+    requiresContrarian: significant,
+    ...options.chaired && minimumDistinctFamilies < DEFAULT_COUNCIL_MINIMUM_FAMILIES ? {
+      reducedQuorum: {
+        standingDefaultMinimumDistinctFamilies: DEFAULT_COUNCIL_MINIMUM_FAMILIES,
+        weakerThanStandingDefault: true,
+        warning: options.reducedQuorumWarning ?? REDUCED_QUORUM_WARNING
+      }
+    } : {}
+  };
+}
+function buildManifestAndAssignments(options, registry2, registryProvenance, history) {
+  const policy = quorumPolicy(options);
+  const lenses = selectLenses({ domains: [...options.domains], impact: options.impact, contested: options.contested }, options.providerFamilies.length, { allowReducedThreeSeatCoverage: policy.reducedQuorum !== undefined });
+  const seatIds = options.providerFamilies.map((provider) => `${provider}-seat`);
+  const roleAssignments = assignLenses(options.runId, options.motionId, seatIds, lenses, history);
+  const lensByName = new Map(lenses.map((lens) => [lens.name, lens]));
+  const assignments = roleAssignments.map((assignment, index) => {
+    const provider = options.providerFamilies[index];
+    const lens = lensByName.get(assignment.lensName);
+    if (provider === undefined || lens === undefined) {
+      throw new Error("Dynamic role assignment did not resolve a provider lens");
+    }
+    return {
+      seatId: assignment.seatId,
+      provider,
+      lensName: lens.name,
+      lensPrompt: lens.prompt,
+      lensCategory: lens.category
+    };
+  });
+  const routes = Object.fromEntries(options.providerFamilies.map((provider) => [provider, registry2[provider]]));
+  const manifest = RunManifestSchema.parse({
+    motionId: options.motionId,
+    scope: options.scope,
+    classification: options.classification,
+    routes,
+    registryProvenance,
+    lenses,
+    rounds: options.rounds,
+    ...options.refinementTrigger === undefined ? {} : { refinementTrigger: options.refinementTrigger },
+    quorumPolicy: policy,
+    evidenceReferences: []
+  });
+  return { manifest, assignments, roleAssignments };
+}
+function publicExecution(result) {
+  const { motion: _motion, ...safeResult } = result;
+  return safeResult;
+}
+async function loadAssignmentHistory(options, override) {
+  if (override !== undefined)
+    return AssignmentHistorySchema.parse(override);
+  if (options.recordsRoot === undefined)
+    return [];
+  return CouncilStore.open(options.recordsRoot).readAssignmentHistory(options.scope, { motionId: options.motionId, motion: options.motion }, options.projectId);
+}
+function unavailableProvider(probe) {
+  const reason = probe.status === "identity-unverified" ? "identity-unverified" : probe.status === "down" ? "unhealthy" : probe.status === "unsafe-transport" ? "unsafe-transport" : /^missing\s+\S+/i.test(probe.reason) ? "missing key" : "unconfigured";
+  return {
+    provider: probe.provider,
+    reason,
+    detail: probe.reason || reason
+  };
+}
+function autoReducedQuorumWarning(unavailable) {
+  const unavailableSummary = unavailable.map(({ provider, reason, detail }) => `${provider} \u2014 ${reason} (${detail})`).join("; ");
+  return `REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: ${unavailableSummary}.`;
+}
+async function resolveHealthyProviders(options, adapters, context) {
+  const candidateAdapters = options.providerFamilies.flatMap((provider) => {
+    const adapter = adapters[provider];
+    return adapter === undefined ? [] : [adapter];
+  });
+  const probes = await probeRoster(candidateAdapters, context);
+  const providerFamilies = [];
+  const unavailableProviders = [];
+  let probeIndex = 0;
+  for (const provider of options.providerFamilies) {
+    const adapter = adapters[provider];
+    if (adapter === undefined) {
+      unavailableProviders.push({
+        provider,
+        reason: "unhealthy",
+        detail: "provider adapter is unavailable"
+      });
+      continue;
+    }
+    const probe = probes[probeIndex];
+    probeIndex += 1;
+    if (probe === undefined || probe.provider !== provider) {
+      unavailableProviders.push({
+        provider,
+        reason: "unhealthy",
+        detail: "provider health result did not match the requested family"
+      });
+      continue;
+    }
+    if (probe.status === "healthy") {
+      providerFamilies.push(provider);
+    } else {
+      unavailableProviders.push(unavailableProvider(probe));
+    }
+  }
+  return { providerFamilies, unavailableProviders };
+}
+function buildPreflight(input) {
+  return {
+    classification: input.policyDecision.effectiveClassification,
+    destinations: input.policyDecision.dispositions,
+    requestedProviders: input.requestedProviders,
+    selectedProviders: input.selectedProviders,
+    unavailableProviders: input.unavailableProviders,
+    eligibleProviders: input.eligibleProviders,
+    omittedEligibleProviders: input.eligibleProviders.filter((provider) => !input.requestedProviders.includes(provider)),
+    redactionCount: input.policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
+  };
+}
+function sessionRecordPath(options) {
+  if (options.recordsRoot === undefined)
+    return null;
+  const scope = options.scope === "general" ? "general" : `projects/${options.projectId ?? "unknown"}`;
+  return `${scope}/sessions/${options.runId}.json`;
+}
+async function persistSession(options, decision, manifest, result, roleAssignments, startedAt, now, envelope) {
+  if (options.recordsRoot === undefined)
+    return;
+  if (options.scope === "project" && options.projectId === undefined) {
+    throw new Error("Project record persistence requires a project id");
+  }
+  const store = CouncilStore.open(options.recordsRoot);
+  const status = result.outcome;
+  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families; a chair ruling is required before this becomes a resolution.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance and a chair ruling are both required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
+  const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
+  const sessionSummary = reducedQuorumWarning === undefined ? outcomeSummary : `${reducedQuorumWarning} ${outcomeSummary}`;
+  const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
+  const sessionBase = {
+    schemaVersion: 2,
+    runId: options.runId,
+    motionId: options.motionId,
+    status,
+    motion: options.motion,
+    startedAt,
+    completedAt: now,
+    decisionState,
+    policyDecision: {
+      kind: decision.kind,
+      classification: decision.effectiveClassification ?? options.classification,
+      reasonCodes: decision.reasonCodes
+    },
+    destinations: options.providerFamilies.map((provider) => ({
+      provider,
+      model: manifest.routes[provider]?.primary ?? "unresolved"
+    })),
+    protocol: {
+      requestedRounds: result.requestedRounds,
+      ...result.refinementTrigger === undefined ? {} : { refinementTrigger: result.refinementTrigger },
+      quorumPolicy: result.quorumPolicy
+    },
+    execution: {
+      rounds: result.rounds,
+      quorum: result.quorum,
+      rebuttalObligation: result.rebuttalObligation,
+      synthesisEligible: result.synthesisEligible
+    },
+    assignments: roleAssignments,
+    summary: sessionSummary,
+    ...envelope === undefined ? {} : { envelope }
+  };
+  const session = options.scope === "general" ? { ...sessionBase, scope: "general" } : {
+    ...sessionBase,
+    scope: "project",
+    projectId: options.projectId
+  };
+  const written = await store.writeSession(session);
+  return {
+    records: { session: true, decisionState, dataAvailability: "captured" },
+    decisionState,
+    paths: written.paths
+  };
+}
+// src/modes/committee/index.ts
+var CommitteeOutputSchema = exports_external.strictObject({
+  outcome: CouncilOutcomeSchema,
+  quorum: QuorumEvaluationSchema,
+  rebuttalObligation: RebuttalObligationSchema,
+  synthesisEligible: exports_external.boolean(),
+  decisionState: PersistedDecisionStateSchema.nullable()
+});
+async function prepare(input) {
+  if (!input.options.chaired) {
+    return { kind: "ready", options: input.options, unavailableProviders: [] };
+  }
+  const readiness = await resolveHealthyProviders(input.options, input.adapters, input.context);
+  const minimumFamilies = input.options.minimumFamilies ?? (readiness.providerFamilies.length >= DEFAULT_COUNCIL_MINIMUM_FAMILIES ? DEFAULT_COUNCIL_MINIMUM_FAMILIES : REDUCED_COUNCIL_MINIMUM_FAMILIES);
+  if (readiness.providerFamilies.length < minimumFamilies) {
+    return {
+      kind: "blocked-quorum",
+      message: `Council requires at least ${minimumFamilies} configured, reachable provider families; found ${readiness.providerFamilies.length}.`,
+      selectedProviders: readiness.providerFamilies,
+      unavailableProviders: readiness.unavailableProviders
+    };
+  }
+  return {
+    kind: "ready",
+    unavailableProviders: readiness.unavailableProviders,
+    options: {
+      ...input.options,
+      providerFamilies: readiness.providerFamilies,
+      minimumFamilies,
+      ...minimumFamilies === REDUCED_COUNCIL_MINIMUM_FAMILIES && readiness.providerFamilies.length === REDUCED_COUNCIL_MINIMUM_FAMILIES && readiness.unavailableProviders.length > 0 ? { reducedQuorumWarning: autoReducedQuorumWarning(readiness.unavailableProviders) } : {}
+    }
+  };
+}
+var committee = {
+  name: "committee",
+  knobs: {
+    participants: "fixed seats chosen by the lens allocator; quorum counted in distinct families",
+    pattern: "rounds",
+    aggregation: "chair adjudication; dissent recorded; decision record",
+    tempo: "long",
+    records: "ledger, sessions and resolutions"
+  },
+  pattern: "rounds",
+  defaults: { impact: "high", contested: true, rounds: 2 },
+  spend: { policy: "capped", defaultCap: (seats, rounds) => seats * rounds },
+  outputSchema: CommitteeOutputSchema,
+  prepare,
+  output({ result, decisionState }) {
+    return {
+      outcome: result.outcome,
+      quorum: result.quorum,
+      rebuttalObligation: result.rebuttalObligation,
+      synthesisEligible: result.synthesisEligible,
+      decisionState
+    };
+  }
+};
+
+// src/modes/second-opinion/index.ts
+var NonEmptyStringSchema7 = exports_external.string().trim().min(1);
+var SecondOpinionOutputSchema = exports_external.strictObject({
+  outcome: CouncilOutcomeSchema,
+  quorum: QuorumEvaluationSchema,
+  panel: exports_external.array(exports_external.strictObject({
+    seat: NonEmptyStringSchema7,
+    family: ProviderFamilySchema,
+    lens: NonEmptyStringSchema7,
+    answer: exports_external.string()
+  }))
+});
+var secondOpinion = {
+  name: "second-opinion",
+  knobs: {
+    participants: "three or more distinct families, blind, one lens each",
+    pattern: "parallel",
+    aggregation: "attributed panel; synthesis is a later brief",
+    tempo: "about a minute",
+    records: "session with every seat answer"
+  },
+  pattern: "parallel",
+  defaults: { impact: "medium", contested: false, rounds: 1 },
+  spend: { policy: "capped", defaultCap: (seats, rounds) => seats * rounds },
+  outputSchema: SecondOpinionOutputSchema,
+  async prepare({ options }) {
+    return { kind: "ready", options, unavailableProviders: [] };
+  },
+  output({ result }) {
+    const first = result.rounds[0];
+    const panel = first === undefined ? [] : first.responses.flatMap((response) => response.status === "ok" ? [
+      {
+        seat: response.seatId,
+        family: response.provider,
+        lens: response.role,
+        answer: response.answer
+      }
+    ] : []);
+    return { outcome: result.outcome, quorum: result.quorum, panel };
+  }
+};
+
+// src/modes/types.ts
+var MODE_NAMES = ["committee", "second-opinion"];
+
+// src/modes/index.ts
+var modes = Object.freeze({
+  committee,
+  "second-opinion": secondOpinion
+});
+function getMode(name) {
+  const mode = modes[name];
+  if (mode === undefined) {
+    throw new Error(`Unknown mode: ${name}. Registered modes: ${MODE_NAMES.join(", ")}`);
+  }
+  return mode;
+}
+function resolveModeForCommand(command, significant) {
+  if (command === "council")
+    return "committee";
+  return significant ? "committee" : "second-opinion";
+}
 
 // src/cli.ts
 var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 1200000;
-var DEFAULT_SEAT_COUNT = 5;
-var DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
-var REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
-var REDUCED_QUORUM_WARNING = "REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.";
 var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_default.version);
-var EXECUTABLE_PATH = resolve6(import.meta.main ? Bun.main : import.meta.path);
+var EXECUTABLE_PATH = resolve8(import.meta.main ? Bun.main : import.meta.path);
+var KERNEL_ROOT = resolve8(dirname2(EXECUTABLE_PATH), "..");
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set([
@@ -21779,10 +22504,12 @@ var BOOLEAN_FLAGS = new Set([
 ]);
 var COMMON_RUN_FLAGS = new Set([
   "billing",
+  "caller",
   "classification",
   "contested",
   "domain",
   "dry-run",
+  "harness",
   "help",
   "impact",
   "json",
@@ -21791,12 +22518,14 @@ var COMMON_RUN_FLAGS = new Set([
   "project-id",
   "project-policy",
   "providers",
+  "purpose",
   "refinement-question",
   "registry",
   "records-root",
   "rounds",
   "run-id",
   "scope",
+  "spend-cap",
   "timeout-ms"
 ]);
 var COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, "min-families"]);
@@ -21820,6 +22549,21 @@ var ADJUDICATE_FLAGS = new Set([
   "ruling-id",
   "resolution-id"
 ]);
+var COMMANDS = [
+  "run",
+  "council",
+  "second-opinion",
+  "modes",
+  "result",
+  "jobs",
+  "cancel",
+  "adjudicate",
+  "health",
+  "doctor",
+  "migrate-general",
+  "version",
+  "self-check"
+];
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -21885,8 +22629,8 @@ function resolvedRecordsRoot(parsed, environment) {
     return;
   if (value.trim().length === 0)
     throw new Error("Records root must not be blank");
-  const cwd = resolve6(environment.cwd ?? process.cwd());
-  return isAbsolute5(value) ? resolve6(value) : resolve6(cwd, value);
+  const cwd = resolve8(environment.cwd ?? process.cwd());
+  return isAbsolute7(value) ? resolve8(value) : resolve8(cwd, value);
 }
 async function configuredModelRegistry(parsed, environment) {
   const stateRoot = resolvedRecordsRoot(parsed, environment);
@@ -21900,13 +22644,13 @@ async function configuredModelRegistry(parsed, environment) {
     });
     return { ...loaded, ...stateRoot === undefined ? {} : { stateRoot } };
   }
-  const registry2 = ModelRegistrySchema.parse(environment.registry);
+  const registry3 = ModelRegistrySchema.parse(environment.registry);
   const builtIn = await loadModelRegistryWithProvenance();
-  if (environment.registryProvenance === undefined && JSON.stringify(registry2) !== JSON.stringify(builtIn.registry)) {
+  if (environment.registryProvenance === undefined && JSON.stringify(registry3) !== JSON.stringify(builtIn.registry)) {
     throw new Error("An injected model registry requires explicit registry provenance");
   }
   const provenance = ModelRegistryProvenanceSchema.parse(environment.registryProvenance ?? builtIn.provenance);
-  return { registry: registry2, provenance, ...stateRoot === undefined ? {} : { stateRoot } };
+  return { registry: registry3, provenance, ...stateRoot === undefined ? {} : { stateRoot } };
 }
 function engineIdentity(configured, environment) {
   const base = {
@@ -21944,30 +22688,27 @@ function deterministicId(prefix, command, motion, now) {
   const digest = createHash5("sha256").update(JSON.stringify([prefix, command, motion, now])).digest("hex").slice(0, 16);
   return `${prefix}-${digest}`;
 }
+async function commitRecords(root, paths, message, environment) {
+  return commitRecordFiles({
+    root,
+    paths,
+    message,
+    forbiddenRoot: KERNEL_ROOT,
+    env: environment.env ?? process.env
+  });
+}
 function safeError(error51) {
   const message = error51 instanceof Error ? error51.message : String(error51);
-  const redacted = scanAndRedact(message).redacted.replace(/\s+/g, " ").trim();
-  return (redacted || "Council command failed").slice(0, 500);
+  const redacted2 = scanAndRedact(message).redacted.replace(/\s+/g, " ").trim();
+  return (redacted2 || "Council command failed").slice(0, 500);
 }
-function unavailableProvider(probe) {
-  const reason = probe.status === "identity-unverified" ? "identity-unverified" : probe.status === "down" ? "unhealthy" : probe.status === "unsafe-transport" ? "unsafe-transport" : /^missing\s+\S+/i.test(probe.reason) ? "missing key" : "unconfigured";
-  return {
-    provider: probe.provider,
-    reason,
-    detail: probe.reason || reason
-  };
-}
-function autoReducedQuorumWarning(unavailable) {
-  const unavailableSummary = unavailable.map(({ provider, reason, detail }) => `${provider} \u2014 ${reason} (${detail})`).join("; ");
-  return `REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: ${unavailableSummary}.`;
-}
-function selectProviderFamilies(value, registry2, policy) {
+function selectProviderFamilies(value, registry3, policy) {
   const eligible = [...policy?.allowedProviders ?? ProviderFamilySchema.options];
-  const requested = value === undefined ? eligible.slice(0, DEFAULT_SEAT_COUNT) : value.split(",").map((provider) => provider.trim()).filter((provider) => provider.length > 0);
+  const requested = value === undefined ? eligible.slice(0, DEFAULT_SEAT_COUNT) : value.split(",").map((provider2) => provider2.trim()).filter((provider2) => provider2.length > 0);
   const families = exports_external.array(ProviderFamilySchema).min(1).parse(requested);
   const selected = [...new Set(families)];
   for (const family of selected) {
-    if (registry2[family] === undefined)
+    if (registry3[family] === undefined)
       throw new Error(`No model route is registered for ${family}`);
   }
   return { selected, eligible };
@@ -21978,7 +22719,7 @@ function generalPolicy(now) {
     projectId: "general",
     classification: "public",
     allowedProviders,
-    providerCeilings: Object.fromEntries(allowedProviders.map((provider) => [provider, "public"])),
+    providerCeilings: Object.fromEntries(allowedProviders.map((provider2) => [provider2, "public"])),
     createdAt: now,
     updatedAt: now
   });
@@ -21987,7 +22728,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   const policyPath = oneFlag(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath = isAbsolute5(policyPath) ? policyPath : resolve6(cwd, policyPath);
+  const absolutePath = isAbsolute7(policyPath) ? policyPath : resolve8(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath).json();
@@ -21997,11 +22738,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   return ProjectPolicySchema.parse(value);
 }
 function commandDefaults(command) {
-  if (command === "council")
-    return { impact: "high", contested: true, rounds: 2 };
-  if (command === "second-opinion")
-    return { impact: "medium", contested: false, rounds: 1 };
-  return { impact: "medium", contested: false, rounds: 1 };
+  return command === "council" ? modes.committee.defaults : modes["second-opinion"].defaults;
 }
 function resolveBillingMode(parsed, policy) {
   const flag = oneFlag(parsed, "billing");
@@ -22013,14 +22750,14 @@ function reportBillingMode(parsed) {
   const flag = oneFlag(parsed, "billing");
   return flag === undefined ? DEFAULT_BILLING_MODE : BillingModeSchema.parse(flag);
 }
-async function parseRunOptions(command, parsed, environment, registry2, recordsRoot) {
+async function parseRunOptions(command, parsed, environment, registry3, recordsRoot) {
   if (parsed.positionals.length > 0)
     throw new Error("Run commands accept options only");
   const now = (environment.now ?? (() => new Date().toISOString()))();
   const cwd = environment.cwd ?? process.cwd();
   const defaults = commandDefaults(command);
   const scope = exports_external.enum(["general", "project"]).parse(oneFlag(parsed, "scope") ?? "general");
-  const classification = DataClassificationSchema.parse(oneFlag(parsed, "classification") ?? "public");
+  const classification2 = DataClassificationSchema.parse(oneFlag(parsed, "classification") ?? "public");
   const motion = (oneFlag(parsed, "motion") ?? environment.stdin ?? "").trim();
   if (motion.length === 0)
     throw new Error("A non-blank motion is required");
@@ -22029,6 +22766,20 @@ async function parseRunOptions(command, parsed, environment, registry2, recordsR
   const rounds = integerFlag(parsed, "rounds", defaults.rounds, 1, 3);
   const minimumFamilies = command === "council" && parsed.flags.has("min-families") ? integerFlag(parsed, "min-families", DEFAULT_COUNCIL_MINIMUM_FAMILIES, REDUCED_COUNCIL_MINIMUM_FAMILIES, ProviderFamilySchema.options.length) : undefined;
   const significant = command === "council" || impact === "high" || contested;
+  const callerKind = oneFlag(parsed, "caller");
+  const harness = oneFlag(parsed, "harness")?.trim();
+  const purpose = oneFlag(parsed, "purpose")?.trim();
+  if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
+    throw new Error("--harness and --purpose require --caller human|agent");
+  }
+  const caller = callerKind === undefined ? UNDECLARED_CALLER : CallerSchema.parse({
+    kind: callerKind,
+    harness: harness ?? "unknown",
+    declared: true,
+    ...purpose === undefined || purpose.length === 0 ? {} : { purpose }
+  });
+  const spendCap = parsed.flags.has("spend-cap") ? integerFlag(parsed, "spend-cap", 0, 0, 1e5) : undefined;
+  const mode = resolveModeForCommand(command, significant);
   if (!significant && rounds !== 1) {
     throw new Error("Ordinary motions require exactly one blind round");
   }
@@ -22061,15 +22812,18 @@ async function parseRunOptions(command, parsed, environment, registry2, recordsR
   if (scope === "project" && projectId !== undefined && policy?.projectId !== projectId) {
     throw new Error("Project policy does not match --project-id");
   }
-  const providerSelection = selectProviderFamilies(oneFlag(parsed, "providers"), registry2, policy);
+  const providerSelection = selectProviderFamilies(oneFlag(parsed, "providers"), registry3, policy);
   const domainFlags = parsed.flags.get("domain");
   const domains = domainFlags === undefined ? inferMotionDomains(motion) : domainFlags.flatMap((value) => value.split(",")).map((domain2) => domain2.trim()).filter((domain2) => domain2.length > 0);
   const uniqueDomains = [...new Set(domains.map((domain2) => domain2.toLowerCase()))];
   return {
     command,
+    mode,
+    chaired: command === "council",
+    caller,
     dryRun: hasFlag(parsed, "dry-run"),
     scope,
-    classification,
+    classification: classification2,
     motion,
     motionId,
     runId,
@@ -22085,169 +22839,19 @@ async function parseRunOptions(command, parsed, environment, registry2, recordsR
     ...refinementTrigger === undefined ? {} : { refinementTrigger },
     timeoutMs: integerFlag(parsed, "timeout-ms", DEFAULT_TIMEOUT_MS, 1, 3600000),
     ...recordsRoot === undefined ? {} : { recordsRoot },
-    billingMode: resolveBillingMode(parsed, policy)
+    billingMode: resolveBillingMode(parsed, policy),
+    ...spendCap === undefined ? {} : { spendCap }
   };
-}
-function quorumPolicy(options) {
-  const significant = options.command === "council" || options.impact === "high" || options.contested;
-  const minimumDistinctFamilies = options.command === "council" ? options.minimumFamilies ?? DEFAULT_COUNCIL_MINIMUM_FAMILIES : significant ? 4 : 3;
-  return {
-    minimumDistinctFamilies,
-    requiresContrarian: significant,
-    ...options.command === "council" && minimumDistinctFamilies < DEFAULT_COUNCIL_MINIMUM_FAMILIES ? {
-      reducedQuorum: {
-        standingDefaultMinimumDistinctFamilies: DEFAULT_COUNCIL_MINIMUM_FAMILIES,
-        weakerThanStandingDefault: true,
-        warning: options.reducedQuorumWarning ?? REDUCED_QUORUM_WARNING
-      }
-    } : {}
-  };
-}
-function buildManifestAndAssignments(options, registry2, registryProvenance, history) {
-  const policy = quorumPolicy(options);
-  const lenses = selectLenses({ domains: [...options.domains], impact: options.impact, contested: options.contested }, options.providerFamilies.length, { allowReducedThreeSeatCoverage: policy.reducedQuorum !== undefined });
-  const seatIds = options.providerFamilies.map((provider) => `${provider}-seat`);
-  const roleAssignments = assignLenses(options.runId, options.motionId, seatIds, lenses, history);
-  const lensByName = new Map(lenses.map((lens) => [lens.name, lens]));
-  const assignments = roleAssignments.map((assignment, index) => {
-    const provider = options.providerFamilies[index];
-    const lens = lensByName.get(assignment.lensName);
-    if (provider === undefined || lens === undefined) {
-      throw new Error("Dynamic role assignment did not resolve a provider lens");
-    }
-    return {
-      seatId: assignment.seatId,
-      provider,
-      lensName: lens.name,
-      lensPrompt: lens.prompt,
-      lensCategory: lens.category
-    };
-  });
-  const routes = Object.fromEntries(options.providerFamilies.map((provider) => [provider, registry2[provider]]));
-  const manifest = RunManifestSchema.parse({
-    motionId: options.motionId,
-    scope: options.scope,
-    classification: options.classification,
-    routes,
-    registryProvenance,
-    lenses,
-    rounds: options.rounds,
-    ...options.refinementTrigger === undefined ? {} : { refinementTrigger: options.refinementTrigger },
-    quorumPolicy: policy,
-    evidenceReferences: []
-  });
-  return { manifest, assignments, roleAssignments };
-}
-function publicExecution(result) {
-  const { motion: _motion, ...safeResult } = result;
-  return safeResult;
-}
-async function loadAssignmentHistory(options, environment) {
-  if (environment.assignmentHistory !== undefined) {
-    return AssignmentHistorySchema.parse(environment.assignmentHistory);
-  }
-  if (options.recordsRoot === undefined)
-    return [];
-  return CouncilStore.open(options.recordsRoot).readAssignmentHistory(options.scope, { motionId: options.motionId, motion: options.motion }, options.projectId);
-}
-async function persistRun(options, decision, manifest, result, roleAssignments, startedAt, now) {
-  if (options.recordsRoot === undefined)
-    return;
-  if (options.scope === "project" && options.projectId === undefined) {
-    throw new Error("Project record persistence requires a project id");
-  }
-  const store = CouncilStore.open(options.recordsRoot);
-  const status = result.outcome;
-  const outcomeSummary = status === "completed" ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families; a chair ruling is required before this becomes a resolution.` : status === "degraded" ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance and a chair ruling are both required before resolution.` : `Quorum blocked: ${result.quorum.failureReasons.join(", ") || "insufficient responses"}.`;
-  const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
-  const sessionSummary = reducedQuorumWarning === undefined ? outcomeSummary : `${reducedQuorumWarning} ${outcomeSummary}`;
-  const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
-  const sessionBase = {
-    schemaVersion: 2,
-    runId: options.runId,
-    motionId: options.motionId,
-    status,
-    motion: options.motion,
-    startedAt,
-    completedAt: now,
-    decisionState,
-    policyDecision: {
-      kind: decision.kind,
-      classification: decision.effectiveClassification ?? options.classification,
-      reasonCodes: decision.reasonCodes
-    },
-    destinations: options.providerFamilies.map((provider) => ({
-      provider,
-      model: manifest.routes[provider]?.primary ?? "unresolved"
-    })),
-    protocol: {
-      requestedRounds: result.requestedRounds,
-      ...result.refinementTrigger === undefined ? {} : { refinementTrigger: result.refinementTrigger },
-      quorumPolicy: result.quorumPolicy
-    },
-    execution: {
-      rounds: result.rounds,
-      quorum: result.quorum,
-      rebuttalObligation: result.rebuttalObligation,
-      synthesisEligible: result.synthesisEligible
-    },
-    assignments: roleAssignments,
-    summary: sessionSummary
-  };
-  const session = options.scope === "general" ? { ...sessionBase, scope: "general" } : {
-    ...sessionBase,
-    scope: "project",
-    projectId: options.projectId
-  };
-  await store.writeSession(session);
-  return { session: true, decisionState, dataAvailability: "captured" };
-}
-async function resolveCouncilProviders(options, adapters, context) {
-  const candidateAdapters = options.providerFamilies.flatMap((provider) => {
-    const adapter = adapters[provider];
-    return adapter === undefined ? [] : [adapter];
-  });
-  const probes = await probeRoster(candidateAdapters, context);
-  const providerFamilies = [];
-  const unavailableProviders = [];
-  let probeIndex = 0;
-  for (const provider of options.providerFamilies) {
-    const adapter = adapters[provider];
-    if (adapter === undefined) {
-      unavailableProviders.push({
-        provider,
-        reason: "unhealthy",
-        detail: "provider adapter is unavailable"
-      });
-      continue;
-    }
-    const probe = probes[probeIndex];
-    probeIndex += 1;
-    if (probe === undefined || probe.provider !== provider) {
-      unavailableProviders.push({
-        provider,
-        reason: "unhealthy",
-        detail: "provider health result did not match the requested family"
-      });
-      continue;
-    }
-    if (probe.status === "healthy") {
-      providerFamilies.push(provider);
-    } else {
-      unavailableProviders.push(unavailableProvider(probe));
-    }
-  }
-  return { providerFamilies, unavailableProviders };
 }
 async function runCouncilCommand(command, args, environment) {
   const parsed = parseArguments(args, command === "council" ? COUNCIL_RUN_FLAGS : COMMON_RUN_FLAGS);
   const configured = await configuredModelRegistry(parsed, environment);
-  const registry2 = configured.registry;
-  const options = await parseRunOptions(command, parsed, environment, registry2, configured.stateRoot);
+  const registry3 = configured.registry;
+  const options = await parseRunOptions(command, parsed, environment, registry3, configured.stateRoot);
   const requestedProviderFamilies = options.providerFamilies;
-  const destinations = requestedProviderFamilies.map((provider) => ({
-    provider,
-    model: registry2[provider].primary
+  const destinations = requestedProviderFamilies.map((provider2) => ({
+    provider: provider2,
+    model: registry3[provider2].primary
   }));
   const policyDecision = evaluateOutbound({
     runId: options.runId,
@@ -22263,47 +22867,49 @@ async function runCouncilCommand(command, args, environment) {
     return output(3, undefined, {
       schemaVersion: SCHEMA_VERSION,
       command,
+      mode: options.mode,
       status: "blocked-policy",
       preflight: {
         requestedProviders: requestedProviderFamilies,
         selectedProviders: requestedProviderFamilies,
         unavailableProviders: [],
         eligibleProviders: options.eligibleProviderFamilies,
-        omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
+        omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider2) => !requestedProviderFamilies.includes(provider2)),
         decision: policyDecision
       }
     });
   }
   if (options.dryRun) {
-    const assignmentHistory2 = await loadAssignmentHistory(options, environment);
-    const { manifest: manifest2 } = buildManifestAndAssignments(options, registry2, configured.provenance, assignmentHistory2);
+    const assignmentHistory2 = await loadAssignmentHistory(options, environment.assignmentHistory);
+    const { manifest: manifest2 } = buildManifestAndAssignments(options, registry3, configured.provenance, assignmentHistory2);
     const reducedQuorumWarning2 = manifest2.quorumPolicy.reducedQuorum?.warning;
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       command,
+      mode: options.mode,
+      caller: options.caller,
       status: "dry-run",
       runId: options.runId,
       ...reducedQuorumWarning2 === undefined ? {} : { warning: reducedQuorumWarning2 },
       manifest: manifest2,
-      preflight: {
-        classification: policyDecision.effectiveClassification,
-        destinations: policyDecision.dispositions,
+      preflight: buildPreflight({
+        policyDecision,
         requestedProviders: requestedProviderFamilies,
         selectedProviders: requestedProviderFamilies,
         unavailableProviders: [],
-        eligibleProviders: options.eligibleProviderFamilies,
-        omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
-        redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
-      }
+        eligibleProviders: options.eligibleProviderFamilies
+      })
     });
   }
+  const mode = getMode(options.mode);
+  const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters = environment.adapters ?? createProviderRoster({
     env: environment.env ?? process.env,
-    billingMode: options.billingMode
+    billingMode
   });
   const diagnostics = [];
-  const context = {
-    registry: registry2,
+  const prepareContext = {
+    registry: registry3,
     env: environment.env ?? process.env,
     cwd: environment.cwd ?? process.cwd(),
     timeoutMs: options.timeoutMs,
@@ -22311,55 +22917,46 @@ async function runCouncilCommand(command, args, environment) {
       diagnostics.push(diagnostic);
     }
   };
-  let executionOptions = options;
-  let unavailableProviders = [];
-  if (command === "council") {
-    const readiness = await resolveCouncilProviders(options, adapters, context);
-    unavailableProviders = readiness.unavailableProviders;
-    const minimumFamilies = options.minimumFamilies ?? (readiness.providerFamilies.length >= DEFAULT_COUNCIL_MINIMUM_FAMILIES ? DEFAULT_COUNCIL_MINIMUM_FAMILIES : REDUCED_COUNCIL_MINIMUM_FAMILIES);
-    const preflight2 = {
-      classification: policyDecision.effectiveClassification,
-      destinations: policyDecision.dispositions,
-      requestedProviders: requestedProviderFamilies,
-      selectedProviders: readiness.providerFamilies,
-      unavailableProviders,
-      eligibleProviders: options.eligibleProviderFamilies,
-      omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
-      redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
-    };
-    if (readiness.providerFamilies.length < minimumFamilies) {
-      return output(4, undefined, {
-        schemaVersion: SCHEMA_VERSION,
-        command,
-        status: "blocked-quorum",
-        runId: options.runId,
-        message: `Council requires at least ${minimumFamilies} configured, reachable provider families; found ${readiness.providerFamilies.length}.`,
-        preflight: preflight2
-      });
-    }
-    executionOptions = {
-      ...options,
-      providerFamilies: readiness.providerFamilies,
-      minimumFamilies,
-      ...minimumFamilies === REDUCED_COUNCIL_MINIMUM_FAMILIES && readiness.providerFamilies.length === REDUCED_COUNCIL_MINIMUM_FAMILIES && unavailableProviders.length > 0 ? { reducedQuorumWarning: autoReducedQuorumWarning(unavailableProviders) } : {}
-    };
+  const prepared = await mode.prepare({
+    options,
+    adapters,
+    context: prepareContext,
+    policyDecision
+  });
+  if (prepared.kind === "blocked-quorum") {
+    return output(4, undefined, {
+      schemaVersion: SCHEMA_VERSION,
+      command,
+      mode: mode.name,
+      status: "blocked-quorum",
+      runId: options.runId,
+      message: prepared.message,
+      preflight: buildPreflight({
+        policyDecision,
+        requestedProviders: requestedProviderFamilies,
+        selectedProviders: prepared.selectedProviders,
+        unavailableProviders: prepared.unavailableProviders,
+        eligibleProviders: options.eligibleProviderFamilies
+      })
+    });
   }
-  const assignmentHistory = await loadAssignmentHistory(executionOptions, environment);
-  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(executionOptions, registry2, configured.provenance, assignmentHistory);
+  const executionOptions = { ...prepared.options, command };
+  const unavailableProviders = [...prepared.unavailableProviders];
+  const ledger = createSpendLedger(options.spendCap ?? mode.spend.defaultCap(executionOptions.providerFamilies.length, executionOptions.rounds));
+  const context = { ...prepareContext, spend: ledger };
+  const assignmentHistory = await loadAssignmentHistory(executionOptions, environment.assignmentHistory);
+  const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(executionOptions, registry3, configured.provenance, assignmentHistory);
   const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
-  const preflight = {
-    classification: policyDecision.effectiveClassification,
-    destinations: policyDecision.dispositions,
+  const preflight = buildPreflight({
+    policyDecision,
     requestedProviders: requestedProviderFamilies,
     selectedProviders: executionOptions.providerFamilies,
     unavailableProviders,
-    eligibleProviders: options.eligibleProviderFamilies,
-    omittedEligibleProviders: options.eligibleProviderFamilies.filter((provider) => !requestedProviderFamilies.includes(provider)),
-    redactionCount: policyDecision.redactions.reduce((count, redaction) => count + redaction.findings.length, 0)
-  };
-  const runner = new CouncilRunner({ adapters, context });
+    eligibleProviders: options.eligibleProviderFamilies
+  });
+  const runner2 = new CouncilRunner({ adapters, context });
   const startedAt = (environment.now ?? (() => new Date().toISOString()))();
-  const execution = await runner.run({
+  const execution = await executePattern(mode.pattern, runner2, {
     runId: executionOptions.runId,
     motion: executionOptions.motion,
     rounds: executionOptions.rounds,
@@ -22368,18 +22965,90 @@ async function runCouncilCommand(command, args, environment) {
     ...executionOptions.refinementTrigger === undefined ? {} : { refinementTrigger: executionOptions.refinementTrigger }
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const records = await persistRun(executionOptions, policyDecision, manifest, execution, roleAssignments, startedAt, now);
   const status = execution.outcome;
-  return output(status === "completed" ? 0 : 4, {
+  const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
+  const degraded = [];
+  if (!options.caller.declared)
+    degraded.push("caller-undeclared");
+  if (command === "run" && mode.name === "committee")
+    degraded.push("legacy-run-alias");
+  if (command === "second-opinion" && mode.name === "committee") {
+    degraded.push("legacy-significant-second-opinion");
+  }
+  if (ledger.refused > 0)
+    degraded.push("spend-cap-reached");
+  const modeOutput = mode.outputSchema.parse(mode.output({ result: execution, decisionState }));
+  const envelope2 = buildEnvelope({
+    mode: mode.name,
+    session: executionOptions.runId,
+    caller: options.caller,
+    pattern: mode.pattern,
+    rounds: execution.rounds,
+    assignments,
+    output: modeOutput,
+    spend: spendFromRounds(execution.rounds, {
+      billing: billingMode,
+      policy: mode.spend.policy,
+      cap: ledger.cap,
+      refused: ledger.refused
+    }),
+    degraded,
+    record: { session: sessionRecordPath(executionOptions) }
+  });
+  const persisted = await persistSession(executionOptions, policyDecision, manifest, execution, roleAssignments, startedAt, now, envelope2);
+  const records = persisted?.records;
+  let emitted = envelope2;
+  if (persisted !== undefined && executionOptions.recordsRoot !== undefined) {
+    const commit2 = await commitRecords(executionOptions.recordsRoot, persisted.paths, `council: record ${executionOptions.runId}`, environment);
+    if (!commit2.committed)
+      degraded.push(`records-not-committed: ${commit2.reason}`);
+    const directory = minutesDirectory(environment.env ?? process.env, environment.cwd ?? process.cwd());
+    let minutes2 = null;
+    if (directory !== null) {
+      try {
+        minutes2 = await writeMinutes({
+          directory,
+          envelope: envelope2,
+          rounds: execution.rounds,
+          motion: executionOptions.motion,
+          startedAt,
+          completedAt: now
+        });
+      } catch (error51) {
+        degraded.push(`minutes-not-written: ${safeError(error51)}`);
+      }
+    }
+    const unvalidated = {
+      ...envelope2,
+      degraded: [...degraded],
+      record: {
+        session: envelope2.record.session,
+        committed: commit2.committed,
+        ...commit2.committed ? { commitSha: commit2.sha } : {},
+        minutes: minutes2
+      }
+    };
+    try {
+      emitted = ResultEnvelopeSchema.parse(unvalidated);
+    } catch (error51) {
+      degraded.push(`envelope-not-validated: ${safeError(error51)}`);
+      emitted = { ...unvalidated, degraded: [...degraded] };
+    }
+  }
+  const stoppedAtCap = envelope2.spend.stoppedAtCap;
+  return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
+    mode: mode.name,
     status,
     runId: executionOptions.runId,
     ...reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning },
+    ...stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(ledger.cap) } : {},
     manifest,
     preflight,
     execution: publicExecution(execution),
     diagnostics,
+    envelope: emitted,
     ...records === undefined ? {} : { records }
   });
 }
@@ -22401,16 +23070,16 @@ async function providerContext(parsed, environment) {
   };
 }
 function orderedAdapters(roster) {
-  return ProviderFamilySchema.options.flatMap((provider) => {
-    const adapter = roster[provider];
+  return ProviderFamilySchema.options.flatMap((provider2) => {
+    const adapter = roster[provider2];
     return adapter === undefined ? [] : [adapter];
   });
 }
-function providerTransportResolution(provider, registry2, roster) {
-  const adapter = roster[provider];
+function providerTransportResolution(provider2, registry3, roster) {
+  const adapter = roster[provider2];
   if (adapter === undefined) {
     return {
-      preferred: registry2[provider].transport,
+      preferred: registry3[provider2].transport,
       effective: null,
       reason: "No adapter is available for this provider family."
     };
@@ -22418,23 +23087,23 @@ function providerTransportResolution(provider, registry2, roster) {
   if (adapter.transportResolution !== undefined) {
     return {
       ...adapter.transportResolution,
-      preferred: registry2[provider].transport
+      preferred: registry3[provider2].transport
     };
   }
   return {
-    preferred: registry2[provider].transport,
+    preferred: registry3[provider2].transport,
     effective: adapter.transport,
     reason: "The adapter uses its governed preferred transport."
   };
 }
-function selfCheckTransportResolutions(registry2, roster) {
+function selfCheckTransportResolutions(registry3, roster) {
   return {
-    anthropic: providerTransportResolution("anthropic", registry2, roster),
-    openai: providerTransportResolution("openai", registry2, roster),
-    xai: providerTransportResolution("xai", registry2, roster),
-    google: providerTransportResolution("google", registry2, roster),
-    deepseek: providerTransportResolution("deepseek", registry2, roster),
-    moonshot: providerTransportResolution("moonshot", registry2, roster)
+    anthropic: providerTransportResolution("anthropic", registry3, roster),
+    openai: providerTransportResolution("openai", registry3, roster),
+    xai: providerTransportResolution("xai", registry3, roster),
+    google: providerTransportResolution("google", registry3, roster),
+    deepseek: providerTransportResolution("deepseek", registry3, roster),
+    moonshot: providerTransportResolution("moonshot", registry3, roster)
   };
 }
 async function healthCommand(command, args, environment) {
@@ -22458,10 +23127,10 @@ async function healthCommand(command, args, environment) {
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join5(resolve6(root), "general", "sessions");
+    return join6(resolve8(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join5(resolve6(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join6(resolve8(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
@@ -22482,7 +23151,7 @@ async function storedSessionCommand(command, args) {
         return output(0, { schemaVersion: SCHEMA_VERSION, sessions: [] });
       throw error51;
     }
-    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join5(sessionsDirectory, name)).json())));
+    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join6(sessionsDirectory, name)).json())));
     sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     return output(0, { schemaVersion: SCHEMA_VERSION, sessions });
   }
@@ -22490,9 +23159,9 @@ async function storedSessionCommand(command, args) {
   if (runIdValue === undefined)
     throw new Error(`${command} requires --run-id`);
   const runId = safeStorageId(runIdValue, "Run id");
-  let session;
+  let session2;
   try {
-    session = SessionRecordSchema.parse(await Bun.file(join5(sessionsDirectory, `${runId}.json`)).json());
+    session2 = SessionRecordSchema.parse(await Bun.file(join6(sessionsDirectory, `${runId}.json`)).json());
   } catch (error51) {
     const code = error51.code;
     if (code === "ENOENT")
@@ -22503,15 +23172,15 @@ async function storedSessionCommand(command, args) {
     return output(4, undefined, {
       status: "not-cancellable",
       runId,
-      reason: `Persisted session state '${session.status}' is terminal`
+      reason: `Persisted session state '${session2.status}' is terminal`
     });
   }
-  const store = CouncilStore.open(root);
-  const states = await store.readDecisionStates(scope, scope === "project" ? safeStorageId(oneFlag(parsed, "project-id"), "Project id") : undefined);
+  const store2 = CouncilStore.open(root);
+  const states = await store2.readDecisionStates(scope, scope === "project" ? safeStorageId(oneFlag(parsed, "project-id"), "Project id") : undefined);
   const current = states.find((candidate) => candidate.runId === runId);
   return output(0, {
     schemaVersion: SCHEMA_VERSION,
-    session,
+    session: session2,
     ...current === undefined ? {} : {
       decision: {
         state: current.decisionState,
@@ -22535,9 +23204,9 @@ async function migrationCommand(args, environment) {
       throw new Error("migrate-general plan requires --root and --output");
     }
     const sourceRelativePath = oneFlag(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join5(resolve6(root), sourceRelativePath)).text();
+    const sourceContent = await Bun.file(join6(resolve8(root), sourceRelativePath)).text();
     const rulesPath = oneFlag(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve6(rulesPath)).json());
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve8(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -22545,12 +23214,12 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve6(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve8(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve6(destination),
+      output: resolve8(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
@@ -22559,7 +23228,7 @@ async function migrationCommand(args, environment) {
     const planPath = oneFlag(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve6(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve8(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }
@@ -22611,8 +23280,8 @@ async function adjudicateCommand(args, environment) {
     const seats = raw.flatMap((value) => value.split(",")).map((value) => value.trim()).filter((value) => value.length > 0);
     return [...new Set(seats)];
   };
-  const store = CouncilStore.open(recordsRoot);
-  const states = await store.readDecisionStates(scope, projectId);
+  const store2 = CouncilStore.open(recordsRoot);
+  const states = await store2.readDecisionStates(scope, projectId);
   const state = states.find((candidate) => candidate.runId === runId);
   if (state === undefined)
     throw new Error(`No persisted session for run id: ${runId}`);
@@ -22624,6 +23293,7 @@ async function adjudicateCommand(args, environment) {
   }
   const now = (environment.now ?? (() => new Date().toISOString()))();
   const title = decision.replace(/[\r\n]+/g, " ").trim().slice(0, 200);
+  const written = [];
   if (state.status === "degraded") {
     const acceptanceRationale = oneFlag(parsed, "acceptance-rationale");
     if (!hasFlag(parsed, "accept-degraded") || acceptanceRationale === undefined) {
@@ -22637,7 +23307,7 @@ async function adjudicateCommand(args, environment) {
       authorisedBy,
       createdAt: now
     };
-    await store.appendChairAcceptance(scope === "general" ? { ...acceptanceBase, scope: "general" } : { ...acceptanceBase, scope: "project", projectId });
+    written.push(...(await store2.appendChairAcceptance(scope === "general" ? { ...acceptanceBase, scope: "general" } : { ...acceptanceBase, scope: "project", projectId })).paths);
   }
   const rulingId = safeStorageId(oneFlag(parsed, "ruling-id") ?? deterministicId("ruling", "adjudicate", runId, now), "Ruling id");
   const rulingBase = {
@@ -22653,7 +23323,7 @@ async function adjudicateCommand(args, environment) {
     dissentAcknowledged: acknowledged,
     createdAt: now
   };
-  await store.appendChairRuling(scope === "general" ? { ...rulingBase, scope: "general" } : { ...rulingBase, scope: "project", projectId });
+  written.push(...(await store2.appendChairRuling(scope === "general" ? { ...rulingBase, scope: "general" } : { ...rulingBase, scope: "project", projectId })).paths);
   const resolutionId = safeStorageId(oneFlag(parsed, "resolution-id") ?? deterministicId("resolution", "adjudicate", runId, now), "Resolution id");
   const resolutionBase = {
     resolutionId,
@@ -22664,7 +23334,8 @@ async function adjudicateCommand(args, environment) {
     decision,
     createdAt: now
   };
-  await store.appendResolution(scope === "general" ? { ...resolutionBase, scope: "general" } : { ...resolutionBase, scope: "project", projectId });
+  written.push(...(await store2.appendResolution(scope === "general" ? { ...resolutionBase, scope: "general" } : { ...resolutionBase, scope: "project", projectId })).paths);
+  const commit2 = await commitRecords(recordsRoot, written, `council: ruling ${rulingId} and resolution ${resolutionId} for ${runId}`, environment);
   return output(0, {
     schemaVersion: SCHEMA_VERSION,
     command: "adjudicate",
@@ -22676,28 +23347,22 @@ async function adjudicateCommand(args, environment) {
     decisionState: "adjudicated",
     dataAvailability: state.dataAvailability,
     sessionStatus: state.status,
-    dissentAcknowledged: acknowledged
+    dissentAcknowledged: acknowledged,
+    records: commit2.committed ? { committed: true, commitSha: commit2.sha } : { committed: false, reason: commit2.reason }
   });
 }
 function help() {
   return output(0, {
     name: "claude-council",
-    commands: [
-      "run",
-      "council",
-      "second-opinion",
-      "result",
-      "jobs",
-      "cancel",
-      "adjudicate",
-      "health",
-      "doctor",
-      "migrate-general",
-      "version",
-      "self-check"
-    ],
+    commands: [...COMMANDS],
     invocation: "All execution is explicit; no automatic hook starts a council.",
     defaultSeatCount: DEFAULT_SEAT_COUNT,
+    runOptions: {
+      "--caller human|agent": "Declare who is asking. Absent, the envelope reports caller-undeclared in degraded.",
+      "--harness <name>": "Name the harness the caller is running in. Requires --caller.",
+      "--purpose <text>": "State why the motion is being put. Requires --caller.",
+      "--spend-cap <n>": "Bound metered fallback calls for this session. The default is seats x rounds; reaching the cap exits 4 and marks the envelope spend-cap-reached."
+    },
     councilOptions: {
       "--min-families <n>": "Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker."
     },
@@ -22731,6 +23396,21 @@ async function runCliFacade(argv, environment = {}) {
     }
     if (command === "migrate-general")
       return await migrationCommand(args, environment);
+    if (command === "modes") {
+      const parsed = parseArguments(args, new Set(["help", "json"]));
+      if (parsed.positionals.length > 0)
+        throw new Error("modes accepts no positional arguments");
+      return output(0, {
+        schemaVersion: SCHEMA_VERSION,
+        modes: Object.values(modes).map((mode) => ({
+          name: mode.name,
+          knobs: mode.knobs,
+          pattern: mode.pattern,
+          defaults: mode.defaults,
+          spend: { policy: mode.spend.policy }
+        }))
+      });
+    }
     if (command === "version") {
       const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0)
@@ -22764,7 +23444,7 @@ async function runCliFacade(argv, environment = {}) {
         runtimeDependencies: ["zod", "proper-lockfile"]
       });
     }
-    throw new Error(`Unknown command: ${command}`);
+    throw new Error(`Unknown command: ${command}. Commands: ${COMMANDS.join(", ")}. Modes: ${Object.keys(modes).join(", ")}`);
   } catch (error51) {
     return output(2, undefined, {
       schemaVersion: SCHEMA_VERSION,

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'bun:test';
-import { scanAndRedact, type SecretKind } from '../../src/policy/secrets';
+import { scanAndRedact, type SecretKind } from '../../src/substrate/policy/secrets';
 
 function fingerprint(kind: SecretKind, value: string): string {
   return createHash('sha256')

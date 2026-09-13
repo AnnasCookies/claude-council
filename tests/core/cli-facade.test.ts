@@ -6,17 +6,24 @@ import {
   ProviderFamilySchema,
   type ProjectPolicy,
   type ProviderFamily,
-} from '../../src/domain/schemas';
-import type {
-  Availability,
-  HealthResult,
-  ProviderAdapter,
-  ProviderContext,
-  ProviderRequest,
-} from '../../src/execution/provider';
-import { loadModelRegistry } from '../../src/models/registry';
-import { runCliFacade, shouldReadStdin, type CliFacadeEnvironment } from '../../src/cli';
-import { assignLenses, selectLenses } from '../../src/roles/allocator';
+} from '../../src/substrate/domain/schemas';
+import {
+  withCredentialFallback,
+  type Availability,
+  type HealthResult,
+  type ProviderAdapter,
+  type ProviderContext,
+  type ProviderRequest,
+} from '../../src/substrate/execution/provider';
+import { loadModelRegistry } from '../../src/substrate/models/registry';
+import {
+  runCliFacade,
+  shouldReadStdin,
+  type CliFacadeEnvironment,
+  type CliFacadeResult,
+} from '../../src/cli';
+import { assignLenses, selectLenses } from '../../src/substrate/roles/allocator';
+import { ResultEnvelopeSchema } from '../../src/substrate/envelope';
 
 const NOW = '2026-07-28T12:00:00.000Z';
 const REDUCED_QUORUM_WARNING =
@@ -1141,6 +1148,496 @@ describe('public CLI facade', () => {
       expect(
         await Bun.file(join(root, 'general', 'sessions', 'run-stable-identity-b.json')).exists(),
       ).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('every executed run returns a validated envelope and names its mode', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const council = await runCliFacade(
+      ['council', '--classification', 'public', '--motion', 'Envelope for a council'],
+      fixture.environment,
+    );
+    expect(council.exitCode).toBe(0);
+    const councilPayload = JSON.parse(council.stdout);
+    expect(councilPayload.mode).toBe('committee');
+    const councilEnvelope = ResultEnvelopeSchema.parse(councilPayload.envelope);
+    expect(councilEnvelope.mode).toBe('committee');
+    expect(councilEnvelope.pattern).toBe('rounds');
+    expect(councilEnvelope.rounds).toBe(2);
+    expect(councilEnvelope.caller).toEqual({ kind: 'human', harness: 'unknown', declared: false });
+    expect(councilEnvelope.degraded).toContain('caller-undeclared');
+    expect(councilEnvelope.seats.length).toBeGreaterThanOrEqual(4);
+    expect(councilEnvelope.spend).toMatchObject({
+      policy: 'capped',
+      billing: 'sub-first',
+      stoppedAtCap: false,
+    });
+    expect(councilEnvelope.record).toEqual({ session: null });
+
+    const opinion = await runCliFacade(
+      [
+        'second-opinion',
+        '--classification',
+        'public',
+        '--caller',
+        'agent',
+        '--harness',
+        'omp',
+        '--purpose',
+        'choose a library',
+        '--motion',
+        'Envelope for a second opinion',
+      ],
+      fixture.environment,
+    );
+    expect(opinion.exitCode).toBe(0);
+    const opinionPayload = JSON.parse(opinion.stdout);
+    expect(opinionPayload.mode).toBe('second-opinion');
+    const opinionEnvelope = ResultEnvelopeSchema.parse(opinionPayload.envelope);
+    expect(opinionEnvelope.pattern).toBe('parallel');
+    expect(opinionEnvelope.rounds).toBe(1);
+    expect(opinionEnvelope.caller).toEqual({
+      kind: 'agent',
+      harness: 'omp',
+      purpose: 'choose a library',
+      declared: true,
+    });
+    expect(opinionEnvelope.degraded).not.toContain('caller-undeclared');
+    expect(Array.isArray(opinionEnvelope.output.panel)).toBe(true);
+  });
+
+  test('the legacy run alias is marked when it resolves to the committee', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const result = await runCliFacade(
+      [
+        'run',
+        '--classification',
+        'public',
+        '--impact',
+        'high',
+        '--rounds',
+        '2',
+        '--motion',
+        'Legacy alias',
+      ],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mode).toBe('committee');
+    expect(payload.envelope.degraded).toContain('legacy-run-alias');
+  });
+
+  test('a significant second opinion takes the committee and is marked', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const result = await runCliFacade(
+      [
+        'second-opinion',
+        '--classification',
+        'public',
+        '--impact',
+        'high',
+        '--rounds',
+        '2',
+        '--motion',
+        'Significant second opinion',
+      ],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mode).toBe('committee');
+    expect(payload.envelope.pattern).toBe('rounds');
+    expect(payload.envelope.rounds).toBe(2);
+    expect(payload.envelope.degraded).toContain('legacy-significant-second-opinion');
+    expect(payload.manifest.quorumPolicy.minimumDistinctFamilies).toBe(4);
+  });
+
+  test('--harness and --purpose require --caller, and the spend cap must be a whole number', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const harnessOnly = await runCliFacade(
+      ['second-opinion', '--classification', 'public', '--harness', 'omp', '--motion', 'm'],
+      fixture.environment,
+    );
+    expect(harnessOnly.exitCode).toBe(2);
+    expect(harnessOnly.stderr).toContain('--caller');
+    const badCap = await runCliFacade(
+      ['second-opinion', '--classification', 'public', '--spend-cap', '-1', '--motion', 'm'],
+      fixture.environment,
+    );
+    expect(badCap.exitCode).toBe(2);
+  });
+
+  test('the persisted session record carries the envelope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-envelope-record-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Persist the envelope',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.records).toEqual({
+        session: true,
+        decisionState: 'awaiting-adjudication',
+        dataAvailability: 'captured',
+      });
+      expect(payload.envelope.record.session).toBe(`general/sessions/${payload.runId}.json`);
+      const persisted = JSON.parse(
+        await Bun.file(join(root, payload.envelope.record.session)).text(),
+      );
+      expect(ResultEnvelopeSchema.parse(persisted.envelope).session).toBe(payload.runId);
+      expect(persisted.envelope.record).toEqual({ session: payload.envelope.record.session });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the modes command lists the registered modes', async () => {
+    const result = await runCliFacade(['modes']);
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.modes.map((mode: { name: string }) => mode.name)).toEqual([
+      'committee',
+      'second-opinion',
+    ]);
+    expect(payload.modes[0]).toMatchObject({ pattern: 'rounds', spend: { policy: 'capped' } });
+    const positional = await runCliFacade(['modes', 'version']);
+    expect(positional.exitCode).toBe(2);
+    expect(positional.stderr).toContain('modes accepts no positional arguments');
+  });
+
+  test('a dry run names its mode and echoes the declared caller', async () => {
+    const fixture = await fixtureEnvironment();
+    const result = await runCliFacade(
+      [
+        'second-opinion',
+        '--dry-run',
+        '--classification',
+        'public',
+        '--caller',
+        'agent',
+        '--harness',
+        'omp',
+        '--motion',
+        'm',
+      ],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mode).toBe('second-opinion');
+    expect(payload.caller).toEqual({ kind: 'agent', harness: 'omp', declared: true });
+    expect(fixture.providerCalls()).toBe(0);
+  });
+
+  test('a blocked-policy result names the mode it would have run', async () => {
+    const fixture = await fixtureEnvironment();
+    const result = await runCliFacade(
+      ['council', '--scope', 'project', '--motion', 'Review this private design'],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(3);
+    const payload = JSON.parse(result.stderr);
+    expect(payload.status).toBe('blocked-policy');
+    expect(payload.mode).toBe('committee');
+    expect(fixture.providerCalls()).toBe(0);
+  });
+
+  test('an exhausted spend cap refuses the metered fallback and stops the run short', async () => {
+    const registry = await loadModelRegistry();
+    // One family's subscription seat is spent, so its seat can only answer through the metered
+    // fallback. That is the single call the session cap is there to allow or refuse.
+    const runWithCap = async (cap: string): Promise<CliFacadeResult> => {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const metered = fixture.environment.adapters?.xai;
+      if (metered === undefined) throw new Error('The fixture must provide an xai adapter');
+      const exhausted: ProviderAdapter = {
+        ...metered,
+        async invoke(request: ProviderRequest) {
+          return {
+            status: 'failed' as const,
+            seatId: request.seatId,
+            provider: 'xai' as const,
+            requestedModel: registry.xai.primary,
+            role: request.role,
+            latencyMs: 1,
+            error: {
+              code: 'quota-exhausted',
+              message: 'The subscription quota is spent.',
+              retryable: true,
+            },
+          };
+        },
+      };
+      return runCliFacade(
+        ['second-opinion', '--classification', 'public', '--spend-cap', cap, '--motion', 'Cap me'],
+        {
+          ...fixture.environment,
+          adapters: {
+            ...fixture.environment.adapters,
+            xai: withCredentialFallback(exhausted, () => metered, 'http'),
+          },
+        },
+      );
+    };
+    const xaiSeat = (payload: { envelope: { seats: { family: string }[] } }) => {
+      const seat = payload.envelope.seats.find(({ family }) => family === 'xai');
+      if (seat === undefined) throw new Error('The envelope must carry the xai seat');
+      return seat as { family: string; status: string; reason: string | null; fallback: boolean };
+    };
+
+    const refused = await runWithCap('0');
+    const refusedPayload = JSON.parse(refused.stdout);
+    // The other four families still make quorum, so the run completed: the non-zero exit is the
+    // spend cap alone, which is the distinction this asserts.
+    expect(refusedPayload.status).toBe('completed');
+    expect(refused.exitCode).toBe(4);
+    expect(refusedPayload.spendWarning).toContain('--spend-cap');
+    expect(refusedPayload.envelope.spend.stoppedAtCap).toBe(true);
+    expect(refusedPayload.envelope.spend.refused).toBe(1);
+    expect(refusedPayload.envelope.degraded).toContain('spend-cap-reached');
+    expect(xaiSeat(refusedPayload).status).toBe('failed');
+    expect(xaiSeat(refusedPayload).reason).toContain('spend-cap');
+
+    const allowed = await runWithCap('1');
+    expect(allowed.exitCode).toBe(0);
+    const allowedPayload = JSON.parse(allowed.stdout);
+    expect(allowedPayload.status).toBe('completed');
+    expect(allowedPayload.spendWarning).toBeUndefined();
+    expect(allowedPayload.envelope.spend.stoppedAtCap).toBe(false);
+    expect(allowedPayload.envelope.spend.refused).toBe(0);
+    expect(allowedPayload.envelope.degraded).not.toContain('spend-cap-reached');
+    expect(xaiSeat(allowedPayload).fallback).toBe(true);
+  });
+
+  test('the health preflight does not draw on the execution spend budget', async () => {
+    const registry = await loadModelRegistry();
+    const fixture = await fixtureEnvironment(undefined, true);
+    const metered = fixture.environment.adapters?.xai;
+    if (metered === undefined) throw new Error('The fixture must provide an xai adapter');
+    // This family's subscription path fails for every call, so its health probe AND both of its
+    // council rounds go through the metered fallback. The cap of 2 covers the two rounds exactly;
+    // a ledger shared with the preflight would spend one of them on the probe and refuse a round.
+    const exhausted: ProviderAdapter = {
+      ...metered,
+      async invoke(request: ProviderRequest) {
+        return {
+          status: 'failed' as const,
+          seatId: request.seatId,
+          provider: 'xai' as const,
+          requestedModel: registry.xai.primary,
+          role: request.role,
+          latencyMs: 1,
+          error: {
+            code: 'quota-exhausted',
+            message: 'The subscription quota is spent.',
+            retryable: true,
+          },
+        };
+      },
+    };
+    const result = await runCliFacade(
+      ['council', '--classification', 'public', '--spend-cap', '2', '--motion', 'Probe budget'],
+      {
+        ...fixture.environment,
+        adapters: {
+          ...fixture.environment.adapters,
+          xai: withCredentialFallback(exhausted, () => metered, 'http'),
+        },
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.preflight.selectedProviders).toContain('xai');
+    expect(payload.envelope.spend.stoppedAtCap).toBe(false);
+    expect(payload.envelope.spend.refused).toBe(0);
+  });
+
+  test('a persisted run commits its record in a Git records root and writes minutes when configured', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-commit-facade-'));
+    try {
+      const init = Bun.spawnSync({ cmd: ['git', 'init', '-q'], cwd: root });
+      expect(init.exitCode).toBe(0);
+      const fixture = await fixtureEnvironment(undefined, true);
+      const environment: CliFacadeEnvironment = {
+        ...fixture.environment,
+        env: {
+          COUNCIL_MINUTES_DIR: join(root, 'minutes'),
+          GIT_AUTHOR_NAME: 'Council Test',
+          GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
+          GIT_COMMITTER_NAME: 'Council Test',
+          GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+          // A GIT_CONFIG_GLOBAL that does not exist keeps the machine's own global configuration
+          // — hooks, templates, a `commit.gpgsign` — out of this temporary repository.
+          GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
+        },
+      };
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Commit me',
+        ],
+        environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.committed).toBe(true);
+      expect(payload.envelope.record.commitSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(payload.envelope.record.minutes).toContain(join(root, 'minutes'));
+      expect(await Bun.file(payload.envelope.record.minutes).text()).toContain(
+        '# Minutes: second-opinion',
+      );
+      expect(payload.envelope.degraded).not.toContainEqual(
+        expect.stringContaining('records-not-committed'),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a persisted run in a plain directory reports records-not-committed and still succeeds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-nocommit-facade-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'No git here',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.committed).toBe(false);
+      expect(payload.envelope.record.minutes).toBeNull();
+      expect(payload.envelope.degraded).toContainEqual(
+        expect.stringContaining('records-not-committed'),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('an unwritable minutes directory degrades the run instead of failing it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-minutes-facade-'));
+    try {
+      // A regular file where the minutes directory should be, so creating the directory fails
+      // after the record has already been written.
+      const blocked = join(root, 'minutes');
+      await Bun.write(blocked, 'not a directory\n');
+      const fixture = await fixtureEnvironment(undefined, true);
+      const environment: CliFacadeEnvironment = {
+        ...fixture.environment,
+        env: { COUNCIL_MINUTES_DIR: blocked },
+      };
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Minutes cannot be written',
+        ],
+        environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.minutes).toBeNull();
+      expect(payload.envelope.degraded).toContainEqual(
+        expect.stringMatching(/^minutes-not-written: /),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('adjudicate commits the ruling and resolution it appended', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-adjudicate-facade-'));
+    try {
+      const init = Bun.spawnSync({ cmd: ['git', 'init', '-q'], cwd: root });
+      expect(init.exitCode).toBe(0);
+      const fixture = await fixtureEnvironment(undefined, true);
+      const environment: CliFacadeEnvironment = {
+        ...fixture.environment,
+        env: {
+          GIT_AUTHOR_NAME: 'Council Test',
+          GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
+          GIT_COMMITTER_NAME: 'Council Test',
+          GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+          // A GIT_CONFIG_GLOBAL that does not exist keeps the machine's own global configuration
+          // — hooks, templates, a `commit.gpgsign` — out of this temporary repository.
+          GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
+        },
+      };
+      const run = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Adjudicate me',
+        ],
+        environment,
+      );
+      expect(run.exitCode).toBe(0);
+      const runPayload = JSON.parse(run.stdout);
+      expect(runPayload.status).toBe('completed');
+
+      const adjudicated = await runCliFacade(
+        [
+          'adjudicate',
+          '--records-root',
+          root,
+          '--run-id',
+          runPayload.runId,
+          '--decision',
+          'Adopt the proposal.',
+          '--rationale',
+          'The panel informed the chair; the chair decided.',
+          '--authorised-by',
+          'council-chair',
+          '--no-dissent',
+        ],
+        environment,
+      );
+      expect(adjudicated.exitCode).toBe(0);
+      const payload = JSON.parse(adjudicated.stdout);
+      expect(payload.records.committed).toBe(true);
+      expect(payload.records.commitSha).toMatch(/^[a-f0-9]{40}$/);
+
+      const subject = Bun.spawnSync({
+        cmd: ['git', 'log', '--format=%s', '-1'],
+        cwd: root,
+        stdout: 'pipe',
+      });
+      expect(subject.stdout.toString()).toContain(`council: ruling ${payload.rulingId}`);
+      expect(subject.stdout.toString()).toContain(`resolution ${payload.resolutionId}`);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

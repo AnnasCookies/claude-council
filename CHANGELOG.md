@@ -4,6 +4,31 @@ All notable changes to claude-council are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## Unreleased
+
+### Added
+
+- **Substrate and modes.** The kernel modules now live under `src/substrate/` behind one index,
+  and `src/modes/` registers `committee` and `second-opinion` as the first modes. Behaviour of
+  `council`, `second-opinion`, `run`, `adjudicate`, `result`, `jobs`, `doctor` and `health` is
+  unchanged. See `docs/vision.md` and `docs/modes.md`.
+- **Result envelope.** Every executed run returns a validated envelope, also embedded in the
+  session record. New flags `--caller human|agent`, `--harness`, `--purpose`. Its `degraded` list
+  names why a run is weaker than its mode's default: `caller-undeclared`, `legacy-run-alias`,
+  `legacy-significant-second-opinion`, `spend-cap-reached` and `records-not-committed`, plus
+  `minutes-not-written` and `envelope-not-validated` where those later steps fail.
+- **Spend cap.** `--spend-cap <n>` bounds metered fallback calls per session; the default equals
+  the previous behaviour of one metered retry per seat per round. The cap governs `sub-first`
+  only — it does not apply under `--billing api-only` (every call is deliberately metered) or
+  `sub-only` (no metered call is possible) — and reaching it exits 4 even on a `completed` outcome.
+- **Records committed before success.** Terminal records are committed in the records repository
+  (never pushed). `COUNCIL_MINUTES_DIR` renders a Markdown minutes file per record.
+- `modes` command listing the registered modes.
+
+### Fixed
+
+- Two tests depended on the host: a hard link across filesystems and a `grok` CLI on `PATH`.
+
 ## 2026.9.5
 
 ### Fixed
