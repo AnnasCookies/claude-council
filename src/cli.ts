@@ -3,6 +3,7 @@ import { readdir } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import packageManifest from '../package.json';
+import { getMode, modes, resolveModeForCommand, type ModeName } from './modes';
 import {
   DataClassificationSchema,
   MotionImpactSchema,
@@ -15,7 +16,14 @@ import {
   type ProjectPolicy,
   type ProviderFamily,
 } from './substrate/domain/schemas';
-import { UNDECLARED_CALLER } from './substrate/envelope';
+import {
+  CallerSchema,
+  UNDECLARED_CALLER,
+  buildEnvelope,
+  spendFromRounds,
+  type Caller,
+  type ResultEnvelope,
+} from './substrate/envelope';
 import {
   BillingModeSchema,
   DEFAULT_BILLING_MODE,
@@ -36,6 +44,7 @@ import {
   type LoadedModelRegistry,
   type ModelRegistry,
 } from './substrate/models/registry';
+import { executePattern } from './substrate/patterns';
 import { evaluateOutbound } from './substrate/policy/data-guard';
 import { scanAndRedact } from './substrate/policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './substrate/providers';
@@ -48,6 +57,7 @@ import {
 import {
   CouncilStore,
   SessionRecordSchema,
+  type PersistedDecisionState,
   type SessionRecord,
   writeTextAtomically,
 } from './substrate/records/store';
@@ -60,16 +70,20 @@ import {
   DEFAULT_COUNCIL_MINIMUM_FAMILIES,
   DEFAULT_SEAT_COUNT,
   REDUCED_COUNCIL_MINIMUM_FAMILIES,
-  autoReducedQuorumWarning,
   buildManifestAndAssignments,
   buildPreflight,
   loadAssignmentHistory,
   persistSession,
   publicExecution,
-  resolveHealthyProviders,
+  sessionRecordPath,
   type SessionOptions,
   type UnavailableProvider,
 } from './substrate/session';
+import {
+  createSpendLedger,
+  effectiveBillingMode,
+  spendCapExhaustedMessage,
+} from './substrate/spend';
 
 export const ADAPTER_CONTRACT_VERSION = 1 as const;
 const SCHEMA_VERSION = 1;
@@ -101,10 +115,12 @@ const BOOLEAN_FLAGS = new Set([
 ]);
 const COMMON_RUN_FLAGS = new Set([
   'billing',
+  'caller',
   'classification',
   'contested',
   'domain',
   'dry-run',
+  'harness',
   'help',
   'impact',
   'json',
@@ -113,12 +129,14 @@ const COMMON_RUN_FLAGS = new Set([
   'project-id',
   'project-policy',
   'providers',
+  'purpose',
   'refinement-question',
   'registry',
   'records-root',
   'rounds',
   'run-id',
   'scope',
+  'spend-cap',
   'timeout-ms',
 ]);
 const COUNCIL_RUN_FLAGS = new Set([...COMMON_RUN_FLAGS, 'min-families']);
@@ -425,9 +443,7 @@ function commandDefaults(command: RunOptions['command']): {
   contested: boolean;
   rounds: number;
 } {
-  if (command === 'council') return { impact: 'high', contested: true, rounds: 2 };
-  if (command === 'second-opinion') return { impact: 'medium', contested: false, rounds: 1 };
-  return { impact: 'medium', contested: false, rounds: 1 };
+  return command === 'council' ? modes.committee.defaults : modes['second-opinion'].defaults;
 }
 
 /**
@@ -487,6 +503,25 @@ async function parseRunOptions(
         )
       : undefined;
   const significant = command === 'council' || impact === 'high' || contested;
+  const callerKind = oneFlag(parsed, 'caller');
+  const harness = oneFlag(parsed, 'harness')?.trim();
+  const purpose = oneFlag(parsed, 'purpose')?.trim();
+  if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
+    throw new Error('--harness and --purpose require --caller human|agent');
+  }
+  const caller: Caller =
+    callerKind === undefined
+      ? UNDECLARED_CALLER
+      : CallerSchema.parse({
+          kind: callerKind,
+          harness: harness ?? 'unknown',
+          declared: true,
+          ...(purpose === undefined || purpose.length === 0 ? {} : { purpose }),
+        });
+  const spendCap = parsed.flags.has('spend-cap')
+    ? integerFlag(parsed, 'spend-cap', 0, 0, 100_000)
+    : undefined;
+  const mode: ModeName = resolveModeForCommand(command, significant);
   if (!significant && rounds !== 1) {
     throw new Error('Ordinary motions require exactly one blind round');
   }
@@ -542,9 +577,9 @@ async function parseRunOptions(
 
   return {
     command,
-    mode: command === 'council' ? 'committee' : 'second-opinion',
+    mode,
     chaired: command === 'council',
-    caller: UNDECLARED_CALLER,
+    caller,
     dryRun: hasFlag(parsed, 'dry-run'),
     scope,
     classification,
@@ -564,6 +599,7 @@ async function parseRunOptions(
     timeoutMs: integerFlag(parsed, 'timeout-ms', DEFAULT_TIMEOUT_MS, 1, 3_600_000),
     ...(recordsRoot === undefined ? {} : { recordsRoot }),
     billingMode: resolveBillingMode(parsed, policy),
+    ...(spendCap === undefined ? {} : { spendCap }),
   };
 }
 
@@ -655,13 +691,18 @@ async function runCouncilCommand(
     });
   }
 
+  const mode = getMode(options.mode);
+  const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters =
     environment.adapters ??
     createProviderRoster({
       env: environment.env ?? process.env,
-      billingMode: options.billingMode,
+      billingMode,
     });
   const diagnostics: ProviderDiagnostic[] = [];
+  const spendCap =
+    options.spendCap ?? mode.spend.defaultCap(options.providerFamilies.length, options.rounds);
+  const ledger = createSpendLedger(spendCap);
   const context: ProviderContext = {
     registry,
     env: environment.env ?? process.env,
@@ -670,46 +711,29 @@ async function runCouncilCommand(
     captureDiagnostic: (diagnostic) => {
       diagnostics.push(diagnostic);
     },
+    spend: ledger,
   };
-  let executionOptions = options;
-  let unavailableProviders: UnavailableProvider[] = [];
 
-  if (command === 'council') {
-    const readiness = await resolveHealthyProviders(options, adapters, context);
-    unavailableProviders = readiness.unavailableProviders;
-    const minimumFamilies =
-      options.minimumFamilies ??
-      (readiness.providerFamilies.length >= DEFAULT_COUNCIL_MINIMUM_FAMILIES
-        ? DEFAULT_COUNCIL_MINIMUM_FAMILIES
-        : REDUCED_COUNCIL_MINIMUM_FAMILIES);
-    const preflight = buildPreflight({
-      policyDecision,
-      requestedProviders: requestedProviderFamilies,
-      selectedProviders: readiness.providerFamilies,
-      unavailableProviders,
-      eligibleProviders: options.eligibleProviderFamilies,
+  const prepared = await mode.prepare({ options, adapters, context, policyDecision });
+  if (prepared.kind === 'blocked-quorum') {
+    return output(4, undefined, {
+      schemaVersion: SCHEMA_VERSION,
+      command,
+      mode: mode.name,
+      status: 'blocked-quorum',
+      runId: options.runId,
+      message: prepared.message,
+      preflight: buildPreflight({
+        policyDecision,
+        requestedProviders: requestedProviderFamilies,
+        selectedProviders: prepared.selectedProviders,
+        unavailableProviders: prepared.unavailableProviders,
+        eligibleProviders: options.eligibleProviderFamilies,
+      }),
     });
-    if (readiness.providerFamilies.length < minimumFamilies) {
-      return output(4, undefined, {
-        schemaVersion: SCHEMA_VERSION,
-        command,
-        status: 'blocked-quorum',
-        runId: options.runId,
-        message: `Council requires at least ${minimumFamilies} configured, reachable provider families; found ${readiness.providerFamilies.length}.`,
-        preflight,
-      });
-    }
-    executionOptions = {
-      ...options,
-      providerFamilies: readiness.providerFamilies,
-      minimumFamilies,
-      ...(minimumFamilies === REDUCED_COUNCIL_MINIMUM_FAMILIES &&
-      readiness.providerFamilies.length === REDUCED_COUNCIL_MINIMUM_FAMILIES &&
-      unavailableProviders.length > 0
-        ? { reducedQuorumWarning: autoReducedQuorumWarning(unavailableProviders) }
-        : {}),
-    };
   }
+  const executionOptions: RunOptions = { ...prepared.options, command };
+  const unavailableProviders: UnavailableProvider[] = [...prepared.unavailableProviders];
 
   const assignmentHistory = await loadAssignmentHistory(
     executionOptions,
@@ -733,7 +757,7 @@ async function runCouncilCommand(
   // Taken before execution so the record shows real elapsed time. Both timestamps were previously
   // the same post-run value, which made every session look instantaneous.
   const startedAt = (environment.now ?? (() => new Date().toISOString()))();
-  const execution = await runner.run({
+  const execution = await executePattern(mode.pattern, runner, {
     runId: executionOptions.runId,
     motion: executionOptions.motion,
     rounds: executionOptions.rounds,
@@ -744,6 +768,33 @@ async function runCouncilCommand(
       : { refinementTrigger: executionOptions.refinementTrigger }),
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
+  const status = execution.outcome;
+  const decisionState: PersistedDecisionState =
+    status === 'completed' || status === 'degraded' ? 'awaiting-adjudication' : 'not-adjudicable';
+  const degraded: string[] = [];
+  if (!options.caller.declared) degraded.push('caller-undeclared');
+  if (command === 'run' && mode.name === 'committee') degraded.push('legacy-run-alias');
+  if (ledger.refused > 0) degraded.push('spend-cap-reached');
+  const modeOutput = mode.outputSchema.parse(
+    mode.output({ result: execution, decisionState }),
+  ) as Record<string, unknown>;
+  const envelope: ResultEnvelope = buildEnvelope({
+    mode: mode.name,
+    session: executionOptions.runId,
+    caller: options.caller,
+    pattern: mode.pattern,
+    rounds: execution.rounds,
+    assignments,
+    output: modeOutput,
+    spend: spendFromRounds(execution.rounds, {
+      billing: billingMode,
+      policy: mode.spend.policy,
+      cap: ledger.cap,
+      refused: ledger.refused,
+    }),
+    degraded,
+    record: { session: sessionRecordPath(executionOptions) },
+  });
   const persisted = await persistSession(
     executionOptions,
     policyDecision,
@@ -752,23 +803,26 @@ async function runCouncilCommand(
     roleAssignments,
     startedAt,
     now,
-    undefined,
+    envelope,
   );
   const records = persisted?.records;
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
   // is a separate command with its own exit status.
-  const status = execution.outcome;
-  return output(status === 'completed' ? 0 : 4, {
+  const stoppedAtCap = envelope.spend.stoppedAtCap;
+  return output(status === 'completed' && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
+    mode: mode.name,
     status,
     runId: executionOptions.runId,
     ...(reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning }),
+    ...(stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(ledger.cap) } : {}),
     manifest,
     preflight,
     execution: publicExecution(execution),
     diagnostics,
+    envelope,
     ...(records === undefined ? {} : { records }),
   });
 }
@@ -1185,6 +1239,7 @@ function help(): CliFacadeResult {
       'run',
       'council',
       'second-opinion',
+      'modes',
       'result',
       'jobs',
       'cancel',
@@ -1236,6 +1291,19 @@ export async function runCliFacade(
       return await storedSessionCommand(command, args);
     }
     if (command === 'migrate-general') return await migrationCommand(args, environment);
+    if (command === 'modes') {
+      parseArguments(args, new Set(['help', 'json']));
+      return output(0, {
+        schemaVersion: SCHEMA_VERSION,
+        modes: Object.values(modes).map((mode) => ({
+          name: mode.name,
+          knobs: mode.knobs,
+          pattern: mode.pattern,
+          defaults: mode.defaults,
+          spend: { policy: mode.spend.policy },
+        })),
+      });
+    }
     if (command === 'version') {
       const parsed = parseArguments(args, REGISTRY_REPORT_FLAGS);
       if (parsed.positionals.length > 0) throw new Error('version accepts no positional arguments');
@@ -1269,7 +1337,9 @@ export async function runCliFacade(
         runtimeDependencies: ['zod', 'proper-lockfile'],
       });
     }
-    throw new Error(`Unknown command: ${command}`);
+    throw new Error(
+      `Unknown command: ${command}. Registered modes: ${Object.keys(modes).join(', ')}`,
+    );
   } catch (error) {
     return output(2, undefined, {
       schemaVersion: SCHEMA_VERSION,

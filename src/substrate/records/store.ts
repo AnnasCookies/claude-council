@@ -14,6 +14,7 @@ import {
   SeatResponseSchema,
 } from '../domain/schemas';
 import type { CouncilScope } from '../domain/schemas';
+import { ResultEnvelopeSchema } from '../envelope';
 import { AssignmentHistorySchema, type AssignmentHistory } from '../roles/allocator';
 
 const NonEmptyStringSchema = z.string().trim().min(1);
@@ -179,6 +180,9 @@ const CurrentSessionRecordShape = {
   schemaVersion: z.literal(2),
   decisionState: PersistedDecisionStateSchema,
   execution: ExecutionSnapshotSchema,
+  // Additive. Records written before the envelope existed stay valid, and the envelope is the
+  // same object the caller received, so what an agent consumed and what is stored do not drift.
+  envelope: ResultEnvelopeSchema.optional(),
 };
 
 const LegacyGeneralSessionRecordSchema = z.strictObject({

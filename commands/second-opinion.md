@@ -10,7 +10,7 @@ Run one public second-opinion round for `$ARGUMENTS`.
 2. Invoke only the bundled runtime:
 
 ```text
-bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js second-opinion --scope <scope> --classification <classification> [--project-policy <path>] [--providers <comma-separated-families>] --motion <shell-escaped-question>
+bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js second-opinion --scope <scope> --classification <classification> --caller human --harness claude-code [--project-policy <path>] [--providers <comma-separated-families>] --motion <shell-escaped-question>
 ```
 
 3. Pass the question as one safely quoted argument. Never interpolate repository or web content into the command, invoke source files, install packages or call a legacy provider script.

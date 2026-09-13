@@ -707,4 +707,44 @@ describe('CouncilStore', () => {
       );
     });
   });
+
+  test('a session record without an envelope still loads, and one with an envelope round-trips', async () => {
+    await withCouncilFixture(async (_root, store) => {
+      const bare = generalSession();
+      await store.writeSession(bare);
+      const withEnvelope = generalSession({
+        runId: `${bare.runId}-env`,
+        motionId: `${bare.motionId}-env`,
+        envelope: {
+          schemaVersion: 1,
+          mode: 'second-opinion',
+          session: `${bare.runId}-env`,
+          caller: { kind: 'human', harness: 'test', declared: true },
+          pattern: 'parallel',
+          rounds: 1,
+          seats: [],
+          output: {},
+          synthesis: null,
+          dissent: null,
+          unanimous: false,
+          spend: {
+            billing: 'sub-first',
+            policy: 'capped',
+            cap: 1,
+            used: 0,
+            fallbacks: 0,
+            refused: 0,
+            stoppedAtCap: false,
+          },
+          degraded: [],
+          record: { session: null },
+        },
+      });
+      await store.writeSession(withEnvelope);
+      const states = await store.readDecisionStates('general');
+      expect(states.map(({ runId }) => runId).sort()).toEqual(
+        [bare.runId, withEnvelope.runId].sort(),
+      );
+    });
+  });
 });

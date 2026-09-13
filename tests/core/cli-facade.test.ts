@@ -17,6 +17,7 @@ import type {
 import { loadModelRegistry } from '../../src/substrate/models/registry';
 import { runCliFacade, shouldReadStdin, type CliFacadeEnvironment } from '../../src/cli';
 import { assignLenses, selectLenses } from '../../src/substrate/roles/allocator';
+import { ResultEnvelopeSchema } from '../../src/substrate/envelope';
 
 const NOW = '2026-07-28T12:00:00.000Z';
 const REDUCED_QUORUM_WARNING =
@@ -1144,6 +1145,143 @@ describe('public CLI facade', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test('every executed run returns a validated envelope and names its mode', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const council = await runCliFacade(
+      ['council', '--classification', 'public', '--motion', 'Envelope for a council'],
+      fixture.environment,
+    );
+    expect(council.exitCode).toBe(0);
+    const councilPayload = JSON.parse(council.stdout);
+    expect(councilPayload.mode).toBe('committee');
+    const councilEnvelope = ResultEnvelopeSchema.parse(councilPayload.envelope);
+    expect(councilEnvelope.mode).toBe('committee');
+    expect(councilEnvelope.pattern).toBe('rounds');
+    expect(councilEnvelope.rounds).toBe(2);
+    expect(councilEnvelope.caller).toEqual({ kind: 'human', harness: 'unknown', declared: false });
+    expect(councilEnvelope.degraded).toContain('caller-undeclared');
+    expect(councilEnvelope.seats.length).toBeGreaterThanOrEqual(4);
+    expect(councilEnvelope.spend).toMatchObject({
+      policy: 'capped',
+      billing: 'sub-first',
+      stoppedAtCap: false,
+    });
+    expect(councilEnvelope.record).toEqual({ session: null });
+
+    const opinion = await runCliFacade(
+      [
+        'second-opinion',
+        '--classification',
+        'public',
+        '--caller',
+        'agent',
+        '--harness',
+        'omp',
+        '--purpose',
+        'choose a library',
+        '--motion',
+        'Envelope for a second opinion',
+      ],
+      fixture.environment,
+    );
+    expect(opinion.exitCode).toBe(0);
+    const opinionPayload = JSON.parse(opinion.stdout);
+    expect(opinionPayload.mode).toBe('second-opinion');
+    const opinionEnvelope = ResultEnvelopeSchema.parse(opinionPayload.envelope);
+    expect(opinionEnvelope.pattern).toBe('parallel');
+    expect(opinionEnvelope.rounds).toBe(1);
+    expect(opinionEnvelope.caller).toEqual({
+      kind: 'agent',
+      harness: 'omp',
+      purpose: 'choose a library',
+      declared: true,
+    });
+    expect(opinionEnvelope.degraded).not.toContain('caller-undeclared');
+    expect(Array.isArray(opinionEnvelope.output.panel)).toBe(true);
+  });
+
+  test('the legacy run alias is marked when it resolves to the committee', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const result = await runCliFacade(
+      [
+        'run',
+        '--classification',
+        'public',
+        '--impact',
+        'high',
+        '--rounds',
+        '2',
+        '--motion',
+        'Legacy alias',
+      ],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mode).toBe('committee');
+    expect(payload.envelope.degraded).toContain('legacy-run-alias');
+  });
+
+  test('--harness and --purpose require --caller, and the spend cap must be a whole number', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const harnessOnly = await runCliFacade(
+      ['second-opinion', '--classification', 'public', '--harness', 'omp', '--motion', 'm'],
+      fixture.environment,
+    );
+    expect(harnessOnly.exitCode).toBe(2);
+    expect(harnessOnly.stderr).toContain('--caller');
+    const badCap = await runCliFacade(
+      ['second-opinion', '--classification', 'public', '--spend-cap', '-1', '--motion', 'm'],
+      fixture.environment,
+    );
+    expect(badCap.exitCode).toBe(2);
+  });
+
+  test('the persisted session record carries the envelope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-envelope-record-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Persist the envelope',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.records).toEqual({
+        session: true,
+        decisionState: 'awaiting-adjudication',
+        dataAvailability: 'captured',
+      });
+      expect(payload.envelope.record.session).toBe(`general/sessions/${payload.runId}.json`);
+      const persisted = JSON.parse(
+        await Bun.file(join(root, payload.envelope.record.session)).text(),
+      );
+      expect(ResultEnvelopeSchema.parse(persisted.envelope).session).toBe(payload.runId);
+      expect(persisted.envelope.record).toEqual({ session: payload.envelope.record.session });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('the modes command lists the registered modes', async () => {
+    const result = await runCliFacade(['modes']);
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.modes.map((mode: { name: string }) => mode.name)).toEqual([
+      'committee',
+      'second-opinion',
+    ]);
+    expect(payload.modes[0]).toMatchObject({ pattern: 'rounds', spend: { policy: 'capped' } });
   });
 });
 
