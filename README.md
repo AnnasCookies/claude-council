@@ -193,6 +193,9 @@ spend them — so the launcher rejects them rather than accepting them quietly.
 Export them in the launch environment, or let the maintained Claude facade load the
 same names from the machine-local, untracked `~/.claude/council/providers.env`.
 
+`COUNCIL_MINUTES_DIR` is optional and not a credential: when set, every terminal record is also
+rendered as a Markdown minutes file there. See "Records and memory" in `docs/modes.md`.
+
 **Setting one of the four subscription families' keys does not start spending it.**
 Under the default `sub-first` mode the subscription CLI is preferred, and the key is
 reached only when that subscription is exhausted, unauthenticated or absent. Use

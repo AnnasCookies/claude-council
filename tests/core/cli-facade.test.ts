@@ -1436,6 +1436,78 @@ describe('public CLI facade', () => {
     expect(payload.envelope.spend.stoppedAtCap).toBe(false);
     expect(payload.envelope.spend.refused).toBe(0);
   });
+
+  test('a persisted run commits its record in a Git records root and writes minutes when configured', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-commit-facade-'));
+    try {
+      const init = Bun.spawnSync({ cmd: ['git', 'init', '-q'], cwd: root });
+      expect(init.exitCode).toBe(0);
+      const fixture = await fixtureEnvironment(undefined, true);
+      const environment: CliFacadeEnvironment = {
+        ...fixture.environment,
+        env: {
+          COUNCIL_MINUTES_DIR: join(root, 'minutes'),
+          GIT_AUTHOR_NAME: 'Council Test',
+          GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
+          GIT_COMMITTER_NAME: 'Council Test',
+          GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+        },
+      };
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Commit me',
+        ],
+        environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.committed).toBe(true);
+      expect(payload.envelope.record.commitSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(payload.envelope.record.minutes).toContain(join(root, 'minutes'));
+      expect(await Bun.file(payload.envelope.record.minutes).text()).toContain(
+        '# Minutes: second-opinion',
+      );
+      expect(payload.envelope.degraded).not.toContainEqual(
+        expect.stringContaining('records-not-committed'),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a persisted run in a plain directory reports records-not-committed and still succeeds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-nocommit-facade-'));
+    try {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'No git here',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.committed).toBe(false);
+      expect(payload.envelope.record.minutes).toBeNull();
+      expect(payload.envelope.degraded).toContainEqual(
+        expect.stringContaining('records-not-committed'),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('stdin consumption', () => {

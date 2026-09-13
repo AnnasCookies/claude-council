@@ -280,6 +280,8 @@ export interface PersistedSession {
     readonly dataAvailability: 'captured';
   };
   readonly decisionState: PersistedDecisionState;
+  /** Absolute paths of every file the record write committed, for the caller to commit in Git. */
+  readonly paths: readonly string[];
 }
 
 export async function persistSession(
@@ -357,9 +359,10 @@ export async function persistSession(
           scope: 'project',
           projectId: options.projectId as string,
         };
-  await store.writeSession(session);
+  const written = await store.writeSession(session);
   return {
     records: { session: true, decisionState, dataAvailability: 'captured' },
     decisionState,
+    paths: written.paths,
   };
 }

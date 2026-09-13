@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import packageManifest from '../package.json';
 import { getMode, modes, resolveModeForCommand, type ModeName } from './modes';
@@ -48,12 +48,14 @@ import { executePattern } from './substrate/patterns';
 import { evaluateOutbound } from './substrate/policy/data-guard';
 import { scanAndRedact } from './substrate/policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './substrate/providers';
+import { commitRecordFiles } from './substrate/records/commit';
 import {
   MigrationPlanSchema,
   MigrationRuleSchema,
   applyGeneralMigration,
   planGeneralMigration,
 } from './substrate/records/migrate-general';
+import { minutesDirectory, writeMinutes } from './substrate/records/minutes';
 import {
   CouncilStore,
   SessionRecordSchema,
@@ -97,6 +99,8 @@ const SCHEMA_VERSION = 1;
 const DEFAULT_TIMEOUT_MS = 1_200_000;
 const PACKAGE_VERSION = z.string().trim().min(1).parse(packageManifest.version);
 const EXECUTABLE_PATH = resolve(import.meta.main ? Bun.main : import.meta.path);
+// dist/cli.js and src/cli.ts both sit one directory below the kernel repository root.
+const KERNEL_ROOT = resolve(dirname(EXECUTABLE_PATH), '..');
 const INSTALLER_PROVENANCE_VALUE_SCHEMA = z
   .string()
   .trim()
@@ -821,6 +825,45 @@ async function runCouncilCommand(
     envelope,
   );
   const records = persisted?.records;
+  // Durability is Git: the terminal record is committed in the records repository before this run
+  // reports success. A records root that is not a work tree is a degradation, not a failure — the
+  // record is still on disk — so it is named in `degraded` rather than thrown.
+  let emitted: ResultEnvelope = envelope;
+  if (persisted !== undefined && executionOptions.recordsRoot !== undefined) {
+    const commit = await commitRecordFiles({
+      root: executionOptions.recordsRoot,
+      paths: persisted.paths,
+      message: `council: record ${executionOptions.runId}`,
+      forbiddenRoot: KERNEL_ROOT,
+      env: environment.env ?? process.env,
+    });
+    if (!commit.committed) degraded.push(`records-not-committed: ${commit.reason}`);
+    const directory = minutesDirectory(
+      environment.env ?? process.env,
+      environment.cwd ?? process.cwd(),
+    );
+    const minutes =
+      directory === null
+        ? null
+        : await writeMinutes({
+            directory,
+            envelope,
+            rounds: execution.rounds,
+            motion: executionOptions.motion,
+            startedAt,
+            completedAt: now,
+          });
+    emitted = {
+      ...envelope,
+      degraded: [...degraded],
+      record: {
+        session: envelope.record.session,
+        committed: commit.committed,
+        ...(commit.committed ? { commitSha: commit.sha } : {}),
+        minutes,
+      },
+    };
+  }
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
   // is a separate command with its own exit status.
@@ -837,7 +880,7 @@ async function runCouncilCommand(
     preflight,
     execution: publicExecution(execution),
     diagnostics,
-    envelope,
+    envelope: emitted,
     ...(records === undefined ? {} : { records }),
   });
 }
@@ -1168,6 +1211,10 @@ async function adjudicateCommand(
     .trim()
     .slice(0, 200);
 
+  // Every file this adjudication writes, so the ruling and its resolution are committed together
+  // rather than one record at a time.
+  const written: string[] = [];
+
   if (state.status === 'degraded') {
     const acceptanceRationale = oneFlag(parsed, 'acceptance-rationale');
     if (!hasFlag(parsed, 'accept-degraded') || acceptanceRationale === undefined) {
@@ -1183,10 +1230,14 @@ async function adjudicateCommand(
       authorisedBy,
       createdAt: now,
     } as const;
-    await store.appendChairAcceptance(
-      scope === 'general'
-        ? { ...acceptanceBase, scope: 'general' }
-        : { ...acceptanceBase, scope: 'project', projectId: projectId as string },
+    written.push(
+      ...(
+        await store.appendChairAcceptance(
+          scope === 'general'
+            ? { ...acceptanceBase, scope: 'general' }
+            : { ...acceptanceBase, scope: 'project', projectId: projectId as string },
+        )
+      ).paths,
     );
   }
 
@@ -1207,10 +1258,14 @@ async function adjudicateCommand(
     dissentAcknowledged: acknowledged,
     createdAt: now,
   } as const;
-  await store.appendChairRuling(
-    scope === 'general'
-      ? { ...rulingBase, scope: 'general' }
-      : { ...rulingBase, scope: 'project', projectId: projectId as string },
+  written.push(
+    ...(
+      await store.appendChairRuling(
+        scope === 'general'
+          ? { ...rulingBase, scope: 'general' }
+          : { ...rulingBase, scope: 'project', projectId: projectId as string },
+      )
+    ).paths,
   );
 
   const resolutionId = safeStorageId(
@@ -1226,11 +1281,23 @@ async function adjudicateCommand(
     decision,
     createdAt: now,
   } as const;
-  await store.appendResolution(
-    scope === 'general'
-      ? { ...resolutionBase, scope: 'general' }
-      : { ...resolutionBase, scope: 'project', projectId: projectId as string },
+  written.push(
+    ...(
+      await store.appendResolution(
+        scope === 'general'
+          ? { ...resolutionBase, scope: 'general' }
+          : { ...resolutionBase, scope: 'project', projectId: projectId as string },
+      )
+    ).paths,
   );
+
+  const commit = await commitRecordFiles({
+    root: recordsRoot,
+    paths: written,
+    message: `council: ruling ${rulingId} and resolution ${resolutionId} for ${runId}`,
+    forbiddenRoot: KERNEL_ROOT,
+    env: environment.env ?? process.env,
+  });
 
   return output(0, {
     schemaVersion: SCHEMA_VERSION,
@@ -1244,6 +1311,9 @@ async function adjudicateCommand(
     dataAvailability: state.dataAvailability,
     sessionStatus: state.status,
     dissentAcknowledged: acknowledged,
+    records: commit.committed
+      ? { committed: true, commitSha: commit.sha }
+      : { committed: false, reason: commit.reason },
   });
 }
 
