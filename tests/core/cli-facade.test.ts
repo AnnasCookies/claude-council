@@ -1508,6 +1508,106 @@ describe('public CLI facade', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test('an unwritable minutes directory degrades the run instead of failing it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-minutes-facade-'));
+    try {
+      // A regular file where the minutes directory should be, so creating the directory fails
+      // after the record has already been written.
+      const blocked = join(root, 'minutes');
+      await Bun.write(blocked, 'not a directory\n');
+      const fixture = await fixtureEnvironment(undefined, true);
+      const environment: CliFacadeEnvironment = {
+        ...fixture.environment,
+        env: { COUNCIL_MINUTES_DIR: blocked },
+      };
+      const result = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Minutes cannot be written',
+        ],
+        environment,
+      );
+      expect(result.exitCode).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.minutes).toBeNull();
+      expect(payload.envelope.degraded).toContainEqual(
+        expect.stringMatching(/^minutes-not-written: /),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('adjudicate commits the ruling and resolution it appended', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'council-adjudicate-facade-'));
+    try {
+      const init = Bun.spawnSync({ cmd: ['git', 'init', '-q'], cwd: root });
+      expect(init.exitCode).toBe(0);
+      const fixture = await fixtureEnvironment(undefined, true);
+      const environment: CliFacadeEnvironment = {
+        ...fixture.environment,
+        env: {
+          GIT_AUTHOR_NAME: 'Council Test',
+          GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
+          GIT_COMMITTER_NAME: 'Council Test',
+          GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+        },
+      };
+      const run = await runCliFacade(
+        [
+          'second-opinion',
+          '--classification',
+          'public',
+          '--records-root',
+          root,
+          '--motion',
+          'Adjudicate me',
+        ],
+        environment,
+      );
+      expect(run.exitCode).toBe(0);
+      const runPayload = JSON.parse(run.stdout);
+      expect(runPayload.status).toBe('completed');
+
+      const adjudicated = await runCliFacade(
+        [
+          'adjudicate',
+          '--records-root',
+          root,
+          '--run-id',
+          runPayload.runId,
+          '--decision',
+          'Adopt the proposal.',
+          '--rationale',
+          'The panel informed the chair; the chair decided.',
+          '--authorised-by',
+          'council-chair',
+          '--no-dissent',
+        ],
+        environment,
+      );
+      expect(adjudicated.exitCode).toBe(0);
+      const payload = JSON.parse(adjudicated.stdout);
+      expect(payload.records.committed).toBe(true);
+      expect(payload.records.commitSha).toMatch(/^[a-f0-9]{40}$/);
+
+      const subject = Bun.spawnSync({
+        cmd: ['git', 'log', '--format=%s', '-1'],
+        cwd: root,
+        stdout: 'pipe',
+      });
+      expect(subject.stdout.toString()).toContain(`council: ruling ${payload.rulingId}`);
+      expect(subject.stdout.toString()).toContain(`resolution ${payload.resolutionId}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('stdin consumption', () => {

@@ -19,8 +19,9 @@ function cell(value: string | null | boolean | number): string {
 
 /**
  * A minutes file is the human-readable copy of a terminal record, written where the vault's
- * ingest will find it. Everything in it comes from the envelope and the recorded rounds, which are
- * already redacted upstream; nothing is fetched or recomputed here.
+ * ingest will find it. Every value in it comes from the envelope and the recorded rounds — the
+ * same content the record already holds — so nothing is fetched or recomputed here, and the file
+ * carries exactly what the record carries, no more.
  */
 export function renderMinutes(input: MinutesInput): string {
   const { envelope } = input;

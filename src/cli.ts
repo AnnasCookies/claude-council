@@ -18,6 +18,7 @@ import {
 } from './substrate/domain/schemas';
 import {
   CallerSchema,
+  ResultEnvelopeSchema,
   UNDECLARED_CALLER,
   buildEnvelope,
   spendFromRounds,
@@ -48,7 +49,7 @@ import { executePattern } from './substrate/patterns';
 import { evaluateOutbound } from './substrate/policy/data-guard';
 import { scanAndRedact } from './substrate/policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './substrate/providers';
-import { commitRecordFiles } from './substrate/records/commit';
+import { commitRecordFiles, type RecordCommitOutcome } from './substrate/records/commit';
 import {
   MigrationPlanSchema,
   MigrationRuleSchema,
@@ -378,6 +379,25 @@ function deterministicId(prefix: string, command: string, motion: string, now: s
     .digest('hex')
     .slice(0, 16);
   return `${prefix}-${digest}`;
+}
+
+/**
+ * The single route by which this CLI commits records. Both callers must carry the same kernel-repository
+ * guard and the same child environment, so neither is left to a call site to remember.
+ */
+async function commitRecords(
+  root: string,
+  paths: readonly string[],
+  message: string,
+  environment: CliFacadeEnvironment,
+): Promise<RecordCommitOutcome> {
+  return commitRecordFiles({
+    root,
+    paths,
+    message,
+    forbiddenRoot: KERNEL_ROOT,
+    env: environment.env ?? process.env,
+  });
 }
 
 function safeError(error: unknown): string {
@@ -830,30 +850,36 @@ async function runCouncilCommand(
   // record is still on disk — so it is named in `degraded` rather than thrown.
   let emitted: ResultEnvelope = envelope;
   if (persisted !== undefined && executionOptions.recordsRoot !== undefined) {
-    const commit = await commitRecordFiles({
-      root: executionOptions.recordsRoot,
-      paths: persisted.paths,
-      message: `council: record ${executionOptions.runId}`,
-      forbiddenRoot: KERNEL_ROOT,
-      env: environment.env ?? process.env,
-    });
+    const commit = await commitRecords(
+      executionOptions.recordsRoot,
+      persisted.paths,
+      `council: record ${executionOptions.runId}`,
+      environment,
+    );
     if (!commit.committed) degraded.push(`records-not-committed: ${commit.reason}`);
     const directory = minutesDirectory(
       environment.env ?? process.env,
       environment.cwd ?? process.cwd(),
     );
-    const minutes =
-      directory === null
-        ? null
-        : await writeMinutes({
-            directory,
-            envelope,
-            rounds: execution.rounds,
-            motion: executionOptions.motion,
-            startedAt,
-            completedAt: now,
-          });
-    emitted = {
+    // Minutes are a convenience copy for the vault's ingest. The record itself is already written
+    // and, by this point, committed, so an unwritable minutes directory degrades the run in the
+    // same way an uncommittable record does rather than failing it.
+    let minutes: string | null = null;
+    if (directory !== null) {
+      try {
+        minutes = await writeMinutes({
+          directory,
+          envelope,
+          rounds: execution.rounds,
+          motion: executionOptions.motion,
+          startedAt,
+          completedAt: now,
+        });
+      } catch (error) {
+        degraded.push(`minutes-not-written: ${safeError(error)}`);
+      }
+    }
+    emitted = ResultEnvelopeSchema.parse({
       ...envelope,
       degraded: [...degraded],
       record: {
@@ -862,7 +888,7 @@ async function runCouncilCommand(
         ...(commit.committed ? { commitSha: commit.sha } : {}),
         minutes,
       },
-    };
+    });
   }
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
@@ -1291,13 +1317,12 @@ async function adjudicateCommand(
     ).paths,
   );
 
-  const commit = await commitRecordFiles({
-    root: recordsRoot,
-    paths: written,
-    message: `council: ruling ${rulingId} and resolution ${resolutionId} for ${runId}`,
-    forbiddenRoot: KERNEL_ROOT,
-    env: environment.env ?? process.env,
-  });
+  const commit = await commitRecords(
+    recordsRoot,
+    written,
+    `council: ruling ${rulingId} and resolution ${resolutionId} for ${runId}`,
+    environment,
+  );
 
   return output(0, {
     schemaVersion: SCHEMA_VERSION,
