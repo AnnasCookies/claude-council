@@ -12,17 +12,17 @@ result envelope. `/council`, `/second-opinion`, `/ask`, `/result`, `/status` beh
 
 ## Approach
 
-- [ ] 0. Baseline: fix the two host-environment test failures (EXDEV hard link; grok on PATH).
-- [ ] 1. Result envelope schema and `caller` flags; committee and second opinion return it.
-- [ ] 2. Modes registry with `committee` and `second-opinion`; CLI dispatches through it.
-- [ ] 3. Substrate boundary: move modules under `src/substrate/`, single public entry,
+- [x] 0. Baseline: fix the two host-environment test failures (EXDEV hard link; grok on PATH).
+- [x] 1. Result envelope schema and `caller` flags; committee and second opinion return it.
+- [x] 2. Modes registry with `committee` and `second-opinion`; CLI dispatches through it.
+- [x] 3. Substrate boundary: move modules under `src/substrate/`, single public entry,
       dependency-direction test.
-- [ ] 4. Patterns: `rounds` (existing) and `parallel` (one blind round) in the substrate;
+- [x] 4. Patterns: `rounds` (existing) and `parallel` (one blind round) in the substrate;
       second opinion runs on `parallel`.
-- [ ] 5. Spend: policy per mode, `--spend-cap`, `stoppedAtCap`, `never-metered` pin.
-- [ ] 6. Records: commit terminal records in the records repo; `COUNCIL_MINUTES_DIR` minutes.
-- [ ] 7. Docs: ARCHITECTURE.md, README.md, CHANGELOG.md, `.env.example`.
-- [ ] 8. `bun run check` green on the branch; rebase onto main; open PR citing both docs.
+- [x] 5. Spend: policy per mode, `--spend-cap`, `stoppedAtCap`, `never-metered` pin.
+- [x] 6. Records: commit terminal records in the records repo; `COUNCIL_MINUTES_DIR` minutes.
+- [x] 7. Docs: ARCHITECTURE.md, README.md, CHANGELOG.md, `.env.example`.
+- [x] 8. `bun run check` green on the branch; rebase onto main; open PR citing both docs.
 
 ## Files
 
