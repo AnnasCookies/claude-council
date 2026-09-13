@@ -11,14 +11,11 @@ import {
   CouncilScopeSchema,
   ProviderFamilySchema,
   RefinementTriggerSchema,
-  RunManifestSchema,
-  type DataClassification,
   type ModelRegistryProvenance,
   type ProjectPolicy,
   type ProviderFamily,
-  type RefinementTrigger,
-  type RunManifest,
 } from './substrate/domain/schemas';
+import { UNDECLARED_CALLER } from './substrate/envelope';
 import {
   BillingModeSchema,
   DEFAULT_BILLING_MODE,
@@ -28,14 +25,10 @@ import {
   type ProviderDiagnostic,
   type ProviderTransportResolution,
 } from './substrate/execution/provider';
-import {
-  CouncilRunner,
-  type CouncilRunResult,
-  type CouncilSeatAssignment,
-} from './substrate/execution/runner';
+import { CouncilRunner } from './substrate/execution/runner';
 import { snapshot } from './substrate/health/baseline';
 import { doctor } from './substrate/health/doctor';
-import { probeRoster, type ProviderProbe } from './substrate/health/probe';
+import { probeRoster } from './substrate/health/probe';
 import {
   loadModelRegistryWithProvenance,
   ModelRegistrySchema,
@@ -43,7 +36,7 @@ import {
   type LoadedModelRegistry,
   type ModelRegistry,
 } from './substrate/models/registry';
-import { evaluateOutbound, type PolicyDecision } from './substrate/policy/data-guard';
+import { evaluateOutbound } from './substrate/policy/data-guard';
 import { scanAndRedact } from './substrate/policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './substrate/providers';
 import {
@@ -55,20 +48,28 @@ import {
 import {
   CouncilStore,
   SessionRecordSchema,
-  type CurrentSessionRecord,
-  type PersistedDecisionState,
   type SessionRecord,
   writeTextAtomically,
 } from './substrate/records/store';
 import {
-  AssignmentHistorySchema,
-  assignLenses,
   inferMotionDomains,
   roleCatalogue,
-  selectLenses,
   type AssignmentHistory,
-  type RoleAssignment,
 } from './substrate/roles/allocator';
+import {
+  DEFAULT_COUNCIL_MINIMUM_FAMILIES,
+  DEFAULT_SEAT_COUNT,
+  REDUCED_COUNCIL_MINIMUM_FAMILIES,
+  autoReducedQuorumWarning,
+  buildManifestAndAssignments,
+  buildPreflight,
+  loadAssignmentHistory,
+  persistSession,
+  publicExecution,
+  resolveHealthyProviders,
+  type SessionOptions,
+  type UnavailableProvider,
+} from './substrate/session';
 
 export const ADAPTER_CONTRACT_VERSION = 1 as const;
 const SCHEMA_VERSION = 1;
@@ -80,20 +81,6 @@ const SCHEMA_VERSION = 1;
 // passed, which is exactly how the failure presented. 1_200_000 leaves 10 minutes per seat
 // per round; --timeout-ms still overrides, up to the one-hour ceiling.
 const DEFAULT_TIMEOUT_MS = 1_200_000;
-const DEFAULT_SEAT_COUNT = 5;
-const DEFAULT_COUNCIL_MINIMUM_FAMILIES = 4;
-const REDUCED_COUNCIL_MINIMUM_FAMILIES = 3;
-const REDUCED_QUORUM_WARNING =
-  'REDUCED-QUORUM COUNCIL: minimum 3 distinct provider families (standing default: 4). This council is weaker than the standing default.';
-
-type UnavailableProviderReason =
-  'missing key' | 'unconfigured' | 'unhealthy' | 'identity-unverified' | 'unsafe-transport';
-
-interface UnavailableProvider {
-  readonly provider: ProviderFamily;
-  readonly reason: UnavailableProviderReason;
-  readonly detail: string;
-}
 const PACKAGE_VERSION = z.string().trim().min(1).parse(packageManifest.version);
 const EXECUTABLE_PATH = resolve(import.meta.main ? Bun.main : import.meta.path);
 const INSTALLER_PROVENANCE_VALUE_SCHEMA = z
@@ -161,28 +148,8 @@ interface ParsedArguments {
   readonly positionals: readonly string[];
 }
 
-interface RunOptions {
+interface RunOptions extends SessionOptions {
   readonly command: 'run' | 'council' | 'second-opinion';
-  readonly dryRun: boolean;
-  readonly scope: 'general' | 'project';
-  readonly classification: DataClassification;
-  readonly motion: string;
-  readonly motionId: string;
-  readonly runId: string;
-  readonly projectId?: string;
-  readonly projectPolicy?: ProjectPolicy;
-  readonly eligibleProviderFamilies: readonly ProviderFamily[];
-  readonly providerFamilies: readonly ProviderFamily[];
-  readonly impact: 'low' | 'medium' | 'high';
-  readonly contested: boolean;
-  readonly domains: readonly string[];
-  readonly rounds: number;
-  readonly refinementTrigger?: RefinementTrigger;
-  readonly timeoutMs: number;
-  readonly minimumFamilies?: number;
-  readonly reducedQuorumWarning?: string;
-  readonly recordsRoot?: string;
-  readonly billingMode: BillingMode;
 }
 
 interface ConfiguredModelRegistry extends LoadedModelRegistry {
@@ -397,31 +364,6 @@ function safeError(error: unknown): string {
   return (redacted || 'Council command failed').slice(0, 500);
 }
 
-function unavailableProvider(probe: ProviderProbe): UnavailableProvider {
-  const reason: UnavailableProviderReason =
-    probe.status === 'identity-unverified'
-      ? 'identity-unverified'
-      : probe.status === 'down'
-        ? 'unhealthy'
-        : probe.status === 'unsafe-transport'
-          ? 'unsafe-transport'
-          : /^missing\s+\S+/i.test(probe.reason)
-            ? 'missing key'
-            : 'unconfigured';
-  return {
-    provider: probe.provider,
-    reason,
-    detail: probe.reason || reason,
-  };
-}
-
-function autoReducedQuorumWarning(unavailable: readonly UnavailableProvider[]): string {
-  const unavailableSummary = unavailable
-    .map(({ provider, reason, detail }) => `${provider} — ${reason} (${detail})`)
-    .join('; ');
-  return `REDUCED-QUORUM COUNCIL: running with 3 configured, reachable provider families; the standing default is 4. This council is weaker than the standing default. Unavailable families: ${unavailableSummary}.`;
-}
-
 function selectProviderFamilies(
   value: string | undefined,
   registry: ModelRegistry,
@@ -600,6 +542,9 @@ async function parseRunOptions(
 
   return {
     command,
+    mode: command === 'council' ? 'committee' : 'second-opinion',
+    chaired: command === 'council',
+    caller: UNDECLARED_CALLER,
     dryRun: hasFlag(parsed, 'dry-run'),
     scope,
     classification,
@@ -622,88 +567,6 @@ async function parseRunOptions(
   };
 }
 
-function quorumPolicy(options: RunOptions): RunManifest['quorumPolicy'] {
-  const significant =
-    options.command === 'council' || options.impact === 'high' || options.contested;
-  const minimumDistinctFamilies =
-    options.command === 'council'
-      ? (options.minimumFamilies ?? DEFAULT_COUNCIL_MINIMUM_FAMILIES)
-      : significant
-        ? 4
-        : 3;
-  return {
-    minimumDistinctFamilies,
-    requiresContrarian: significant,
-    ...(options.command === 'council' && minimumDistinctFamilies < DEFAULT_COUNCIL_MINIMUM_FAMILIES
-      ? {
-          reducedQuorum: {
-            standingDefaultMinimumDistinctFamilies: DEFAULT_COUNCIL_MINIMUM_FAMILIES,
-            weakerThanStandingDefault: true as const,
-            warning: options.reducedQuorumWarning ?? REDUCED_QUORUM_WARNING,
-          },
-        }
-      : {}),
-  };
-}
-
-function buildManifestAndAssignments(
-  options: RunOptions,
-  registry: ModelRegistry,
-  registryProvenance: ModelRegistryProvenance,
-  history: AssignmentHistory,
-): {
-  manifest: RunManifest;
-  assignments: CouncilSeatAssignment[];
-  roleAssignments: RoleAssignment[];
-} {
-  const policy = quorumPolicy(options);
-  const lenses = selectLenses(
-    { domains: [...options.domains], impact: options.impact, contested: options.contested },
-    options.providerFamilies.length,
-    { allowReducedThreeSeatCoverage: policy.reducedQuorum !== undefined },
-  );
-  const seatIds = options.providerFamilies.map((provider) => `${provider}-seat`);
-  const roleAssignments = assignLenses(options.runId, options.motionId, seatIds, lenses, history);
-  const lensByName = new Map(lenses.map((lens) => [lens.name, lens] as const));
-  const assignments = roleAssignments.map((assignment, index): CouncilSeatAssignment => {
-    const provider = options.providerFamilies[index];
-    const lens = lensByName.get(assignment.lensName);
-    if (provider === undefined || lens === undefined) {
-      throw new Error('Dynamic role assignment did not resolve a provider lens');
-    }
-    return {
-      seatId: assignment.seatId,
-      provider,
-      lensName: lens.name,
-      lensPrompt: lens.prompt,
-      lensCategory: lens.category,
-    };
-  });
-  const routes = Object.fromEntries(
-    options.providerFamilies.map((provider) => [provider, registry[provider]] as const),
-  );
-  const manifest = RunManifestSchema.parse({
-    motionId: options.motionId,
-    scope: options.scope,
-    classification: options.classification,
-    routes,
-    registryProvenance,
-    lenses,
-    rounds: options.rounds,
-    ...(options.refinementTrigger === undefined
-      ? {}
-      : { refinementTrigger: options.refinementTrigger }),
-    quorumPolicy: policy,
-    evidenceReferences: [],
-  });
-  return { manifest, assignments, roleAssignments };
-}
-
-function publicExecution(result: CouncilRunResult): Omit<CouncilRunResult, 'motion'> {
-  const { motion: _motion, ...safeResult } = result;
-  return safeResult;
-}
-
 /**
  * Deliberately absent: a `consensusRecommendation()` that lower-cased each family's
  * `answer.recommendation`, compared the strings, and appended a ledger resolution when they matched.
@@ -717,152 +580,6 @@ function publicExecution(result: CouncilRunResult): Omit<CouncilRunResult, 'moti
  * A decision now requires `council adjudicate`, which records a named chair's ruling. The archive
  * enforces the same rule structurally: `appendResolution` refuses a resolution that no ruling backs.
  */
-
-async function loadAssignmentHistory(
-  options: RunOptions,
-  environment: CliFacadeEnvironment,
-): Promise<AssignmentHistory> {
-  if (environment.assignmentHistory !== undefined) {
-    return AssignmentHistorySchema.parse(environment.assignmentHistory);
-  }
-  if (options.recordsRoot === undefined) return [];
-  return CouncilStore.open(options.recordsRoot).readAssignmentHistory(
-    options.scope,
-    { motionId: options.motionId, motion: options.motion },
-    options.projectId,
-  );
-}
-
-async function persistRun(
-  options: RunOptions,
-  decision: PolicyDecision,
-  manifest: RunManifest,
-  result: CouncilRunResult,
-  roleAssignments: RoleAssignment[],
-  startedAt: string,
-  now: string,
-): Promise<
-  | {
-      session: true;
-      decisionState: PersistedDecisionState;
-      dataAvailability: 'captured';
-    }
-  | undefined
-> {
-  if (options.recordsRoot === undefined) return undefined;
-  if (options.scope === 'project' && options.projectId === undefined) {
-    throw new Error('Project record persistence requires a project id');
-  }
-  const store = CouncilStore.open(options.recordsRoot);
-  const status = result.outcome;
-  const outcomeSummary =
-    status === 'completed'
-      ? `Quorum passed across ${result.quorum.successfulFamilies.length} provider families; a chair ruling is required before this becomes a resolution.`
-      : status === 'degraded'
-        ? `Degraded result across ${result.quorum.successfulFamilies.length} provider families; chair acceptance and a chair ruling are both required before resolution.`
-        : `Quorum blocked: ${result.quorum.failureReasons.join(', ') || 'insufficient responses'}.`;
-  const reducedQuorumWarning = result.quorumPolicy.reducedQuorum?.warning;
-  const sessionSummary =
-    reducedQuorumWarning === undefined
-      ? outcomeSummary
-      : `${reducedQuorumWarning} ${outcomeSummary}`;
-  const decisionState: PersistedDecisionState =
-    status === 'completed' || status === 'degraded' ? 'awaiting-adjudication' : 'not-adjudicable';
-  const sessionBase = {
-    schemaVersion: 2 as const,
-    runId: options.runId,
-    motionId: options.motionId,
-    status,
-    motion: options.motion,
-    startedAt,
-    completedAt: now,
-    decisionState,
-    policyDecision: {
-      kind: decision.kind,
-      classification: decision.effectiveClassification ?? options.classification,
-      reasonCodes: decision.reasonCodes,
-    },
-    destinations: options.providerFamilies.map((provider) => ({
-      provider,
-      model: manifest.routes[provider]?.primary ?? 'unresolved',
-    })),
-    protocol: {
-      requestedRounds: result.requestedRounds,
-      ...(result.refinementTrigger === undefined
-        ? {}
-        : { refinementTrigger: result.refinementTrigger }),
-      quorumPolicy: result.quorumPolicy,
-    },
-    // The decision-level evidence: every seat's actual answer, the model that really responded,
-    // whether that identity verified, what was retried and why. Without this a record proves only
-    // what was requested, never what was decided.
-    execution: {
-      rounds: result.rounds,
-      quorum: result.quorum,
-      rebuttalObligation: result.rebuttalObligation,
-      synthesisEligible: result.synthesisEligible,
-    },
-    assignments: roleAssignments,
-    summary: sessionSummary,
-  } as const;
-  const session: CurrentSessionRecord =
-    options.scope === 'general'
-      ? { ...sessionBase, scope: 'general' }
-      : {
-          ...sessionBase,
-          scope: 'project',
-          projectId: options.projectId as string,
-        };
-  await store.writeSession(session);
-  return { session: true, decisionState, dataAvailability: 'captured' };
-}
-
-async function resolveCouncilProviders(
-  options: RunOptions,
-  adapters: Partial<Record<ProviderFamily, ProviderAdapter>>,
-  context: ProviderContext,
-): Promise<{
-  providerFamilies: ProviderFamily[];
-  unavailableProviders: UnavailableProvider[];
-}> {
-  const candidateAdapters = options.providerFamilies.flatMap((provider) => {
-    const adapter = adapters[provider];
-    return adapter === undefined ? [] : [adapter];
-  });
-  const probes = await probeRoster(candidateAdapters, context);
-  const providerFamilies: ProviderFamily[] = [];
-  const unavailableProviders: UnavailableProvider[] = [];
-  let probeIndex = 0;
-
-  for (const provider of options.providerFamilies) {
-    const adapter = adapters[provider];
-    if (adapter === undefined) {
-      unavailableProviders.push({
-        provider,
-        reason: 'unhealthy',
-        detail: 'provider adapter is unavailable',
-      });
-      continue;
-    }
-    const probe = probes[probeIndex];
-    probeIndex += 1;
-    if (probe === undefined || probe.provider !== provider) {
-      unavailableProviders.push({
-        provider,
-        reason: 'unhealthy',
-        detail: 'provider health result did not match the requested family',
-      });
-      continue;
-    }
-    if (probe.status === 'healthy') {
-      providerFamilies.push(provider);
-    } else {
-      unavailableProviders.push(unavailableProvider(probe));
-    }
-  }
-
-  return { providerFamilies, unavailableProviders };
-}
 
 async function runCouncilCommand(
   command: RunOptions['command'],
@@ -913,7 +630,7 @@ async function runCouncilCommand(
   }
 
   if (options.dryRun) {
-    const assignmentHistory = await loadAssignmentHistory(options, environment);
+    const assignmentHistory = await loadAssignmentHistory(options, environment.assignmentHistory);
     const { manifest } = buildManifestAndAssignments(
       options,
       registry,
@@ -928,21 +645,13 @@ async function runCouncilCommand(
       runId: options.runId,
       ...(reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning }),
       manifest,
-      preflight: {
-        classification: policyDecision.effectiveClassification,
-        destinations: policyDecision.dispositions,
+      preflight: buildPreflight({
+        policyDecision,
         requestedProviders: requestedProviderFamilies,
         selectedProviders: requestedProviderFamilies,
         unavailableProviders: [],
         eligibleProviders: options.eligibleProviderFamilies,
-        omittedEligibleProviders: options.eligibleProviderFamilies.filter(
-          (provider) => !requestedProviderFamilies.includes(provider),
-        ),
-        redactionCount: policyDecision.redactions.reduce(
-          (count, redaction) => count + redaction.findings.length,
-          0,
-        ),
-      },
+      }),
     });
   }
 
@@ -966,28 +675,20 @@ async function runCouncilCommand(
   let unavailableProviders: UnavailableProvider[] = [];
 
   if (command === 'council') {
-    const readiness = await resolveCouncilProviders(options, adapters, context);
+    const readiness = await resolveHealthyProviders(options, adapters, context);
     unavailableProviders = readiness.unavailableProviders;
     const minimumFamilies =
       options.minimumFamilies ??
       (readiness.providerFamilies.length >= DEFAULT_COUNCIL_MINIMUM_FAMILIES
         ? DEFAULT_COUNCIL_MINIMUM_FAMILIES
         : REDUCED_COUNCIL_MINIMUM_FAMILIES);
-    const preflight = {
-      classification: policyDecision.effectiveClassification,
-      destinations: policyDecision.dispositions,
+    const preflight = buildPreflight({
+      policyDecision,
       requestedProviders: requestedProviderFamilies,
       selectedProviders: readiness.providerFamilies,
       unavailableProviders,
       eligibleProviders: options.eligibleProviderFamilies,
-      omittedEligibleProviders: options.eligibleProviderFamilies.filter(
-        (provider) => !requestedProviderFamilies.includes(provider),
-      ),
-      redactionCount: policyDecision.redactions.reduce(
-        (count, redaction) => count + redaction.findings.length,
-        0,
-      ),
-    };
+    });
     if (readiness.providerFamilies.length < minimumFamilies) {
       return output(4, undefined, {
         schemaVersion: SCHEMA_VERSION,
@@ -1010,7 +711,10 @@ async function runCouncilCommand(
     };
   }
 
-  const assignmentHistory = await loadAssignmentHistory(executionOptions, environment);
+  const assignmentHistory = await loadAssignmentHistory(
+    executionOptions,
+    environment.assignmentHistory,
+  );
   const { manifest, assignments, roleAssignments } = buildManifestAndAssignments(
     executionOptions,
     registry,
@@ -1018,21 +722,13 @@ async function runCouncilCommand(
     assignmentHistory,
   );
   const reducedQuorumWarning = manifest.quorumPolicy.reducedQuorum?.warning;
-  const preflight = {
-    classification: policyDecision.effectiveClassification,
-    destinations: policyDecision.dispositions,
+  const preflight = buildPreflight({
+    policyDecision,
     requestedProviders: requestedProviderFamilies,
     selectedProviders: executionOptions.providerFamilies,
     unavailableProviders,
     eligibleProviders: options.eligibleProviderFamilies,
-    omittedEligibleProviders: options.eligibleProviderFamilies.filter(
-      (provider) => !requestedProviderFamilies.includes(provider),
-    ),
-    redactionCount: policyDecision.redactions.reduce(
-      (count, redaction) => count + redaction.findings.length,
-      0,
-    ),
-  };
+  });
   const runner = new CouncilRunner({ adapters, context });
   // Taken before execution so the record shows real elapsed time. Both timestamps were previously
   // the same post-run value, which made every session look instantaneous.
@@ -1048,7 +744,7 @@ async function runCouncilCommand(
       : { refinementTrigger: executionOptions.refinementTrigger }),
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const records = await persistRun(
+  const persisted = await persistSession(
     executionOptions,
     policyDecision,
     manifest,
@@ -1056,7 +752,9 @@ async function runCouncilCommand(
     roleAssignments,
     startedAt,
     now,
+    undefined,
   );
+  const records = persisted?.records;
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
   // is a separate command with its own exit status.

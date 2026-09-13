@@ -37,4 +37,5 @@ export * from './records/migrate-general';
 export * from './records/project-id';
 export * from './records/store';
 export * from './roles/allocator';
+export * from './session';
 export * from './spend';
