@@ -107,9 +107,15 @@ result and embedded in the session record: the mode, the session, the declared `
 `caller-undeclared` in `degraded`), the execution pattern and rounds, one entry per seat with its
 verified identity and answering transport, the mode's own `output` block, synthesis and dissent,
 a unanimity flag, `spend`, `degraded` reasons and the `record` location — including whether it was
-committed and where its minutes file, if any, landed. See "The result envelope" in
-`docs/modes.md` for the full field reference, and run `modes` to list the registered modes and
-their knobs.
+committed and where its minutes file, if any, landed. `ResultEnvelopeSchema` in
+`src/substrate/envelope.ts` is the field reference; the example under "The result envelope" in
+`docs/modes.md` is illustrative rather than exhaustive. Run `modes` to list the registered modes
+and their knobs.
+
+A run that reaches the committee through an older front door is marked in `degraded` as well:
+`run` adds `legacy-run-alias`, and a significant `second-opinion` — `--impact high` or
+`--contested`, which has always taken the committee's quorum and rounds — adds
+`legacy-significant-second-opinion`.
 
 ## Scope and project policy
 

@@ -13,7 +13,10 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   `council`, `second-opinion`, `run`, `adjudicate`, `result`, `jobs`, `doctor` and `health` is
   unchanged. See `docs/vision.md` and `docs/modes.md`.
 - **Result envelope.** Every executed run returns a validated envelope, also embedded in the
-  session record. New flags `--caller human|agent`, `--harness`, `--purpose`.
+  session record. New flags `--caller human|agent`, `--harness`, `--purpose`. Its `degraded` list
+  names why a run is weaker than its mode's default: `caller-undeclared`, `legacy-run-alias`,
+  `legacy-significant-second-opinion`, `spend-cap-reached` and `records-not-committed`, plus
+  `minutes-not-written` and `envelope-not-validated` where those later steps fail.
 - **Spend cap.** `--spend-cap <n>` bounds metered fallback calls per session; the default equals
   the previous behaviour of one metered retry per seat per round. The cap governs `sub-first`
   only — it does not apply under `--billing api-only` (every call is deliberately metered) or

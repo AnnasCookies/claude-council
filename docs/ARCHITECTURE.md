@@ -66,13 +66,18 @@ A run that reaches the spend cap exits 4 even when its outcome is `completed`: t
 `spend-cap-reached` in `degraded` and `stoppedAtCap: true` in `spend`, and the CLI result adds a
 top-level `spendWarning`. Exit 0 requires both an outcome of `completed` and an unreached cap.
 
+A metered call that the runner retries after a transient failure reserves a second unit of the cap;
+the reservation is not refunded, because a failed metered call may still have billed tokens.
+
 ## Records and memory
 
 A terminal record is committed in the records repository before the run reports success, with
 `--no-verify`, never pushed, and never into the kernel's own repository. If the records root is
 not a Git work tree the envelope says `records-not-committed` with the reason. When
 `COUNCIL_MINUTES_DIR` is set, a Markdown minutes file is rendered beside it for the vault's ingest.
-The kernel never calls Atlas.
+The kernel never calls Atlas. `--no-verify` skips the records repository's own hooks, so a
+pre-commit secret scan there does not run on a records commit; the run's own secrets guard has
+already blocked any high-confidence secret before a record exists.
 
 A run that has written and committed its record never fails afterwards. A commit that cannot
 happen — the records root is not a Git work tree, a record path resolves outside that work tree,
@@ -84,13 +89,15 @@ its environment, so an invocation from inside a Git hook, `git rebase -x` or `gi
 cannot redirect it at a different repository, and every path comparison resolves symlinks first so
 a symlinked records root is not mistaken for lying outside its own work tree. `adjudicate` commits
 its ruling, resolution and ledger update the same way, reporting `records: { committed, commitSha
-}` on success or `records: { committed: false, reason }` otherwise.
+}` on success or `records: { committed: false, reason }` otherwise. The persisted envelope's
+`record` block holds only the session path; whether the commit and the minutes succeeded is visible
+on the emitted envelope and in git, not inside the record.
 
 ## Domain and policy
 
-`src/domain/` owns strict Zod contracts for classification, model routes, lenses, manifests, seat responses, quorum and run-state transitions.
+`src/substrate/domain/` owns strict Zod contracts for classification, model routes, lenses, manifests, seat responses, quorum and run-state transitions.
 
-`src/policy/data-guard.ts` evaluates the complete outbound request before any adapter is called. It combines:
+`src/substrate/policy/data-guard.ts` evaluates the complete outbound request before any adapter is called. It combines:
 
 - the motion classification;
 - project provider allowlists and per-provider ceilings;
@@ -100,11 +107,11 @@ its ruling, resolution and ledger update the same way, reporting `records: { com
 
 Invalid or missing project policy, restricted data, an unknown provider, an exceeded ceiling or a high-confidence secret blocks transmission. Overrides cannot cover secret detection or unrestricted policy failures.
 
-`src/policy/secrets.ts` uses deterministic high-confidence detectors. Redaction markers carry only a secret kind and an eight-character digest; raw secret values never enter errors, diagnostics or records.
+`src/substrate/policy/secrets.ts` uses deterministic high-confidence detectors. Redaction markers carry only a secret kind and an eight-character digest; raw secret values never enter errors, diagnostics or records.
 
 ## Evidence boundary
 
-`src/evidence/schema.ts` admits four explicit source shapes:
+`src/substrate/evidence/schema.ts` admits four explicit source shapes:
 
 - trusted local instruction;
 - untrusted local instruction;
@@ -117,7 +124,7 @@ Evidence collection itself is read-only. It does not run repository code, shell 
 
 ## Provider execution
 
-`src/providers/index.ts` constructs one adapter per governed provider family:
+`src/substrate/providers/index.ts` constructs one adapter per governed provider family:
 
 | Family    | Transport                                                | Identity rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | --------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -136,7 +143,7 @@ Structured provider answers contain recommendation, evidence, assumptions, risks
 
 ## Lenses, rounds and quorum
 
-`src/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. Its standing coverage requires domain, maintainer, risk and contrarian categories, plus systems for architecture, infrastructure and performance motions. An explicitly reduced three-seat council deterministically retains domain, risk and contrarian; maintainer and conditional systems coverage yield. Four-or-more-seat selection is unchanged. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
+`src/substrate/roles/catalogue.json` is the governed generic lens catalogue. `selectLenses` applies motion domains, impact and contested status. Its standing coverage requires domain, maintainer, risk and contrarian categories, plus systems for architecture, infrastructure and performance motions. An explicitly reduced three-seat council deterministically retains domain, risk and contrarian; maintainer and conditional systems coverage yield. Four-or-more-seat selection is unchanged. `assignLenses` uses deterministic SHA-256 permutations plus minimum-cost matching against prior assignments to rotate lenses without random or time-based behaviour. A chair override must name the original and replacement lenses and persist its reason.
 
 `CouncilRunner` executes all seats in a round concurrently and preserves canonical family/seat ordering in the result. Round one is blind analysis; round two is rebuttal; round three is optional refinement. Prior responses are carried as explicitly untrusted data.
 

@@ -104,6 +104,7 @@ describe('modes registry', () => {
   test('commands resolve to modes as they did before', () => {
     expect(resolveModeForCommand('council', true)).toBe('committee');
     expect(resolveModeForCommand('second-opinion', false)).toBe('second-opinion');
+    expect(resolveModeForCommand('second-opinion', true)).toBe('committee');
     expect(resolveModeForCommand('run', false)).toBe('second-opinion');
     expect(resolveModeForCommand('run', true)).toBe('committee');
   });

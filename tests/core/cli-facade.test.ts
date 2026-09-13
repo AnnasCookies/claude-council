@@ -1230,6 +1230,31 @@ describe('public CLI facade', () => {
     expect(payload.envelope.degraded).toContain('legacy-run-alias');
   });
 
+  test('a significant second opinion takes the committee and is marked', async () => {
+    const fixture = await fixtureEnvironment(undefined, true);
+    const result = await runCliFacade(
+      [
+        'second-opinion',
+        '--classification',
+        'public',
+        '--impact',
+        'high',
+        '--rounds',
+        '2',
+        '--motion',
+        'Significant second opinion',
+      ],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mode).toBe('committee');
+    expect(payload.envelope.pattern).toBe('rounds');
+    expect(payload.envelope.rounds).toBe(2);
+    expect(payload.envelope.degraded).toContain('legacy-significant-second-opinion');
+    expect(payload.manifest.quorumPolicy.minimumDistinctFamilies).toBe(4);
+  });
+
   test('--harness and --purpose require --caller, and the spend cap must be a whole number', async () => {
     const fixture = await fixtureEnvironment(undefined, true);
     const harnessOnly = await runCliFacade(
@@ -1288,6 +1313,9 @@ describe('public CLI facade', () => {
       'second-opinion',
     ]);
     expect(payload.modes[0]).toMatchObject({ pattern: 'rounds', spend: { policy: 'capped' } });
+    const positional = await runCliFacade(['modes', 'version']);
+    expect(positional.exitCode).toBe(2);
+    expect(positional.stderr).toContain('modes accepts no positional arguments');
   });
 
   test('a dry run names its mode and echoes the declared caller', async () => {
@@ -1451,6 +1479,9 @@ describe('public CLI facade', () => {
           GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
           GIT_COMMITTER_NAME: 'Council Test',
           GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+          // A GIT_CONFIG_GLOBAL that does not exist keeps the machine's own global configuration
+          // — hooks, templates, a `commit.gpgsign` — out of this temporary repository.
+          GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
         },
       };
       const result = await runCliFacade(
@@ -1557,6 +1588,9 @@ describe('public CLI facade', () => {
           GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
           GIT_COMMITTER_NAME: 'Council Test',
           GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+          // A GIT_CONFIG_GLOBAL that does not exist keeps the machine's own global configuration
+          // — hooks, templates, a `commit.gpgsign` — out of this temporary repository.
+          GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
         },
       };
       const run = await runCliFacade(

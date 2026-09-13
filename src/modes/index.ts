@@ -18,15 +18,16 @@ export function getMode(name: string): ModeDefinition {
 }
 
 /**
- * `council` was always the chaired committee and `second-opinion` one blind round. `run` is the
- * legacy classified alias: significant motions took the committee's quorum without its chair, so
- * they map to `committee` and the CLI marks the envelope `legacy-run-alias`.
+ * A significant motion always takes the committee pattern, whichever front door asked for it: an
+ * ordinary motion is one blind round, and a high-impact or contested one needs the committee's
+ * quorum and its rebuttal round. `council` alone is chaired. `run` and `second-opinion` reach the
+ * committee without a chair, and the CLI marks those envelopes `legacy-run-alias` and
+ * `legacy-significant-second-opinion` respectively.
  */
 export function resolveModeForCommand(
   command: 'run' | 'council' | 'second-opinion',
   significant: boolean,
 ): ModeName {
   if (command === 'council') return 'committee';
-  if (command === 'second-opinion') return 'second-opinion';
   return significant ? 'committee' : 'second-opinion';
 }

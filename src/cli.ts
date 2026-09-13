@@ -166,6 +166,23 @@ const ADJUDICATE_FLAGS = new Set([
   'resolution-id',
 ]);
 
+/** The commands this facade routes. `help` prints this list and an unknown command echoes it. */
+const COMMANDS = [
+  'run',
+  'council',
+  'second-opinion',
+  'modes',
+  'result',
+  'jobs',
+  'cancel',
+  'adjudicate',
+  'health',
+  'doctor',
+  'migrate-general',
+  'version',
+  'self-check',
+] as const;
+
 interface ParsedArguments {
   readonly flags: ReadonlyMap<string, readonly string[]>;
   readonly positionals: readonly string[];
@@ -813,6 +830,9 @@ async function runCouncilCommand(
   const degraded: string[] = [];
   if (!options.caller.declared) degraded.push('caller-undeclared');
   if (command === 'run' && mode.name === 'committee') degraded.push('legacy-run-alias');
+  if (command === 'second-opinion' && mode.name === 'committee') {
+    degraded.push('legacy-significant-second-opinion');
+  }
   if (ledger.refused > 0) degraded.push('spend-cap-reached');
   const modeOutput = mode.outputSchema.parse(
     mode.output({ result: execution, decisionState }),
@@ -879,7 +899,7 @@ async function runCouncilCommand(
         degraded.push(`minutes-not-written: ${safeError(error)}`);
       }
     }
-    emitted = ResultEnvelopeSchema.parse({
+    const unvalidated = {
       ...envelope,
       degraded: [...degraded],
       record: {
@@ -888,7 +908,16 @@ async function runCouncilCommand(
         ...(commit.committed ? { commitSha: commit.sha } : {}),
         minutes,
       },
-    });
+    };
+    // The record is already written and committed, so the documented invariant — a run that has
+    // written and committed its record never fails afterwards — has to hold here too. A schema
+    // failure at this point is a defect worth reporting, not a reason to discard a durable run.
+    try {
+      emitted = ResultEnvelopeSchema.parse(unvalidated);
+    } catch (error) {
+      degraded.push(`envelope-not-validated: ${safeError(error)}`);
+      emitted = { ...unvalidated, degraded: [...degraded] };
+    }
   }
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
@@ -1345,23 +1374,17 @@ async function adjudicateCommand(
 function help(): CliFacadeResult {
   return output(0, {
     name: 'claude-council',
-    commands: [
-      'run',
-      'council',
-      'second-opinion',
-      'modes',
-      'result',
-      'jobs',
-      'cancel',
-      'adjudicate',
-      'health',
-      'doctor',
-      'migrate-general',
-      'version',
-      'self-check',
-    ],
+    commands: [...COMMANDS],
     invocation: 'All execution is explicit; no automatic hook starts a council.',
     defaultSeatCount: DEFAULT_SEAT_COUNT,
+    runOptions: {
+      '--caller human|agent':
+        'Declare who is asking. Absent, the envelope reports caller-undeclared in degraded.',
+      '--harness <name>': 'Name the harness the caller is running in. Requires --caller.',
+      '--purpose <text>': 'State why the motion is being put. Requires --caller.',
+      '--spend-cap <n>':
+        'Bound metered fallback calls for this session. The default is seats x rounds; reaching the cap exits 4 and marks the envelope spend-cap-reached.',
+    },
     councilOptions: {
       '--min-families <n>':
         'Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker.',
@@ -1402,7 +1425,8 @@ export async function runCliFacade(
     }
     if (command === 'migrate-general') return await migrationCommand(args, environment);
     if (command === 'modes') {
-      parseArguments(args, new Set(['help', 'json']));
+      const parsed = parseArguments(args, new Set(['help', 'json']));
+      if (parsed.positionals.length > 0) throw new Error('modes accepts no positional arguments');
       return output(0, {
         schemaVersion: SCHEMA_VERSION,
         modes: Object.values(modes).map((mode) => ({
@@ -1448,7 +1472,9 @@ export async function runCliFacade(
       });
     }
     throw new Error(
-      `Unknown command: ${command}. Registered modes: ${Object.keys(modes).join(', ')}`,
+      `Unknown command: ${command}. Commands: ${COMMANDS.join(', ')}. Modes: ${Object.keys(
+        modes,
+      ).join(', ')}`,
     );
   } catch (error) {
     return output(2, undefined, {
