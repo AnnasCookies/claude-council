@@ -1850,10 +1850,24 @@ export function createOpenAiSubscriptionAdapter(
   );
 }
 
-function resolveAgyExecutable(): string | undefined {
-  const onPath = Bun.which('agy');
+/**
+ * Look a subscription CLI up on the PATH the roster was given, never on the process PATH. The
+ * provider context is the only environment a seat may see, and Bun.which reads the startup PATH
+ * otherwise, so a host's real CLI would leak into a run that deliberately excluded it.
+ */
+function executableOnPath(
+  name: string,
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  return Bun.which(name, { PATH: env.PATH ?? '' }) ?? undefined;
+}
+
+function resolveAgyExecutable(
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const onPath = executableOnPath('agy', env);
   if (onPath) return onPath;
-  const localAppData = process.env.LOCALAPPDATA;
+  const localAppData = env.LOCALAPPDATA;
   if (!localAppData || process.platform !== 'win32') return undefined;
   const candidate = join(localAppData, 'agy', 'bin', 'agy.exe');
   return existsSync(candidate) ? candidate : undefined;
@@ -1861,7 +1875,7 @@ function resolveAgyExecutable(): string | undefined {
 
 export function createGoogleSubscriptionAdapter(
   transport: CliTransport = nativeCliTransport,
-  resolveExecutable: () => string | undefined = resolveAgyExecutable,
+  resolveExecutable: () => string | undefined = () => resolveAgyExecutable(process.env),
 ): ProviderAdapter {
   return createSubscriptionCliAdapter(
     {
@@ -1936,8 +1950,10 @@ function stagedAgyCredential(): Record<string, string> {
   }
 }
 
-function resolveGrokExecutable(): string | undefined {
-  return Bun.which('grok') ?? undefined;
+function resolveGrokExecutable(
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  return executableOnPath('grok', env);
 }
 
 /**
@@ -1970,7 +1986,7 @@ const GROK_DISALLOWED_TOOLS = [
  */
 export function createXaiSubscriptionAdapter(
   transport: CliTransport = nativeCliTransport,
-  resolveExecutable: () => string | undefined = resolveGrokExecutable,
+  resolveExecutable: () => string | undefined = () => resolveGrokExecutable(process.env),
   modelOverride: () => string | undefined = () => process.env.GROK_CLI_MODEL?.trim() || undefined,
 ): ProviderAdapter {
   return createSubscriptionCliAdapter(
@@ -2308,7 +2324,7 @@ function resolveDualCredentialSeat(seat: DualCredentialSeat): ProviderAdapter {
  */
 export function createXaiAdapter(options: XaiAdapterOptions = {}): ProviderAdapter {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? resolveGrokExecutable)();
+  const executable = (options.resolveExecutable ?? (() => resolveGrokExecutable(env)))();
   return resolveDualCredentialSeat({
     family: 'xai',
     credential: 'COUNCIL_XAI_API_KEY',
@@ -2586,7 +2602,7 @@ export function createAnthropicDualAdapter(
   options: DualCredentialAdapterOptions = {},
 ): ProviderAdapter {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? (() => Bun.which('claude') ?? undefined))();
+  const executable = (options.resolveExecutable ?? (() => executableOnPath('claude', env)))();
   return resolveDualCredentialSeat({
     family: 'anthropic',
     credential: 'COUNCIL_ANTHROPIC_API_KEY',
@@ -2624,7 +2640,7 @@ export function createOpenAiDualAdapter(
   options: DualCredentialAdapterOptions = {},
 ): ProviderAdapter {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? (() => Bun.which('codex') ?? undefined))();
+  const executable = (options.resolveExecutable ?? (() => executableOnPath('codex', env)))();
   return resolveDualCredentialSeat({
     family: 'openai',
     credential: 'COUNCIL_OPENAI_API_KEY',
@@ -2660,7 +2676,7 @@ export function createGoogleDualAdapter(
   options: DualCredentialAdapterOptions = {},
 ): ProviderAdapter {
   const env = options.env ?? process.env;
-  const executable = (options.resolveExecutable ?? resolveAgyExecutable)();
+  const executable = (options.resolveExecutable ?? (() => resolveAgyExecutable(env)))();
   return resolveDualCredentialSeat({
     family: 'google',
     credential: 'COUNCIL_GEMINI_API_KEY',

@@ -122,45 +122,36 @@ describe('engine version identity', () => {
 
   test('--registry overrides the records-root default and reports its exact SHA-256', async () => {
     await withIsolatedHome(async ({ directory, home }) => {
-      // The xAI seat prefers a `grok` CLI found on the process PATH. This assertion is about the
-      // metered fallback, so the host PATH must not leak a real subscription CLI into the fixture.
-      const originalPath = process.env.PATH;
-      process.env.PATH = home;
-      try {
-        const recordsRoot = join(directory, 'records');
-        const explicitPath = join(directory, 'explicit-models.json');
-        const explicitContents =
-          '{"xai":{"primary":"explicit-grok","transport":"subscription-cli","alternateTransports":["http"]}}\n';
-        await mkdir(recordsRoot, { recursive: true });
-        await Bun.write(join(recordsRoot, 'models.json'), '{"xai":{"primary":"records-grok"}}');
-        await Bun.write(explicitPath, explicitContents);
+      const recordsRoot = join(directory, 'records');
+      const explicitPath = join(directory, 'explicit-models.json');
+      const explicitContents =
+        '{"xai":{"primary":"explicit-grok","transport":"subscription-cli","alternateTransports":["http"]}}\n';
+      await mkdir(recordsRoot, { recursive: true });
+      await Bun.write(join(recordsRoot, 'models.json'), '{"xai":{"primary":"records-grok"}}');
+      await Bun.write(explicitPath, explicitContents);
 
-        const output = parseOutput(
-          await runCliFacade(
-            ['self-check', '--json', '--records-root', recordsRoot, '--registry', explicitPath],
-            { cwd: directory, env: { HOME: home, COUNCIL_XAI_API_KEY: 'test-key' } },
-          ),
-        );
-        const selfCheck = SelfCheckOutputSchema.parse(output);
+      const output = parseOutput(
+        await runCliFacade(
+          ['self-check', '--json', '--records-root', recordsRoot, '--registry', explicitPath],
+          { cwd: directory, env: { HOME: home, COUNCIL_XAI_API_KEY: 'test-key' } },
+        ),
+      );
+      const selfCheck = SelfCheckOutputSchema.parse(output);
 
-        expect(selfCheck.routes.xai.primary).toBe('explicit-grok');
-        expect(selfCheck.registryProvenance).toMatchObject({
-          kind: 'override',
-          overridePath: resolve(explicitPath),
-          overrideSha256: createHash('sha256').update(explicitContents).digest('hex'),
-          routes: { xai: 'override', anthropic: 'built-in' },
-        });
-        expect(selfCheck.routes.xai.alternateTransports).toEqual(['http']);
-        expect(selfCheck.transportResolutions.xai).toEqual({
-          preferred: 'subscription-cli',
-          effective: 'http',
-          reason:
-            'No grok subscription CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
-        });
-      } finally {
-        if (originalPath === undefined) delete process.env.PATH;
-        else process.env.PATH = originalPath;
-      }
+      expect(selfCheck.routes.xai.primary).toBe('explicit-grok');
+      expect(selfCheck.registryProvenance).toMatchObject({
+        kind: 'override',
+        overridePath: resolve(explicitPath),
+        overrideSha256: createHash('sha256').update(explicitContents).digest('hex'),
+        routes: { xai: 'override', anthropic: 'built-in' },
+      });
+      expect(selfCheck.routes.xai.alternateTransports).toEqual(['http']);
+      expect(selfCheck.transportResolutions.xai).toEqual({
+        preferred: 'subscription-cli',
+        effective: 'http',
+        reason:
+          'No grok subscription CLI resolved on PATH; fell back to the metered COUNCIL_XAI_API_KEY. This call is billable.',
+      });
     });
   });
 
