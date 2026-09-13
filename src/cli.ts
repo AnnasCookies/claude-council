@@ -651,6 +651,7 @@ async function runCouncilCommand(
     return output(3, undefined, {
       schemaVersion: SCHEMA_VERSION,
       command,
+      mode: options.mode,
       status: 'blocked-policy',
       preflight: {
         requestedProviders: requestedProviderFamilies,
@@ -677,6 +678,8 @@ async function runCouncilCommand(
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       command,
+      mode: options.mode,
+      caller: options.caller,
       status: 'dry-run',
       runId: options.runId,
       ...(reducedQuorumWarning === undefined ? {} : { warning: reducedQuorumWarning }),
@@ -700,10 +703,7 @@ async function runCouncilCommand(
       billingMode,
     });
   const diagnostics: ProviderDiagnostic[] = [];
-  const spendCap =
-    options.spendCap ?? mode.spend.defaultCap(options.providerFamilies.length, options.rounds);
-  const ledger = createSpendLedger(spendCap);
-  const context: ProviderContext = {
+  const prepareContext: ProviderContext = {
     registry,
     env: environment.env ?? process.env,
     cwd: environment.cwd ?? process.cwd(),
@@ -711,10 +711,14 @@ async function runCouncilCommand(
     captureDiagnostic: (diagnostic) => {
       diagnostics.push(diagnostic);
     },
-    spend: ledger,
   };
 
-  const prepared = await mode.prepare({ options, adapters, context, policyDecision });
+  const prepared = await mode.prepare({
+    options,
+    adapters,
+    context: prepareContext,
+    policyDecision,
+  });
   if (prepared.kind === 'blocked-quorum') {
     return output(4, undefined, {
       schemaVersion: SCHEMA_VERSION,
@@ -734,6 +738,17 @@ async function runCouncilCommand(
   }
   const executionOptions: RunOptions = { ...prepared.options, command };
   const unavailableProviders: UnavailableProvider[] = [...prepared.unavailableProviders];
+
+  // Sized after preparation, and deliberately absent from the context `prepare` was given. The
+  // `seats x rounds` budget describes execution, and preparation is where the seat count is still
+  // being decided: a committee's health probes run through the same fallback wrapper, so a ledger
+  // built before `prepare` would let unreachable families spend the execution budget on probes and
+  // then refuse the seats that budget was for. Probes keep their pre-existing uncapped behaviour.
+  const ledger = createSpendLedger(
+    options.spendCap ??
+      mode.spend.defaultCap(executionOptions.providerFamilies.length, executionOptions.rounds),
+  );
+  const context: ProviderContext = { ...prepareContext, spend: ledger };
 
   const assignmentHistory = await loadAssignmentHistory(
     executionOptions,

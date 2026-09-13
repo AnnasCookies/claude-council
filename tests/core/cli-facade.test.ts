@@ -7,15 +7,21 @@ import {
   type ProjectPolicy,
   type ProviderFamily,
 } from '../../src/substrate/domain/schemas';
-import type {
-  Availability,
-  HealthResult,
-  ProviderAdapter,
-  ProviderContext,
-  ProviderRequest,
+import {
+  withCredentialFallback,
+  type Availability,
+  type HealthResult,
+  type ProviderAdapter,
+  type ProviderContext,
+  type ProviderRequest,
 } from '../../src/substrate/execution/provider';
 import { loadModelRegistry } from '../../src/substrate/models/registry';
-import { runCliFacade, shouldReadStdin, type CliFacadeEnvironment } from '../../src/cli';
+import {
+  runCliFacade,
+  shouldReadStdin,
+  type CliFacadeEnvironment,
+  type CliFacadeResult,
+} from '../../src/cli';
 import { assignLenses, selectLenses } from '../../src/substrate/roles/allocator';
 import { ResultEnvelopeSchema } from '../../src/substrate/envelope';
 
@@ -1282,6 +1288,153 @@ describe('public CLI facade', () => {
       'second-opinion',
     ]);
     expect(payload.modes[0]).toMatchObject({ pattern: 'rounds', spend: { policy: 'capped' } });
+  });
+
+  test('a dry run names its mode and echoes the declared caller', async () => {
+    const fixture = await fixtureEnvironment();
+    const result = await runCliFacade(
+      [
+        'second-opinion',
+        '--dry-run',
+        '--classification',
+        'public',
+        '--caller',
+        'agent',
+        '--harness',
+        'omp',
+        '--motion',
+        'm',
+      ],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mode).toBe('second-opinion');
+    expect(payload.caller).toEqual({ kind: 'agent', harness: 'omp', declared: true });
+    expect(fixture.providerCalls()).toBe(0);
+  });
+
+  test('a blocked-policy result names the mode it would have run', async () => {
+    const fixture = await fixtureEnvironment();
+    const result = await runCliFacade(
+      ['council', '--scope', 'project', '--motion', 'Review this private design'],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(3);
+    const payload = JSON.parse(result.stderr);
+    expect(payload.status).toBe('blocked-policy');
+    expect(payload.mode).toBe('committee');
+    expect(fixture.providerCalls()).toBe(0);
+  });
+
+  test('an exhausted spend cap refuses the metered fallback and stops the run short', async () => {
+    const registry = await loadModelRegistry();
+    // One family's subscription seat is spent, so its seat can only answer through the metered
+    // fallback. That is the single call the session cap is there to allow or refuse.
+    const runWithCap = async (cap: string): Promise<CliFacadeResult> => {
+      const fixture = await fixtureEnvironment(undefined, true);
+      const metered = fixture.environment.adapters?.xai;
+      if (metered === undefined) throw new Error('The fixture must provide an xai adapter');
+      const exhausted: ProviderAdapter = {
+        ...metered,
+        async invoke(request: ProviderRequest) {
+          return {
+            status: 'failed' as const,
+            seatId: request.seatId,
+            provider: 'xai' as const,
+            requestedModel: registry.xai.primary,
+            role: request.role,
+            latencyMs: 1,
+            error: {
+              code: 'quota-exhausted',
+              message: 'The subscription quota is spent.',
+              retryable: true,
+            },
+          };
+        },
+      };
+      return runCliFacade(
+        ['second-opinion', '--classification', 'public', '--spend-cap', cap, '--motion', 'Cap me'],
+        {
+          ...fixture.environment,
+          adapters: {
+            ...fixture.environment.adapters,
+            xai: withCredentialFallback(exhausted, () => metered, 'http'),
+          },
+        },
+      );
+    };
+    const xaiSeat = (payload: { envelope: { seats: { family: string }[] } }) => {
+      const seat = payload.envelope.seats.find(({ family }) => family === 'xai');
+      if (seat === undefined) throw new Error('The envelope must carry the xai seat');
+      return seat as { family: string; status: string; reason: string | null; fallback: boolean };
+    };
+
+    const refused = await runWithCap('0');
+    const refusedPayload = JSON.parse(refused.stdout);
+    // The other four families still make quorum, so the run completed: the non-zero exit is the
+    // spend cap alone, which is the distinction this asserts.
+    expect(refusedPayload.status).toBe('completed');
+    expect(refused.exitCode).toBe(4);
+    expect(refusedPayload.spendWarning).toContain('--spend-cap');
+    expect(refusedPayload.envelope.spend.stoppedAtCap).toBe(true);
+    expect(refusedPayload.envelope.spend.refused).toBe(1);
+    expect(refusedPayload.envelope.degraded).toContain('spend-cap-reached');
+    expect(xaiSeat(refusedPayload).status).toBe('failed');
+    expect(xaiSeat(refusedPayload).reason).toContain('spend-cap');
+
+    const allowed = await runWithCap('1');
+    expect(allowed.exitCode).toBe(0);
+    const allowedPayload = JSON.parse(allowed.stdout);
+    expect(allowedPayload.status).toBe('completed');
+    expect(allowedPayload.spendWarning).toBeUndefined();
+    expect(allowedPayload.envelope.spend.stoppedAtCap).toBe(false);
+    expect(allowedPayload.envelope.spend.refused).toBe(0);
+    expect(allowedPayload.envelope.degraded).not.toContain('spend-cap-reached');
+    expect(xaiSeat(allowedPayload).fallback).toBe(true);
+  });
+
+  test('the health preflight does not draw on the execution spend budget', async () => {
+    const registry = await loadModelRegistry();
+    const fixture = await fixtureEnvironment(undefined, true);
+    const metered = fixture.environment.adapters?.xai;
+    if (metered === undefined) throw new Error('The fixture must provide an xai adapter');
+    // This family's subscription path fails for every call, so its health probe AND both of its
+    // council rounds go through the metered fallback. The cap of 2 covers the two rounds exactly;
+    // a ledger shared with the preflight would spend one of them on the probe and refuse a round.
+    const exhausted: ProviderAdapter = {
+      ...metered,
+      async invoke(request: ProviderRequest) {
+        return {
+          status: 'failed' as const,
+          seatId: request.seatId,
+          provider: 'xai' as const,
+          requestedModel: registry.xai.primary,
+          role: request.role,
+          latencyMs: 1,
+          error: {
+            code: 'quota-exhausted',
+            message: 'The subscription quota is spent.',
+            retryable: true,
+          },
+        };
+      },
+    };
+    const result = await runCliFacade(
+      ['council', '--classification', 'public', '--spend-cap', '2', '--motion', 'Probe budget'],
+      {
+        ...fixture.environment,
+        adapters: {
+          ...fixture.environment.adapters,
+          xai: withCredentialFallback(exhausted, () => metered, 'http'),
+        },
+      },
+    );
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.preflight.selectedProviders).toContain('xai');
+    expect(payload.envelope.spend.stoppedAtCap).toBe(false);
+    expect(payload.envelope.spend.refused).toBe(0);
   });
 });
 
