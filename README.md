@@ -41,11 +41,23 @@ bun --no-install dist/cli.js self-check --json
 # Five selected seats, one ordinary round
 bun --no-install dist/cli.js second-opinion \
   --classification public \
+  --caller human --harness "Claude Code" \
   --motion "Compare JSON and SQLite for a local decision log"
+
+# Declare who is asking; wrappers always do. Absent, the envelope says caller-undeclared.
+bun --no-install dist/cli.js second-opinion \
+  --classification public \
+  --caller agent --harness omp --purpose "choose an ORM" \
+  --spend-cap 2 \
+  --motion "Drizzle or Kysely for this service?"
+
+# List the registered modes and their knobs
+bun --no-install dist/cli.js modes
 
 # Significant, multi-round council with contrarian quorum
 bun --no-install dist/cli.js council \
   --classification public \
+  --caller human --harness "Claude Code" \
   --motion "Should this cross-platform CLI use an append-only record store?"
 
 # Deliberate reduced quorum: weaker than the standing four-family default
@@ -86,6 +98,18 @@ bun --no-install dist/cli.js health --json
 The plugin slash commands are `/claude-council:council`, `/claude-council:second-opinion`, `/claude-council:ask`, `/claude-council:status` and `/claude-council:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
+
+### Result envelope
+
+Every executed run returns a validated `ResultEnvelope`, printed alongside the command's own
+result and embedded in the session record: the mode, the session, the declared `caller`
+(`--caller human|agent`, with `--harness` and `--purpose`; omitted, the envelope reports
+`caller-undeclared` in `degraded`), the execution pattern and rounds, one entry per seat with its
+verified identity and answering transport, the mode's own `output` block, synthesis and dissent,
+a unanimity flag, `spend`, `degraded` reasons and the `record` location — including whether it was
+committed and where its minutes file, if any, landed. See "The result envelope" in
+`docs/modes.md` for the full field reference, and run `modes` to list the registered modes and
+their knobs.
 
 ## Scope and project policy
 
@@ -155,6 +179,16 @@ Precedence is flag, then policy, then default:
 `api-only` and `sub-only` fail closed to `unconfigured` rather than crossing to the other path. A
 billing mode that can be quietly overridden is not a control.
 
+**`--spend-cap <n>` bounds metered fallback calls, and its scope follows the billing mode.**
+Under `sub-first`, the cap governs metered fallback and defaults to `seats × rounds` — the
+historical one metered retry per seat per round. Under `--billing api-only` every call is metered
+by deliberate choice rather than fallback, so the cap does not apply, though `envelope.spend.used`
+still reports the true metered count. Under `sub-only` no metered call is possible, so there is
+nothing for a cap to refuse. A run that reaches the cap exits **4** even when its outcome is
+`completed`: the envelope carries `spend-cap-reached` in `degraded` and `stoppedAtCap: true` in
+`spend`, and the command result adds a top-level `spendWarning`. Exit `0` requires both a
+`completed` outcome and an unreached cap.
+
 **Mid-run fallback is bounded, and the boundary is a safety property.** Under `sub-first` a seat whose
 subscription is quota-exhausted, unauthenticated or missing its executable retries once on the
 metered path, and the response records `credentialFallback` so the substitution is visible in the
@@ -195,6 +229,18 @@ same names from the machine-local, untracked `~/.claude/council/providers.env`.
 
 `COUNCIL_MINUTES_DIR` is optional and not a credential: when set, every terminal record is also
 rendered as a Markdown minutes file there. See "Records and memory" in `docs/modes.md`.
+
+A run that has written and committed its record never fails afterwards. A commit that cannot
+happen — the records root is not a Git work tree, a record path resolves outside that work tree,
+or `git` itself errors — adds `records-not-committed: <reason>` to the envelope's `degraded`
+rather than failing the run; an unwritable `COUNCIL_MINUTES_DIR` adds `minutes-not-written:
+<reason>` and leaves `record.minutes` as `null`. Both still report success. The commit runs `git`
+with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_OBJECT_DIRECTORY` stripped from its
+environment, so running from inside a Git hook cannot redirect it at a different repository, and
+paths are compared after resolving symlinks so a symlinked records root is not mistaken for lying
+outside its own work tree. `adjudicate` commits its ruling, resolution and ledger update the same
+way, and reports `records: { committed, commitSha }` on success or `records: { committed: false,
+reason }` otherwise.
 
 **Setting one of the four subscription families' keys does not start spending it.**
 Under the default `sub-first` mode the subscription CLI is preferred, and the key is
