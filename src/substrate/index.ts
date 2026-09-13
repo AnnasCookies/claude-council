@@ -29,6 +29,7 @@ export {
 } from './health/doctor';
 export * from './health/probe';
 export * from './models/registry';
+export * from './patterns';
 export * from './policy/data-guard';
 export * from './policy/secrets';
 export * from './providers';
