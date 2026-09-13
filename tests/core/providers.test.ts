@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { loadModelRegistry, type ModelRegistry } from '../../src/models/registry';
@@ -927,6 +927,28 @@ describe('xAI automatic transport resolution', () => {
         throw new Error('failing Grok invocation unexpectedly succeeded');
       expect(response.error.code).toBe(expectedCode);
       expect(cli.calls).toHaveLength(1);
+    }
+  });
+
+  test('resolves the subscription CLI from a roster env with PATH key in non-canonical case (Windows compatibility)', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'grok-path-case-'));
+    try {
+      // Write a grok executable (with .exe extension on Windows)
+      const executableName = process.platform === 'win32' ? 'grok.exe' : 'grok';
+      const executablePath = join(directory, executableName);
+      await writeFile(executablePath, '#!/bin/sh\necho ok\n');
+      await chmod(executablePath, 0o755);
+
+      // Create adapter with Path (capital P) instead of PATH to test case-insensitive matching
+      const adapter = xaiAdapter({
+        env: { Path: directory, COUNCIL_XAI_API_KEY: 'k' },
+        httpTransport: new FakeHttp([]),
+        cliTransport: new FakeCli(okCli(grokMessagesOutput(registry.xai.primary))),
+      });
+
+      expect(adapter.transportResolution?.effective).toBe('subscription-cli');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

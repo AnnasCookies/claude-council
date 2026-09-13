@@ -1853,13 +1853,16 @@ export function createOpenAiSubscriptionAdapter(
 /**
  * Look a subscription CLI up on the PATH the roster was given, never on the process PATH. The
  * provider context is the only environment a seat may see, and Bun.which reads the startup PATH
- * otherwise, so a host's real CLI would leak into a run that deliberately excluded it.
+ * otherwise, so a host's real CLI would leak into a run that deliberately excluded it. On Windows
+ * the variable is often exposed as `Path`, so the key is matched case-insensitively.
  */
 function executableOnPath(
   name: string,
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
-  return Bun.which(name, { PATH: env.PATH ?? '' }) ?? undefined;
+  const key = Object.keys(env).find((candidate) => candidate.toUpperCase() === 'PATH');
+  const path = key === undefined ? undefined : env[key];
+  return Bun.which(name, { PATH: path ?? '' }) ?? undefined;
 }
 
 function resolveAgyExecutable(
