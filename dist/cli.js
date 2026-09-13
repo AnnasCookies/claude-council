@@ -22481,8 +22481,6 @@ function getMode(name) {
 function resolveModeForCommand(command, significant) {
   if (command === "council")
     return "committee";
-  if (command === "second-opinion")
-    return "second-opinion";
   return significant ? "committee" : "second-opinion";
 }
 
@@ -22551,6 +22549,21 @@ var ADJUDICATE_FLAGS = new Set([
   "ruling-id",
   "resolution-id"
 ]);
+var COMMANDS = [
+  "run",
+  "council",
+  "second-opinion",
+  "modes",
+  "result",
+  "jobs",
+  "cancel",
+  "adjudicate",
+  "health",
+  "doctor",
+  "migrate-general",
+  "version",
+  "self-check"
+];
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -22959,6 +22972,9 @@ async function runCouncilCommand(command, args, environment) {
     degraded.push("caller-undeclared");
   if (command === "run" && mode.name === "committee")
     degraded.push("legacy-run-alias");
+  if (command === "second-opinion" && mode.name === "committee") {
+    degraded.push("legacy-significant-second-opinion");
+  }
   if (ledger.refused > 0)
     degraded.push("spend-cap-reached");
   const modeOutput = mode.outputSchema.parse(mode.output({ result: execution, decisionState }));
@@ -23002,7 +23018,7 @@ async function runCouncilCommand(command, args, environment) {
         degraded.push(`minutes-not-written: ${safeError(error51)}`);
       }
     }
-    emitted = ResultEnvelopeSchema.parse({
+    const unvalidated = {
       ...envelope2,
       degraded: [...degraded],
       record: {
@@ -23011,7 +23027,13 @@ async function runCouncilCommand(command, args, environment) {
         ...commit2.committed ? { commitSha: commit2.sha } : {},
         minutes: minutes2
       }
-    });
+    };
+    try {
+      emitted = ResultEnvelopeSchema.parse(unvalidated);
+    } catch (error51) {
+      degraded.push(`envelope-not-validated: ${safeError(error51)}`);
+      emitted = { ...unvalidated, degraded: [...degraded] };
+    }
   }
   const stoppedAtCap = envelope2.spend.stoppedAtCap;
   return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
@@ -23332,23 +23354,15 @@ async function adjudicateCommand(args, environment) {
 function help() {
   return output(0, {
     name: "claude-council",
-    commands: [
-      "run",
-      "council",
-      "second-opinion",
-      "modes",
-      "result",
-      "jobs",
-      "cancel",
-      "adjudicate",
-      "health",
-      "doctor",
-      "migrate-general",
-      "version",
-      "self-check"
-    ],
+    commands: [...COMMANDS],
     invocation: "All execution is explicit; no automatic hook starts a council.",
     defaultSeatCount: DEFAULT_SEAT_COUNT,
+    runOptions: {
+      "--caller human|agent": "Declare who is asking. Absent, the envelope reports caller-undeclared in degraded.",
+      "--harness <name>": "Name the harness the caller is running in. Requires --caller.",
+      "--purpose <text>": "State why the motion is being put. Requires --caller.",
+      "--spend-cap <n>": "Bound metered fallback calls for this session. The default is seats x rounds; reaching the cap exits 4 and marks the envelope spend-cap-reached."
+    },
     councilOptions: {
       "--min-families <n>": "Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker."
     },
@@ -23383,7 +23397,9 @@ async function runCliFacade(argv, environment = {}) {
     if (command === "migrate-general")
       return await migrationCommand(args, environment);
     if (command === "modes") {
-      parseArguments(args, new Set(["help", "json"]));
+      const parsed = parseArguments(args, new Set(["help", "json"]));
+      if (parsed.positionals.length > 0)
+        throw new Error("modes accepts no positional arguments");
       return output(0, {
         schemaVersion: SCHEMA_VERSION,
         modes: Object.values(modes).map((mode) => ({
@@ -23428,7 +23444,7 @@ async function runCliFacade(argv, environment = {}) {
         runtimeDependencies: ["zod", "proper-lockfile"]
       });
     }
-    throw new Error(`Unknown command: ${command}. Registered modes: ${Object.keys(modes).join(", ")}`);
+    throw new Error(`Unknown command: ${command}. Commands: ${COMMANDS.join(", ")}. Modes: ${Object.keys(modes).join(", ")}`);
   } catch (error51) {
     return output(2, undefined, {
       schemaVersion: SCHEMA_VERSION,
