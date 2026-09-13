@@ -12,6 +12,7 @@ import type {
 } from '../domain/schemas';
 import type { ModelRegistry } from '../models/registry';
 import { scanAndRedact } from '../policy/secrets';
+import { spendCapExhaustedMessage, type SpendLedger } from '../spend';
 import { runIsolatedCli, type CliRequest, type CliResult } from './cli';
 import { requestWithPolicy, type HttpRequest, type HttpResult, type RetryPolicy } from './http';
 
@@ -42,6 +43,8 @@ export interface ProviderContext {
   cwd: string;
   timeoutMs: number;
   captureDiagnostic?: (diagnostic: ProviderDiagnostic) => void;
+  /** Session-wide budget for metered fallbacks. Absent means uncapped, which is today's behaviour. */
+  spend?: SpendLedger;
 }
 
 export interface ProviderRequest {
@@ -2212,7 +2215,7 @@ function permitsCredentialFallback(response: SeatResponse): boolean {
  * Only reachable under `sub-first`. `api-only` and `sub-only` are requirements rather than
  * preferences, so crossing paths there would defeat the control that made them worth having.
  */
-function withCredentialFallback(
+export function withCredentialFallback(
   primary: ProviderAdapter,
   secondary: () => ProviderAdapter,
   fallbackTransport: ModelTransport,
@@ -2221,7 +2224,20 @@ function withCredentialFallback(
     ...primary,
     async invoke(request) {
       const first = await primary.invoke(request);
-      if (!permitsCredentialFallback(first)) return first;
+      if (first.status === 'ok' || !permitsCredentialFallback(first)) return first;
+      const ledger = request.context.spend;
+      if (ledger !== undefined && !ledger.reserve()) {
+        // The cap is a session-wide budget for metered fallbacks. Refusing here keeps the seat's
+        // original failure visible and records that money was not spent, which is the point.
+        return {
+          ...first,
+          error: {
+            code: 'spend-cap',
+            message: `${spendCapExhaustedMessage(ledger.cap)} Original failure: ${first.error.code}.`,
+            retryable: false,
+          },
+        };
+      }
       const second = await secondary().invoke(request);
       if (second.status === 'ok') {
         return {
@@ -2232,7 +2248,9 @@ function withCredentialFallback(
           credentialFallback: {
             fromTransport: primary.transport,
             toTransport: fallbackTransport,
-            reason: first.status === 'ok' ? 'unknown' : first.error.code,
+            // `first` cannot be 'ok' here: the guard above already returns early in that case, and the
+            // literal check in that guard narrows the type accordingly for the rest of this closure.
+            reason: first.error.code,
           },
         };
       }
