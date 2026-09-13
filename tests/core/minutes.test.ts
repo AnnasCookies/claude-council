@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { ResultEnvelope } from '../../src/substrate/envelope';
 import type { RoundExecution } from '../../src/substrate/execution/runner';
 import {
@@ -95,10 +95,14 @@ describe('minutes', () => {
   });
 
   test('resolves the directory from COUNCIL_MINUTES_DIR relative to cwd', () => {
-    expect(minutesDirectory({}, '/work')).toBeNull();
-    expect(minutesDirectory({ COUNCIL_MINUTES_DIR: '   ' }, '/work')).toBeNull();
-    expect(minutesDirectory({ COUNCIL_MINUTES_DIR: 'minutes' }, '/work')).toBe(
-      join('/work', 'minutes'),
+    // Built from tmpdir() so the expectation carries a drive letter on Windows, where resolving a
+    // bare '/work' would otherwise gain one and differ from a join().
+    const cwd = resolve(tmpdir(), 'work');
+    expect(minutesDirectory({}, cwd)).toBeNull();
+    expect(minutesDirectory({ COUNCIL_MINUTES_DIR: '   ' }, cwd)).toBeNull();
+    expect(minutesDirectory({ COUNCIL_MINUTES_DIR: 'minutes' }, cwd)).toBe(join(cwd, 'minutes'));
+    expect(minutesDirectory({ COUNCIL_MINUTES_DIR: cwd }, resolve(tmpdir(), 'elsewhere'))).toBe(
+      cwd,
     );
   });
 
