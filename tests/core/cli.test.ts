@@ -1,5 +1,5 @@
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { link, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -139,7 +139,11 @@ describe('isolated CLI execution', () => {
         join(packageRoot, 'package.json'),
         JSON.stringify({ name: 'claude-council', type: 'module' }),
       );
-      await link(process.execPath, externalExecutable);
+      // A hard link fails with EXDEV when the temp directory sits on a different filesystem from
+      // the bun binary, which is the layout on this project's Linux rig. A copy behaves the same
+      // for this test and works across devices.
+      await copyFile(process.execPath, externalExecutable);
+      await chmod(externalExecutable, 0o755);
       const build = await Bun.build({
         entrypoints: [join(import.meta.dir, '../../src/execution/cli.ts')],
         outdir: outputDirectory,
