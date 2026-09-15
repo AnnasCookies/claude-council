@@ -299,8 +299,9 @@ function seatRecord(seat: PanelSeat<TriageVerdictFields>): SeatVerdictRecord {
 /**
  * Items run concurrently up to `limit`, which bounds how many items are in flight at once: a
  * batch is fast because items are independent, not because a hundred seats are dialled at the
- * same moment. Each item is one panel call, so with two seats the ceiling on provider calls in
- * flight is `limit * 2`.
+ * same moment. Each item is one panel call, and each panel call is itself bounded to the roster
+ * size (see the `concurrency` passed to `runPanel` below), so the ceiling on provider calls in
+ * flight is `limit × seats` rather than the panel's own unrelated default.
  */
 async function mapWithLimit<T, R>(
   values: readonly T[],
@@ -404,8 +405,13 @@ export const triage: HandlerModeDefinition = {
     }
     if (input.options.providerFamilies.length < seatCount) {
       // Two seats on one family would be one model checking itself, which is not a second voice.
+      // `--providers` is named only when the caller actually passed it: the same shortfall with
+      // no `--providers` on the command line is the selection's own default, not a flag anyone set.
+      const source = input.flags.has('providers')
+        ? '--providers named'
+        : 'the provider selection names';
       throw new Error(
-        `--seats ${seatCount} needs at least ${seatCount} provider families; --providers named ${input.options.providerFamilies.length}`,
+        `--seats ${seatCount} needs at least ${seatCount} provider families; ${source} ${input.options.providerFamilies.length}`,
       );
     }
     // Read and validate the batch before anything is asked of a provider, so a malformed file is
@@ -456,6 +462,10 @@ export const triage: HandlerModeDefinition = {
             // `spend.cap` agree on, rather than a second policy object reasserted here that could
             // drift from it.
             spend: input.spend,
+            // Structural rather than the panel's own unrelated default (sized for a twelve-voice
+            // audience panel): a triage item never seats more than `--seats` voices, so that is
+            // the true ceiling on how many of this item's seats run at once.
+            concurrency: seatCount,
           },
         );
         return { item, seats: panel.seats, spend: panel.spend };
@@ -547,14 +557,19 @@ export const triage: HandlerModeDefinition = {
     if (unprocessed.length > 0) degraded.push(`items-unprocessed: ${unprocessed.length}`);
 
     const session = input.options.sessionId ?? newModeSessionId('tr', input.now());
-    const paths = new Set<string>();
+    let paths: readonly string[] = [];
     if (input.sessions !== null) {
-      // Appended one at a time and in input order, so the log reads in the order the batch was
-      // given and two appends never contend for the scope lock.
-      for (const event of events) {
-        const write = await input.sessions.append('triage', session, event);
-        for (const path of write.paths) paths.add(path);
-      }
+      // One rewrite for the whole batch, not one per item. `append` in a loop was never a lock
+      // contention problem — nothing else writes this session's log while a run is in flight — it
+      // was a rewrite-cost problem: each call took the scope lock, read the log back and rewrote
+      // the whole file, so a 500-item batch read and rewrote an ever-longer file 500 times
+      // (measured at 4.9s and ~125MB of writes). `appendDerived` takes the lock once and publishes
+      // every event in a single rewrite; the derivation ignores the log it is handed, because
+      // nothing a triage record writes depends on what came before it, so there is nothing to
+      // reconcile with prior content. `events` is already built in input order, so the log still
+      // reads in the order the batch was given.
+      const write = await input.sessions.appendDerived('triage', session, () => events);
+      paths = write.paths;
     }
 
     const panelOutcomes = [...outcomes.values()];
