@@ -4,7 +4,7 @@ All notable changes to convene are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
-## Unreleased
+## 2026.9.7 — 2026-09-15
 
 ### Added
 
@@ -85,6 +85,24 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   that need commas, `--question` says what the draft is for, and with `--records-root` the run
   writes one append-only session log holding the draft's path and SHA-256 and one event per voice,
   committed before the run reports success. The plugin command is `/convene:audience`.
+
+### Fixed
+
+- The mode session alias index refused a JSON object with a shape error by throwing a raw Zod
+  error, without naming the file. Reading the index now wraps a shape failure the same way it
+  already wrapped a JSON syntax failure: an error naming the file and saying the index must be a
+  JSON object.
+- The advisor seat's answer text went through the plain, surrogate-unsafe excerpt before it was
+  recorded as a note, so an answer ending mid astral character could put a lone surrogate into the
+  note log. It now goes through the advisor's own surrogate-safe excerpt.
+- The containment loader test asserted a fixed count of shipped commands, so it broke every time a
+  mode added one. It now counts the `.md` files under `commands/` at test time.
+- A run whose terminal record failed to commit still reported `completed` and exited `0`, against
+  the documented invariant that a record is committed before a run reports success. Both the
+  runner and the handler path now report `degraded` and exit `4` when `records-not-committed` is
+  added after finalisation.
+- `commands/advise.md` promised a project-scope policy check in its prose but its invocation line
+  carried no scope flags. It now names `--scope`, `--classification` and `--project-policy`.
 
 ## 2026.9.6
 
