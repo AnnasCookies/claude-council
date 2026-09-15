@@ -20,7 +20,7 @@ import {
 import {
   NOTE_TEXT_LIMIT,
   NoteSeveritySchema,
-  excerpt,
+  safeExcerpt,
   type NoteSeverity,
   type NoteStatus,
   type RiskClass,
@@ -184,7 +184,10 @@ function fromPanelSeat(seat: PanelSeat<AdvisorAnswer>, spend: Spend): SeatConsul
   const envelopeSeat = panelEnvelopeSeats([seat])[0] ?? null;
   switch (seat.status) {
     case 'ok': {
-      const text = excerpt(seat.answer.text, NOTE_TEXT_LIMIT);
+      // Redacted and surrogate-safe, like every other seat answer bound for the note log: a seat
+      // reply is untrusted the same way as any other panel output, and it can end mid astral
+      // character at the limit as readily as it can carry a secret.
+      const text = safeExcerpt(seat.answer.text, NOTE_TEXT_LIMIT);
       // A seat that chose to say nothing is silence, the same outcome as a window that elapsed.
       if (text.length === 0)
         return silent(seat.id, envelopeSeat, spend, 'no-advice', 'seat-silent');

@@ -532,7 +532,7 @@ describe('handler mode dispatch', () => {
     }
   });
 
-  test('a plain records root reports records-not-committed and still succeeds', async () => {
+  test('a plain records root reports records-not-committed and degrades the run', async () => {
     const root = await mkdtemp(join(tmpdir(), 'council-handler-nocommit-'));
     try {
       const fixture = await fixtureEnvironment();
@@ -540,8 +540,10 @@ describe('handler mode dispatch', () => {
         ['audience', '--records-root', root, '--motion', 'No git here'],
         fixture.environment,
       );
-      expect(result.exitCode).toBe(0);
+      // docs/modes.md invariant 8: a record that never committed must not report success.
+      expect(result.exitCode).toBe(4);
       const payload = JSON.parse(result.stdout);
+      expect(payload.status).toBe('degraded');
       expect(payload.envelope.record.committed).toBe(false);
       expect(payload.envelope.record.minutes).toBeNull();
       expect(payload.envelope.degraded).toContainEqual(

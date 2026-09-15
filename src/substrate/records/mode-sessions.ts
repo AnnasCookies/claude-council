@@ -195,7 +195,16 @@ export class ModeSessionStore {
     } catch (error) {
       throw new Error(`Invalid mode session alias index JSON: ${path}`, { cause: error });
     }
-    return ModeSessionAliasIndexSchema.parse(value);
+    // `strictObject` already refuses a JSON array, a scalar or `null` here — a Zod schema treats
+    // a plain object as the only valid shape — but its own error names neither the file nor what
+    // is actually required, so it is caught and re-thrown with both.
+    try {
+      return ModeSessionAliasIndexSchema.parse(value);
+    } catch (error) {
+      throw new Error(`Invalid mode session alias index: ${path} must be a JSON object`, {
+        cause: error,
+      });
+    }
   }
 
   async lookupAlias(mode: string, key: string): Promise<string | undefined> {

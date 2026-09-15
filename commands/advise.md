@@ -10,7 +10,7 @@ Put `$ARGUMENTS` to the advisor seat as one question and relay its note. The adv
 2. Invoke only the bundled runtime:
 
 ```text
-bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js advise --records-root ~/.claude/council --caller human --harness claude-code --session <key> --ask <shell-escaped-question>
+bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js advise --records-root ~/.claude/council --caller human --harness claude-code [--scope <scope>] [--classification <classification>] [--project-policy <path>] --session <key> --ask <shell-escaped-question>
 ```
 
 With `--status` instead of a question, run `--status` in place of `--ask` and report whether the log exists, how many notes it holds and the last one.

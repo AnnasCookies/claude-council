@@ -495,6 +495,14 @@ interface RecordedRunInput {
 }
 
 /**
+ * Whether finalisation found that the terminal record never committed. Checked by prefix because
+ * the entry carries the commit failure's own reason after the colon.
+ */
+function recordNotCommitted(degraded: readonly string[]): boolean {
+  return degraded.some((entry) => entry.startsWith('records-not-committed'));
+}
+
+/**
  * Everything after the record is on disk, shared by the runner path and the handler path so the
  * two cannot drift. Durability is Git: the terminal record is committed in the records repository
  * before the run reports success. A records root that is not a work tree is a degradation, not a
@@ -979,7 +987,9 @@ async function runCouncilCommand(
       : { refinementTrigger: executionOptions.refinementTrigger }),
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const status = execution.outcome;
+  // Mutable: finaliseRecordedRun runs after this is first read and may push
+  // records-not-committed, which must downgrade this status before it decides the exit code below.
+  let status = execution.outcome;
   const decisionState: PersistedDecisionState =
     status === 'completed' || status === 'degraded' ? 'awaiting-adjudication' : 'not-adjudicable';
   const degraded: string[] = [];
@@ -1035,6 +1045,12 @@ async function runCouncilCommand(
       environment,
     });
   }
+  // docs/modes.md invariant 8: a terminal record is committed before the run reports success. A
+  // commit failure surfaces only after finalisation, once `status` was already read for
+  // `decisionState` above, so it is downgraded here rather than there. Only a run that would
+  // otherwise report success is downgraded: `blocked-quorum` and an already-`degraded` outcome
+  // already exit non-zero and name their own reason, which a blanket overwrite would discard.
+  if (status === 'completed' && recordNotCommitted(degraded)) status = 'degraded';
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
   // is a separate command with its own exit status.
@@ -1685,6 +1701,9 @@ async function handlerModeCommand(
     });
   }
   const completedAt = now();
+  // Mutable: finaliseRecordedRun runs after outcome.status is read below and may push
+  // records-not-committed, which must downgrade this status before it decides the exit code.
+  let status = outcome.status;
   const degraded: string[] = [];
   if (!caller.declared) degraded.push('caller-undeclared');
   if (outcome.spend.stoppedAtCap) degraded.push('spend-cap-reached');
@@ -1722,12 +1741,19 @@ async function handlerModeCommand(
       environment,
     });
   }
+  // docs/modes.md invariant 8: a terminal record is committed before the run reports success.
+  // caller-undeclared stays a soft note that leaves `status` at `completed` (see the handler-modes
+  // test for that contract): it says who is missing, not whether anything failed to persist.
+  // records-not-committed means the just-written record is not durably stored, so a run that would
+  // otherwise report success is downgraded the same way the mode's own `degraded` outcome would
+  // have; a mode that already reported `degraded` keeps its own reason.
+  if (status === 'completed' && recordNotCommitted(degraded)) status = 'degraded';
   const stoppedAtCap = envelope.spend.stoppedAtCap;
-  return output(outcome.status === 'completed' && !stoppedAtCap ? 0 : 4, {
+  return output(status === 'completed' && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     mode: mode.name,
-    status: outcome.status,
+    status,
     session: outcome.session,
     ...(stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(envelope.spend.cap) } : {}),
     preflight,

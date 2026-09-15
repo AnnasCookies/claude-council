@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "convene",
-  version: "2026.9.6",
+  version: "2026.9.7",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -22613,7 +22613,13 @@ class ModeSessionStore {
     } catch (error51) {
       throw new Error(`Invalid mode session alias index JSON: ${path}`, { cause: error51 });
     }
-    return ModeSessionAliasIndexSchema.parse(value);
+    try {
+      return ModeSessionAliasIndexSchema.parse(value);
+    } catch (error51) {
+      throw new Error(`Invalid mode session alias index: ${path} must be a JSON object`, {
+        cause: error51
+      });
+    }
   }
   async lookupAlias(mode, key) {
     const safeKey = ModeSessionKeySchema.parse(key);
@@ -23091,7 +23097,7 @@ function fromPanelSeat(seat, spend2) {
   const envelopeSeat = panelEnvelopeSeats([seat])[0] ?? null;
   switch (seat.status) {
     case "ok": {
-      const text = excerpt(seat.answer.text, NOTE_TEXT_LIMIT);
+      const text = safeExcerpt(seat.answer.text, NOTE_TEXT_LIMIT);
       if (text.length === 0)
         return silent(seat.id, envelopeSeat, spend2, "no-advice", "seat-silent");
       return {
@@ -26920,6 +26926,9 @@ async function commitRecords(root, paths, message, environment) {
     env: environment.env ?? process.env
   });
 }
+function recordNotCommitted(degraded) {
+  return degraded.some((entry) => entry.startsWith("records-not-committed"));
+}
 async function finaliseRecordedRun(input) {
   const { envelope: envelope2, degraded, environment } = input;
   const commit2 = await commitRecords(input.recordsRoot, input.paths, input.message, environment);
@@ -27243,7 +27252,7 @@ async function runCouncilCommand(command, args, environment) {
     ...executionOptions.refinementTrigger === undefined ? {} : { refinementTrigger: executionOptions.refinementTrigger }
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const status = execution.outcome;
+  let status = execution.outcome;
   const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
   const degraded = [];
   if (!options.caller.declared)
@@ -27292,6 +27301,8 @@ async function runCouncilCommand(command, args, environment) {
       environment
     });
   }
+  if (status === "completed" && recordNotCommitted(degraded))
+    status = "degraded";
   const stoppedAtCap = envelope2.spend.stoppedAtCap;
   return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
@@ -27746,6 +27757,7 @@ async function handlerModeCommand(command, args, environment) {
     });
   }
   const completedAt = now();
+  let status = outcome.status;
   const degraded = [];
   if (!caller.declared)
     degraded.push("caller-undeclared");
@@ -27785,12 +27797,14 @@ async function handlerModeCommand(command, args, environment) {
       environment
     });
   }
+  if (status === "completed" && recordNotCommitted(degraded))
+    status = "degraded";
   const stoppedAtCap = envelope2.spend.stoppedAtCap;
-  return output(outcome.status === "completed" && !stoppedAtCap ? 0 : 4, {
+  return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     mode: mode.name,
-    status: outcome.status,
+    status,
     session: outcome.session,
     ...stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(envelope2.spend.cap) } : {},
     preflight,

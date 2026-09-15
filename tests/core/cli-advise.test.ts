@@ -310,10 +310,15 @@ describe('advise through the CLI', () => {
         advise(root, '--session', KEY, '--end'),
         fixture.environment,
       );
-      expect(ended.exitCode).toBe(0);
+      // docs/modes.md invariant 8: a record that never committed must not report success.
+      expect(ended.exitCode).toBe(4);
       const payload = JSON.parse(ended.stdout);
+      expect(payload.status).toBe('degraded');
       expect(payload.envelope.output).toEqual({ ended: { notes: 1, closed: true } });
       expect(payload.envelope.record.committed).toBe(false);
+      expect(payload.envelope.degraded).toContainEqual(
+        expect.stringContaining('records-not-committed'),
+      );
     });
   });
 

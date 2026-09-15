@@ -76,6 +76,38 @@ describe('mode session aliases', () => {
     });
   });
 
+  test('refuses a JSON array or a scalar in place of the index object, naming the file', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      const path = store.aliasPath('advisor');
+      for (const bogus of ['[]', '"a string"', '42', 'null']) {
+        await Bun.write(path, bogus);
+        await expect(store.lookupAlias('advisor', 'k')).rejects.toThrow(
+          `Invalid mode session alias index: ${path} must be a JSON object`,
+        );
+        await expect(store.bindAlias('advisor', 'k', 'ad', NOW)).rejects.toThrow(
+          `Invalid mode session alias index: ${path} must be a JSON object`,
+        );
+        // The refused write leaves the bogus content in place rather than replacing it.
+        expect(await Bun.file(path).text()).toBe(bogus);
+      }
+    });
+  });
+
+  test('refuses a non-JSON index file, naming the file', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      const path = store.aliasPath('advisor');
+      await Bun.write(path, 'not json at all {');
+      await expect(store.lookupAlias('advisor', 'k')).rejects.toThrow(
+        `Invalid mode session alias index JSON: ${path}`,
+      );
+      await expect(store.bindAlias('advisor', 'k', 'ad', NOW)).rejects.toThrow(
+        `Invalid mode session alias index JSON: ${path}`,
+      );
+    });
+  });
+
   test('a key named after an Object property is read from the index, never the prototype', async () => {
     await withRoot(async (root) => {
       const store = ModeSessionStore.open(root);

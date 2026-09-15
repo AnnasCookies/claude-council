@@ -13,19 +13,19 @@ is cut over on the rig.
 
 ## Approach
 
-- [ ] 0. Foundation PR: panel primitive (N seats, many per family, lens or persona each, blind,
+- [x] 0. Foundation PR: panel primitive (N seats, many per family, lens or persona each, blind,
       parallel, structured JSON answer validated per mode, spend policy honoured), mode session
       store (append-only JSONL per session under the records root, committed and rendered as
       minutes), handler-style modes in the registry, CLI dispatch for them.
-- [ ] 1. Advisor: `advise --watch|--hold|--ask|--heed|--note|--end`, note log, `sub-only`, risk
+- [x] 1. Advisor: `advise --watch|--hold|--ask|--heed|--note|--end`, note log, `sub-only`, risk
       classes, bounded hold; Claude Code hook in dotagents; sidecar script for the other harnesses.
-- [ ] 2. Ideation: `ideate`, many cheap seats one lens each, deterministic near-duplicate
+- [x] 2. Ideation: `ideate`, many cheap seats one lens each, deterministic near-duplicate
       clustering labelled as the engine's grouping, expansion passes by cluster id, raw list always.
-- [ ] 3. Consultants: `consult`, seats by lens, brief and reports, conflicts listed by a named
+- [x] 3. Consultants: `consult`, seats by lens, brief and reports, conflicts listed by a named
       synthesiser seat, Q&A to one consultant, session stays open, cap covers the session.
-- [ ] 4. Forum: `forum`, many seats, rounds with rebuttal, structured stance per seat, position
+- [x] 4. Forum: `forum`, many seats, rounds with rebuttal, structured stance per seat, position
       map, moved, motions with support and opposition, no ruling ever.
-- [ ] 5. Triage: `triage`, schema-bound per-item verdicts, one or two seats, disagreement routed
+- [x] 5. Triage: `triage`, schema-bound per-item verdicts, one or two seats, disagreement routed
       to a human, `sub-only`, `unprocessed` never routed.
 - [x] 6. Audience: `audience`, persona seats react to a hashed draft, structured fields, tallies
       as counts, verbatim attributed quotes, `sub-only`.
