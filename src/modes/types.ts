@@ -22,7 +22,7 @@ import type {
 } from '../substrate';
 
 /** The modes this build registers. A mode PR adds its name here when it adds its definition. */
-export const MODE_NAMES = ['committee', 'second-opinion'] as const;
+export const MODE_NAMES = ['committee', 'second-opinion', 'advisor'] as const;
 export type ModeName = (typeof MODE_NAMES)[number];
 
 /**
@@ -130,6 +130,11 @@ export interface HandlerCommonOptions {
   readonly motion?: string;
   /** From `--session`, already validated against the session id pattern. */
   readonly sessionId?: string;
+  /**
+   * From `--session` for a mode declared `session: 'key'`: the harness's own session identity,
+   * verbatim. The mode maps it to a store session id itself (the advisor uses the alias index).
+   */
+  readonly sessionKey?: string;
   readonly timeoutMs: number;
   /** After the mode's spend policy was applied: never-metered modes always see `sub-only`. */
   readonly billingMode: BillingMode;
@@ -211,6 +216,14 @@ export interface HandlerModeDefinition {
   readonly spend: ModeSpend;
   readonly flags: HandlerModeFlags;
   readonly outputSchema: z.ZodType<Record<string, unknown>>;
+  /**
+   * How `--session` is read. `'id'` (the default) is a store session id the CLI validates before
+   * it can become a path. `'key'` is an opaque harness session key handed to the mode verbatim,
+   * for a mode that is called from a hook which knows only the harness's own id.
+   */
+  readonly session?: 'id' | 'key';
+  /** Whether bare arguments are passed through in `HandlerInput.positionals` rather than refused. */
+  readonly acceptsPositionals?: boolean;
   handle(input: HandlerInput): Promise<HandlerOutcome>;
 }
 

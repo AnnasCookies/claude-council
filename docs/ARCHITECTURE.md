@@ -33,7 +33,11 @@ the session helpers (`session.ts`). Its only public entry is `src/substrate/inde
 `src/modes/` is a registry of `ModeDefinition`s. A mode declares the five knobs from
 `docs/vision.md`, its execution pattern, its defaults, its spend policy, how it prepares a
 session (the committee's health preflight lives here) and the shape of its `output` block.
-`committee` and `second-opinion` are registered; `docs/modes.md` specifies the rest.
+`committee`, `second-opinion` and `advisor` are registered; `docs/modes.md` specifies the rest.
+The advisor is the first handler-style mode: it owns its execution (one panel seat under
+`never-metered`, a bounded hold, an append-only note log per harness session through
+`ModeSessionStore`) and returns the envelope fields the CLI cannot know. Its note log is committed
+only when `--end` closes the session; every other verb records but does not commit.
 
 `src/cli.ts` parses flags, resolves the mode for the command, builds the envelope, persists the
 session and prints. `tests/core/dependency-direction.test.ts` enforces that modes reach the

@@ -1311,6 +1311,7 @@ describe('public CLI facade', () => {
     expect(payload.modes.map((mode: { name: string }) => mode.name)).toEqual([
       'committee',
       'second-opinion',
+      'advisor',
     ]);
     expect(payload.modes[0]).toMatchObject({ pattern: 'rounds', spend: { policy: 'capped' } });
     const positional = await runCliFacade(['modes', 'version']);
@@ -1668,5 +1669,22 @@ describe('stdin consumption', () => {
 
   test('an interactive terminal never blocks', () => {
     expect(shouldReadStdin(['council'], true)).toBe(false);
+  });
+
+  test('advise reads stdin only when the transcript window is piped', () => {
+    const watch = ['advise', '--session', 's1', '--watch', '--every', '3'];
+    expect(shouldReadStdin([...watch, '--transcript', '-'], false)).toBe(true);
+    expect(shouldReadStdin([...watch, '--transcript=-'], false)).toBe(true);
+    expect(shouldReadStdin([...watch, '--transcript', 'window.txt'], false)).toBe(false);
+    expect(shouldReadStdin([...watch], false)).toBe(false);
+    expect(
+      shouldReadStdin(
+        ['advise', '--session', 's1', '--hold', '--class', 'delete', '--tool', 'rm -rf build'],
+        false,
+      ),
+    ).toBe(false);
+    expect(shouldReadStdin(['advise', '--session', 's1', '--ask', 'q'], false)).toBe(false);
+    expect(shouldReadStdin(['advise', '--session', 's1', '--status'], false)).toBe(false);
+    expect(shouldReadStdin([...watch, '--transcript', '-'], true)).toBe(false);
   });
 });

@@ -1,8 +1,10 @@
+import { advisor } from './advisor';
 import { committee } from './committee';
 import { secondOpinion } from './second-opinion';
 import {
   SPECIFIED_MODE_NAMES,
   isHandlerMode,
+  type HandlerModeDefinition,
   type ModeDefinition,
   type ModeName,
   type RunnerModeDefinition,
@@ -22,10 +24,19 @@ function runnerMode(mode: ModeDefinition): RunnerModeDefinition {
   return mode;
 }
 
-export const modes: Readonly<Record<ModeName, RunnerModeDefinition>> = Object.freeze({
+/**
+ * Typed per entry so the runner path keeps `modes.committee.prepare` and `.defaults` while a
+ * handler mode sits beside them; `satisfies` proves every registered name has a definition.
+ */
+export const modes: Readonly<{
+  readonly committee: RunnerModeDefinition;
+  readonly 'second-opinion': RunnerModeDefinition;
+  readonly advisor: HandlerModeDefinition;
+}> = Object.freeze({
   committee: runnerMode(committee),
   'second-opinion': runnerMode(secondOpinion),
-});
+  advisor,
+}) satisfies Readonly<Record<ModeName, ModeDefinition>>;
 
 /** What a build can run, keyed by specified name. Tests inject one to register a fixture mode. */
 export type ModeRegistry = Readonly<Partial<Record<SpecifiedModeName, ModeDefinition>>>;

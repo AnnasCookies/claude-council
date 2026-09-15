@@ -11,8 +11,15 @@ import type {
   ProviderContext,
   ProviderRequest,
 } from '../../src/substrate/execution/provider';
-import { withCredentialFallback } from '../../src/substrate/execution/provider';
-import type { SeatResponse } from '../../src/substrate/domain/schemas';
+import {
+  withCredentialFallback,
+  withTransportResolution,
+} from '../../src/substrate/execution/provider';
+import type {
+  ModelTransport,
+  ProviderFamily,
+  SeatResponse,
+} from '../../src/substrate/domain/schemas';
 
 describe('spend ledger', () => {
   test('reserves up to the cap and counts refusals after it', () => {
@@ -156,5 +163,57 @@ describe('credential fallback under a spend cap', () => {
     expect(second.error.retryable).toBe(false);
     expect(ledger.used).toBe(1);
     expect(ledger.refused).toBe(1);
+  });
+});
+
+/**
+ * A seat fixture written as a class rather than an object literal: its methods live on the
+ * prototype, so an object spread of it copies `family` and `transport` and silently drops every
+ * method. Both wrappers below must forward what they do not override.
+ */
+class ClassShapedAdapter implements ProviderAdapter {
+  readonly family: ProviderFamily = 'xai';
+  readonly transport: ModelTransport = 'subscription-cli';
+
+  async availability(): Promise<Availability> {
+    return { status: 'available', provider: 'xai', model: 'grok', reason: 'class fixture' };
+  }
+
+  async invoke(): Promise<SeatResponse> {
+    return quotaExhausted();
+  }
+
+  async probe(): Promise<HealthResult> {
+    return {
+      status: 'healthy',
+      provider: 'xai',
+      requestedModel: 'grok',
+      actualModel: 'grok',
+      latencyMs: 1,
+      reason: 'class fixture',
+    };
+  }
+}
+
+describe('adapter wrappers forward what they do not override', () => {
+  test('withCredentialFallback keeps availability on a class-shaped adapter', async () => {
+    const adapter = withCredentialFallback(
+      new ClassShapedAdapter(),
+      () => stubAdapter(metered, 'http'),
+      'http',
+    );
+    await expect(adapter.availability(request().context)).resolves.toMatchObject({
+      status: 'available',
+      provider: 'xai',
+    });
+  });
+
+  test('withTransportResolution keeps invoke on a class-shaped adapter', async () => {
+    const adapter = withTransportResolution(new ClassShapedAdapter(), {
+      preferred: 'subscription-cli',
+      effective: 'subscription-cli',
+      reason: 'class fixture',
+    });
+    await expect(adapter.invoke(request())).resolves.toMatchObject({ status: 'failed' });
   });
 });

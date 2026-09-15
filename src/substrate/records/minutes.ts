@@ -79,6 +79,14 @@ export function renderMinutes(input: MinutesInput): string {
         ? 'None recorded.'
         : envelope.dissent.map((entry) => `- ${entry.seat}: ${entry.position}`).join('\n'),
     '',
+    // The mode's own output block, verbatim. A runner mode's minutes already carry its rounds;
+    // a handler mode has no rounds, so without this its minutes would carry no result at all.
+    '## Output',
+    '',
+    '```json',
+    JSON.stringify(envelope.output, null, 2),
+    '```',
+    '',
     '## Spend',
     '',
     `- Billing: ${envelope.spend.billing} (${envelope.spend.policy})`,

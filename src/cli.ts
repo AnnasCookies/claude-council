@@ -1524,7 +1524,9 @@ async function handlerModeCommand(
       },
     });
   }
-  if (parsed.positionals.length > 0) throw new Error(`${command} accepts options only`);
+  if (parsed.positionals.length > 0 && mode.acceptsPositionals !== true) {
+    throw new Error(`${command} accepts options only`);
+  }
 
   const configured = await configuredModelRegistry(parsed, environment);
   const registry = configured.registry;
@@ -1547,9 +1549,17 @@ async function handlerModeCommand(
   const providerSelection = selectProviderFamilies(oneFlag(parsed, 'providers'), registry, policy);
   const motionValue = oneFlag(parsed, 'motion')?.trim();
   const motion = motionValue === undefined || motionValue.length === 0 ? undefined : motionValue;
-  const sessionValue = oneFlag(parsed, 'session');
+  const sessionValue = oneFlag(parsed, 'session')?.trim();
+  // A key mode maps the harness's session identity to a store id itself, so the CLI validates
+  // only what it will use as a path: an id. A blank key is treated as absent.
+  const sessionKey =
+    mode.session === 'key' && sessionValue !== undefined && sessionValue.length > 0
+      ? sessionValue
+      : undefined;
   const sessionId =
-    sessionValue === undefined ? undefined : ModeSessionIdSchema.parse(sessionValue);
+    sessionValue === undefined || mode.session === 'key'
+      ? undefined
+      : ModeSessionIdSchema.parse(sessionValue);
   const billingMode = effectiveBillingMode(mode.spend.policy, resolveBillingMode(parsed, policy));
   const timeoutMs = integerFlag(parsed, 'timeout-ms', DEFAULT_TIMEOUT_MS, 1, 3_600_000);
   const recordsRoot = configured.stateRoot;
@@ -1645,6 +1655,7 @@ async function handlerModeCommand(
       providerFamilies: providerSelection.selected,
       ...(motion === undefined ? {} : { motion }),
       ...(sessionId === undefined ? {} : { sessionId }),
+      ...(sessionKey === undefined ? {} : { sessionKey }),
       timeoutMs,
       billingMode,
       ...(recordsRoot === undefined ? {} : { recordsRoot }),
@@ -1751,7 +1762,7 @@ function help(environment: CliFacadeEnvironment): CliFacadeResult {
     },
     handlerOptions: {
       '--session <id>':
-        'Continue an existing mode session. Ids look like ad-2026-09-15-3f9a1c; a mode mints one when the flag is absent.',
+        'Continue an existing mode session. Ids look like ad-2026-09-15-3f9a1c; a mode mints one when the flag is absent. advise takes any harness session key here and maps it to a log itself.',
       '--motion <text>':
         'Optional for the handler subcommands; pass --help to one of them for the flags it reads.',
     },
@@ -1863,6 +1874,18 @@ export async function runCliFacade(
 const STDIN_MOTION_COMMANDS: ReadonlySet<string> = new Set(['run', 'council', 'second-opinion']);
 
 /**
+ * `advise` reads a transcript window from stdin only when told to with `--transcript -`. Every
+ * other advisor verb is called from a hook whose own stdin is the hook payload, already consumed
+ * or still open, so reading it would either see nothing or hang.
+ */
+function transcriptOnStdin(argv: readonly string[]): boolean {
+  return argv.some(
+    (argument, index) =>
+      argument === '--transcript=-' || (argument === '--transcript' && argv[index + 1] === '-'),
+  );
+}
+
+/**
  * Whether this invocation should consume stdin.
  *
  * Reading stdin unconditionally makes every command block forever when stdin is an open
@@ -1877,6 +1900,7 @@ const STDIN_MOTION_COMMANDS: ReadonlySet<string> = new Set(['run', 'council', 's
 export function shouldReadStdin(argv: readonly string[], isTty: boolean): boolean {
   if (isTty) return false;
   const command = argv[0];
+  if (command === 'advise') return transcriptOnStdin(argv);
   if (command === undefined || !STDIN_MOTION_COMMANDS.has(command)) return false;
   return !argv.some((argument) => argument === '--motion' || argument.startsWith('--motion='));
 }

@@ -86,6 +86,8 @@ describe('minutes', () => {
     expect(text).toContain('## Spend');
     expect(text).toContain('general/sessions/run-1.json');
     expect(text).toContain('caller-undeclared');
+    expect(text).toContain('## Output');
+    expect(text).toContain('"outcome": "completed"');
   });
 
   test('names the file by date, mode and session', () => {
