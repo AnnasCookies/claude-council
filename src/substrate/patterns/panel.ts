@@ -178,9 +178,15 @@ function prepareSeats<T>(seats: readonly PanelSeatSpec[], input: PanelInput<T>):
 }
 
 function seatModel(seat: PanelSeatSpec, response: SeatResponse | undefined): PanelSeatModel {
-  // Identity is verified exactly as the envelope reads the runner's seats: an adapter returns
-  // `ok` only for a verified model, so an ok response is the proof and anything else is not.
-  const verified = response?.status === 'ok' ? response.actualModel : null;
+  // The runner attests model identity independently of whether the seat's answer was usable: a
+  // subscription seat can verify its model and then fail with `invalid-structured-answer`, and
+  // that verification must survive here rather than being discarded because the overall status
+  // was not `ok`. `verified` therefore reads the runner's own `modelIdentity`/`actualModel`, and
+  // falls back to unverified only when the runner itself did not attest either.
+  const verified =
+    response?.status === 'ok'
+      ? response.actualModel
+      : ((response?.modelIdentity === 'verified' ? response.actualModel : undefined) ?? null);
   return {
     requested: seat.model,
     verified,

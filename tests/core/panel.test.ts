@@ -108,6 +108,7 @@ function unsuccessful(
   status: 'failed' | 'skipped' | 'timed-out',
   code: string,
   message = `${code} happened`,
+  extra: Partial<{ actualModel: string; modelIdentity: 'verified' | 'unverified' }> = {},
 ): SeatResponse {
   return {
     status,
@@ -117,6 +118,7 @@ function unsuccessful(
     role: request.role,
     latencyMs: 1,
     error: { code, message, retryable: false },
+    ...extra,
   };
 }
 
@@ -286,6 +288,34 @@ describe('runPanel', () => {
       fallbacks: 0,
       refused: 0,
       stoppedAtCap: false,
+    });
+  });
+
+  test('a failed seat that verified its model before failing keeps that verification', async () => {
+    // The subscription-CLI adapter can confirm the responding model and still fail the seat with
+    // `invalid-structured-answer`: the runner's own attestation must survive onto a non-ok seat
+    // rather than being discarded because the overall status was not `ok`.
+    const seats = spreadSeats(['anthropic'], lenses(1), registry);
+    const anthropic = new FakeAdapter('anthropic', (request) =>
+      unsuccessful(
+        request,
+        'anthropic',
+        'failed',
+        'invalid-structured-answer',
+        'provider answer did not match the council schema',
+        { modelIdentity: 'verified', actualModel: registry.anthropic.primary },
+      ),
+    );
+    const result = await runPanel(
+      { adapters: { anthropic }, context: context() },
+      { seats, prompt: () => 'p', answer, spend: capped() },
+    );
+    const seat = result.seats[0];
+    if (seat?.status !== 'failed') throw new Error('unreachable');
+    expect(seat.model).toEqual({
+      requested: 'anthropic-primary',
+      verified: 'anthropic-primary',
+      verification: 'verified',
     });
   });
 
