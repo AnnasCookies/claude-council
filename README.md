@@ -368,7 +368,8 @@ families in `--providers` order, and every seat answers the same four fields abo
 - `--question "…"` — what the draft is meant to do. Optional; `--motion` is used when it is absent,
   and either is quoted to the readers as data rather than handed to them as an instruction.
 - `--records-root <path>` — where the session log is written and committed. Without it the run
-  reports `records-not-kept` in `degraded`, because this mode's record is its product.
+  reports `records-not-kept` in `degraded` and exits `4`, because this mode's record is its
+  product.
 
 The aggregation is counting: `tallies` holds `answered` and a yes/no pair per boolean field, and
 there is no other number in the output. Quotes are verbatim and attributed to the persona that
