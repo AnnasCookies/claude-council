@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { advisor } from '../../src/modes/advisor';
+import { NOTE_TEXT_LIMIT, TOOL_CALL_EXCERPT_LIMIT } from '../../src/modes/advisor/notes';
 import type { HandlerInput } from '../../src/modes';
 import {
   ModeSessionStore,
@@ -463,7 +464,7 @@ describe('advisor mode', () => {
     });
   });
 
-  test('two concurrent --end calls commit the log exactly once', async () => {
+  test('two concurrent --end calls close the log exactly once', async () => {
     await withRoot(async (root) => {
       const hold = await result(root, {
         flags: { hold: true, class: 'deploy', tool: 'wrangler deploy' },
@@ -471,10 +472,10 @@ describe('advisor mode', () => {
       const call = () => result(root, { flags: { end: true } });
       const outcomes = await Promise.all([call(), call()]);
       const ended = outcomes.map(
-        (outcome) => (outcome.output as { ended: { notes: number; committed: boolean } }).ended,
+        (outcome) => (outcome.output as { ended: { notes: number; closed: boolean } }).ended,
       );
-      expect(ended.filter((entry) => entry.committed)).toEqual([{ notes: 1, committed: true }]);
-      expect(ended.filter((entry) => !entry.committed)).toEqual([{ notes: 1, committed: false }]);
+      expect(ended.filter((entry) => entry.closed)).toEqual([{ notes: 1, closed: true }]);
+      expect(ended.filter((entry) => !entry.closed)).toEqual([{ notes: 1, closed: false }]);
       expect(outcomes.flatMap((outcome) => outcome.record.paths)).toEqual([
         ModeSessionStore.open(root).absolutePath('advisor', hold.session),
       ]);
@@ -549,14 +550,14 @@ describe('advisor mode', () => {
         flags: { hold: true, class: 'credential', tool: 'bw get password prod' },
       });
       const ended = await result(root, { flags: { end: true } });
-      expect(ended.output).toEqual({ ended: { notes: 1, committed: true } });
+      expect(ended.output).toEqual({ ended: { notes: 1, closed: true } });
       expect(ended.record).toEqual({
         session: `general/modes/advisor/${hold.session}.jsonl`,
         paths: [ModeSessionStore.open(root).absolutePath('advisor', hold.session)],
       });
       expect(ended.seats.map((seat) => seat.id)).toEqual(['anthropic/anthropic-primary#advisor']);
       const again = await result(root, { flags: { end: true } });
-      expect(again.output).toEqual({ ended: { notes: 1, committed: false } });
+      expect(again.output).toEqual({ ended: { notes: 1, closed: false } });
       expect(again.record.paths).toEqual([]);
       await expect(result(root, { flags: { ask: 'still there?' } })).rejects.toThrow(/has ended/);
       const status = await result(root, { flags: { status: true } });
@@ -623,6 +624,130 @@ describe('advisor mode', () => {
         note: { status: 'no-advice', reason: 'seat-silent', text: '' },
       });
       expect(outcome.degraded).toEqual(['note-no-advice: seat-silent']);
+    });
+  });
+
+  test('an emoji astride the excerpt limit still yields a note the log reads back', async () => {
+    await withRoot(async (root) => {
+      // 250 characters with the emoji on the 200-unit boundary. Cutting by code points produced a
+      // 201-unit excerpt: the output schema refused the note after it was already in the log, and
+      // every later verb on the session then failed while reading that log back.
+      const tool = `${'a'.repeat(198)}\u{1F600}${'b'.repeat(50)}`;
+      const outcome = await result(root, { flags: { hold: true, class: 'delete', tool } });
+      const note = (outcome.output as { note: { refersTo: { toolCall: string } } }).note;
+      expect(note.refersTo.toolCall.length).toBeLessThanOrEqual(TOOL_CALL_EXCERPT_LIMIT);
+      expect(Buffer.from(note.refersTo.toolCall, 'utf8').toString('utf8')).toBe(
+        note.refersTo.toolCall,
+      );
+      const status = await result(root, { flags: { status: true } });
+      expect(status.output).toMatchObject({ status: { exists: true, notes: 1 } });
+    });
+  });
+
+  test('a seat answer of nothing but emoji is cut to a note the log reads back', async () => {
+    await withRoot(async (root) => {
+      const emoji = '\u{1F600}'.repeat(700);
+      const outcome = await result(root, {
+        flags: { ask: 'What do you make of this?' },
+        adapters: {
+          anthropic: new FakeAdapter('anthropic', (r) => ok(r, 'anthropic', 'caution', emoji)),
+        },
+      });
+      const note = (outcome.output as { note: { text: string } }).note;
+      expect(note.text.length).toBeLessThanOrEqual(NOTE_TEXT_LIMIT);
+      expect(Buffer.from(note.text, 'utf8').toString('utf8')).toBe(note.text);
+      const status = await result(root, { flags: { status: true } });
+      expect(status.output).toMatchObject({ status: { exists: true, notes: 1 } });
+    });
+  });
+
+  test('a verb that reads no bare argument refuses one', async () => {
+    await withRoot(async (root) => {
+      const cases: Record<string, string | true>[] = [
+        { status: true },
+        { start: true },
+        { end: true },
+        { hold: true, class: 'delete', tool: 'rm -rf build' },
+        { watch: true, transcript: '-' },
+        { ask: 'q' },
+      ];
+      for (const flags of cases) {
+        const call = result(root, { flags, positionals: ['oops'], stdin: 'w' });
+        await expect(call).rejects.toThrow(/accepts options only/);
+      }
+      // The two verbs that do read one are unaffected.
+      await result(root, { flags: { note: true, from: 'omp' }, positionals: ['a', 'note'] });
+      const heeded = await result(root, { flags: { heed: 'n-1' }, positionals: ['yes'] });
+      expect(heeded.output).toEqual({ heeded: { id: 'n-1', value: 'yes' } });
+    });
+  });
+
+  test('a cadence skip is routine, not a degraded run', async () => {
+    await withRoot(async (root) => {
+      const anthropic = cautious('anthropic');
+      const watch = () =>
+        result(root, {
+          flags: { watch: true, every: '2', transcript: '-' },
+          stdin: 'user: keep going',
+          adapters: { anthropic },
+        });
+      const skipped = await watch();
+      expect(skipped.output).toMatchObject({ note: { status: 'skipped', reason: 'cadence' } });
+      // Consulting on one call in N is what --every asks for; marking the other N-1 degraded
+      // would leave the field saying nothing about the runs that really were.
+      expect(skipped.degraded).toEqual([]);
+      expect((await watch()).degraded).toEqual([]);
+      // A seat that could not be reached still is a degradation.
+      const down = await result(root, {
+        flags: { ask: 'q' },
+        adapters: {},
+        families: ['anthropic'],
+      });
+      const reason = (down.output as { note: { reason: string } }).note.reason;
+      expect(down.degraded).toEqual([`note-skipped: ${reason}`]);
+    });
+  });
+
+  test('--start on an ended session is refused', async () => {
+    await withRoot(async (root) => {
+      await result(root, { flags: { start: true } });
+      await result(root, { flags: { end: true } });
+      // Reporting a start would be a lie: every note verb on the log is refused from here on.
+      await expect(result(root, { flags: { start: true } })).rejects.toThrow(/has ended/);
+    });
+  });
+
+  test('--transcript <path> reads a bounded tail of a large file', async () => {
+    await withRoot(async (root) => {
+      const anthropic = cautious('anthropic');
+      const path = join(root, 'transcript.txt');
+      const filler = `${'x'.repeat(1_023)}\n`;
+      // Comfortably past the 256 KiB tail bound, so the head is never read at all.
+      await Bun.write(path, `HEAD-SENTINEL\n${filler.repeat(400)}TAIL-SENTINEL\n`);
+      const outcome = await result(root, {
+        flags: { watch: true, every: '1', transcript: path },
+        adapters: { anthropic },
+      });
+      expect(outcome.output).toMatchObject({ note: { status: 'ok' } });
+      const prompt = anthropic.calls[0]?.prompt ?? '';
+      expect(prompt).toContain('TAIL-SENTINEL');
+      expect(prompt).not.toContain('HEAD-SENTINEL');
+      // The window itself is still capped at 24 000 characters; the prompt is that plus framing.
+      expect(prompt.length).toBeLessThan(26_000);
+
+      // A file under the bound is unchanged: the whole of it is the window.
+      const small = join(root, 'small.txt');
+      await Bun.write(small, 'user: SMALL-HEAD\nassistant: SMALL-TAIL\n');
+      const short = await result(root, {
+        flags: { watch: true, every: '1', transcript: small },
+        adapters: { anthropic },
+      });
+      expect(short.output).toMatchObject({ note: { status: 'ok' } });
+      expect(anthropic.calls[1]?.prompt).toContain('SMALL-HEAD');
+      expect(anthropic.calls[1]?.prompt).toContain('SMALL-TAIL');
+      await expect(
+        result(root, { flags: { watch: true, every: '1', transcript: join(root, 'gone.txt') } }),
+      ).rejects.toThrow(/Unable to read transcript window/);
     });
   });
 });

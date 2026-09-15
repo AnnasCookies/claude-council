@@ -4,6 +4,7 @@ import {
   NOTE_TEXT_LIMIT,
   RISK_CLASSES,
   RiskClassSchema,
+  TOOL_CALL_EXCERPT_LIMIT,
   cadenceDue,
   excerpt,
   nextNoteId,
@@ -168,5 +169,24 @@ describe('advisor notes', () => {
     const result = excerpt('abc😀fgh', 5);
     expect(result.endsWith('…')).toBe(true);
     expect(Buffer.from(result, 'utf8').toString('utf8')).toBe(result);
+  });
+
+  test('excerpt never exceeds the code units the note schema counts', () => {
+    // The schema's `max` counts UTF-16 units. A cut that counted only code points returned a
+    // 201-unit excerpt for a 200-unit limit whenever an emoji sat on the boundary, and the note
+    // was then refused by the output schema after it had already been appended to the log.
+    for (const offset of [196, 197, 198, 199, 200, 201]) {
+      const cut = excerpt(`${'a'.repeat(offset)}😀${'b'.repeat(60)}`, TOOL_CALL_EXCERPT_LIMIT);
+      expect([offset, cut.length <= TOOL_CALL_EXCERPT_LIMIT]).toEqual([offset, true]);
+      // A half-cut surrogate pair would not survive a UTF-8 round trip.
+      expect(Buffer.from(cut, 'utf8').toString('utf8')).toBe(cut);
+      expect(
+        AdvisorNoteSchema.safeParse(note('n-1', { refersTo: { toolCall: cut } })).success,
+      ).toBe(true);
+    }
+    const allEmoji = excerpt('😀'.repeat(700), NOTE_TEXT_LIMIT);
+    expect(allEmoji.length).toBeLessThanOrEqual(NOTE_TEXT_LIMIT);
+    expect(Buffer.from(allEmoji, 'utf8').toString('utf8')).toBe(allEmoji);
+    expect(AdvisorNoteSchema.safeParse(note('n-1', { text: allEmoji })).success).toBe(true);
   });
 });

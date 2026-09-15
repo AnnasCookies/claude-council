@@ -54,6 +54,8 @@ const MAX_WINDOW_MS = 60_000;
 const SEAT_CEILING_MS = 120_000;
 /** The tail is what the agent is doing now; an unbounded window would cost a whole session per pass. */
 const WINDOW_CHARS = 24_000;
+/** How much of a `--transcript <path>` file is read at all, comfortably above `WINDOW_CHARS`. */
+const WINDOW_TAIL_BYTES = 256 * 1024;
 
 const VERBS = ['watch', 'hold', 'ask', 'heed', 'note', 'start', 'end', 'status'] as const;
 type Verb = (typeof VERBS)[number];
@@ -64,12 +66,24 @@ function isNoteVerb(verb: Verb): verb is NoteVerb {
   return verb === 'watch' || verb === 'hold' || verb === 'ask' || verb === 'note';
 }
 
+/**
+ * The only verbs that read a bare argument: `--note` takes the note text and `--heed` takes the
+ * answer. `acceptsPositionals` turns the CLI's own refusal off for the whole `advise` command,
+ * which is what a per-verb rule needs, so the rule has to live here — without it `advise --status
+ * oops` exits 0 and silently does something other than what was typed.
+ */
+const POSITIONAL_VERBS: ReadonlySet<Verb> = new Set<Verb>(['note', 'heed']);
+
 export const AdvisorOutputSchema = z.union([
   z.strictObject({ note: AdvisorNoteSchema }),
   z.strictObject({ heeded: z.strictObject({ id: NoteIdSchema, value: HeededSchema }) }),
   z.strictObject({ started: z.strictObject({ session: ModeSessionIdSchema }) }),
   z.strictObject({
-    ended: z.strictObject({ notes: z.number().int().nonnegative(), committed: z.boolean() }),
+    // `closed`, not `committed`: this says the log had not already ended and this call appended
+    // the `ended` line. Whether the record was then committed to a repository is the CLI's own
+    // step, taken after the mode returns and free to fail — a records root outside a git work
+    // tree reports `record.committed: false` — so the commit fact is `record.committed` alone.
+    ended: z.strictObject({ notes: z.number().int().nonnegative(), closed: z.boolean() }),
   }),
   z.strictObject({
     status: z.strictObject({
@@ -203,7 +217,15 @@ async function windowText(input: HandlerInput): Promise<string> {
   } else {
     const path = isAbsolute(source) ? source : resolve(input.context.cwd, source);
     try {
-      text = await Bun.file(path).text();
+      // Only the tail is ever used, and a harness transcript grows without bound, so the whole
+      // file is never read: a hold has a window of seconds and reading hundreds of megabytes to
+      // keep 24 000 characters would spend it on I/O. Slicing at a byte offset can cut a UTF-8
+      // sequence in half, but the tail bound is far larger than the character bound below (a
+      // character is at most four bytes, so 256 KiB is at least 65 536 characters), so the one
+      // replacement character that could appear at the front is always cut off again.
+      const file = Bun.file(path);
+      const size = file.size;
+      text = await (size > WINDOW_TAIL_BYTES ? file.slice(size - WINDOW_TAIL_BYTES) : file).text();
     } catch (error) {
       throw new Error(`Unable to read transcript window: ${source}`, { cause: error });
     }
@@ -366,6 +388,9 @@ async function consult(
   }
   const selection = await selectSeatFamily(request.families, input.adapters, input.context);
   if (selection.family === null) return unserved(base, 'skipped', selection.reason);
+  // `input.spend` is deliberately not forwarded: `consultSeat` builds its own
+  // `{ policy: 'never-metered' }` for `runPanel`, so "the advisor never spends a metered key" is
+  // a property of the mode itself rather than of whatever spend the caller happened to assemble.
   const consultation = await consultSeat({
     family: selection.family,
     adapters: input.adapters,
@@ -394,12 +419,26 @@ async function consult(
   };
 }
 
+/**
+ * What the envelope reports as degraded about a note. A cadence skip is not on the list: the
+ * whole point of `--every N` is that N-1 calls in N do not consult a seat, so reporting it would
+ * mark two of every three `--watch` calls degraded and leave the field saying nothing about the
+ * runs that really were. A seat that was unavailable, refused or silent still is degradation.
+ */
+function degradationOf(note: AdvisorNote): readonly string[] {
+  if (note.status === 'ok' || note.reason === 'cadence') return [];
+  return [`note-${note.status}: ${note.reason ?? 'unknown'}`];
+}
+
 async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   const sessions = input.sessions;
   if (sessions === null) {
     throw new Error('advise requires --records-root: the note log is the record');
   }
   const verb = verbOf(input);
+  if (input.positionals.length > 0 && !POSITIONAL_VERBS.has(verb)) {
+    throw new Error(`advise --${verb} accepts options only`);
+  }
   // A note verb's own flags are read before the session is resolved, because resolving a harness
   // key binds an alias: a request about to be refused for a missing --tool or an unknown --class
   // must not leave a minted session id bound to the key behind it.
@@ -427,6 +466,9 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     });
   }
   if (verb === 'start') {
+    // An ended log is terminal and already committed, so `--start` on one cannot mean what it
+    // says: it would report the session as started while every note verb on it is refused.
+    if (log.ended) throw new Error(`Advisor session ${session.id} has ended; start a new session`);
     if (!session.exists) {
       await sessions.append(ADVISOR_MODE, session.id, {
         at,
@@ -443,15 +485,15 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   if (verb === 'end') {
     if (!session.exists) throw new Error(`Unknown advisor session: ${session.id}`);
     // The only verb that hands the log to the CLI's commit path: the session's note log is its
-    // terminal record, committed once, when the session ends. Whether it has already ended is
+    // terminal record, committed once, when the session ends. Whether it had already ended is
     // decided from the log under the store's write lock rather than from the read above, so two
-    // --end calls racing each other cannot both report a commit of the same log.
-    let ended = { notes: log.notes.length, committed: false };
+    // --end calls racing each other cannot both report that they closed the same log.
+    let ended = { notes: log.notes.length, closed: false };
     let seats: readonly EnvelopeSeat[] = log.seats;
     const written = await sessions.appendDerived(ADVISOR_MODE, session.id, (events) => {
       const current = readAdvisorLog(events);
       seats = current.seats;
-      ended = { notes: current.notes.length, committed: !current.ended };
+      ended = { notes: current.notes.length, closed: !current.ended };
       return current.ended ? null : { at, kind: 'ended', data: { notes: current.notes.length } };
     });
     return completed({
@@ -491,13 +533,19 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   // Two hooks firing at once would otherwise both mint n-1, and a log carrying a duplicate id
   // fails every later read, so the session could never again be read, heeded or ended. The seat
   // is consulted before the lock is taken; only what depends on the log is decided under it.
+  // It is the harness hook's own outer timeout, never --window-ms, that bounds how long a call
+  // can take in total: the budget covers the seat, and the scope lock below can wait behind
+  // another call in the same scope after the budget has already been spent.
   let note: AdvisorNote = { ...consulted.note, id: nextNoteId(log) };
   await sessions.appendDerived(ADVISOR_MODE, session.id, (events) => {
     const current = readAdvisorLog(events);
     if (current.ended) {
       throw new Error(`Advisor session ${session.id} has ended; start a new session`);
     }
-    note = { ...consulted.note, id: nextNoteId(current) };
+    // Validated against the same schema the CLI validates the output with, and inside the lock,
+    // so a note that schema would refuse is never appended. Refusing it here costs one note; the
+    // log rejecting it afterwards costs every later verb on the session, which reads the log.
+    note = AdvisorNoteSchema.parse({ ...consulted.note, id: nextNoteId(current) });
     return { at, kind: 'note', data: { note, seat: consulted.seat } };
   });
   return completed({
@@ -507,7 +555,7 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     seats: consulted.seat === null ? [] : [consulted.seat],
     rounds: consulted.rounds,
     spend: consulted.spend,
-    degraded: note.status === 'ok' ? [] : [`note-${note.status}: ${note.reason ?? 'unknown'}`],
+    degraded: degradationOf(note),
   });
 }
 

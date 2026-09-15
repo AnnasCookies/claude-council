@@ -137,16 +137,26 @@ export function cadenceDue(log: AdvisorLog, every: number): boolean {
 }
 
 /**
- * `limit` counts code points, not UTF-16 code units: slicing on code units could land inside a
- * surrogate pair (an astral character such as an emoji) and leave a lone surrogate behind, which
- * silently becomes U+FFFD when the log is re-encoded as UTF-8 while the schema's `max` still
- * validates the string. Spreading the string iterates by code point, so the cut always falls on
- * a character boundary.
+ * Cut `text` to at most `limit` UTF-16 code units without ever splitting a character.
+ *
+ * Both halves of that matter, and counting only one of them is a defect either way. Slicing on
+ * code units alone can land inside a surrogate pair (an astral character such as an emoji) and
+ * leave a lone surrogate behind, which becomes U+FFFD when the log is re-encoded as UTF-8.
+ * Counting only code points is what `AdvisorNoteSchema` does not do: its `max` counts code
+ * units, so a 200-code-point excerpt holding one emoji is 201 units, the schema then refuses a
+ * note the kernel has already appended, and every later verb on that session fails while reading
+ * the log back. The loop therefore walks characters and counts the units each one costs, leaving
+ * room for the one-unit ellipsis.
  */
 export function excerpt(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
-  const codePoints = [...flat];
-  return codePoints.length <= limit ? flat : `${codePoints.slice(0, limit - 1).join('')}…`;
+  if (flat.length <= limit) return flat;
+  let kept = '';
+  for (const character of flat) {
+    if (kept.length + character.length > limit - 1) break;
+    kept += character;
+  }
+  return `${kept}…`;
 }
 
 /**

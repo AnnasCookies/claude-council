@@ -15,7 +15,9 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   followed, `--start`, `--status` and `--end` manage the session. `--session` takes the harness's
   own session key and the kernel maps it to a note log under `<scope>/modes/advisor/`. The seat
   never reaches a metered key; an unavailable seat, a cadence skip, a policy block and a silent
-  seat are all recorded as notes. Only `--end` commits the log and renders minutes. The plugin
+  seat are all recorded as notes. Only `--end` hands the log to the commit path and renders
+  minutes; its output reports `ended.closed` (this call appended the `ended` line) while the
+  envelope's `record.committed` carries whether the commit itself succeeded. The plugin
   command is `/convene:advise`.
 - **Minutes carry the output block.** `renderMinutes` adds an `## Output` section with the mode's
   own output, so a handler mode's minutes hold its result.

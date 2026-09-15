@@ -22488,10 +22488,14 @@ var ModeSessionScopeSchema = exports_external.discriminatedUnion("scope", [
   exports_external.strictObject({ scope: exports_external.literal("project"), projectId: ProjectIdSchema })
 ]);
 var ModeSessionKeySchema = exports_external.string().min(1).max(256).refine((key) => !/[\p{Cc}\p{Cf}]/u.test(key), "A session key has no control characters");
+var ModeSessionAliasesSchema = exports_external.preprocess((value) => typeof value === "object" && value !== null ? Object.entries(value) : value, exports_external.array(exports_external.tuple([ModeSessionKeySchema, ModeSessionIdSchema]))).transform((entries) => Object.fromEntries(entries));
 var ModeSessionAliasIndexSchema = exports_external.strictObject({
   schemaVersion: exports_external.literal(1),
-  aliases: exports_external.record(ModeSessionKeySchema, ModeSessionIdSchema)
+  aliases: ModeSessionAliasesSchema
 });
+function ownAlias(aliases, key) {
+  return Object.hasOwn(aliases, key) ? aliases[key] : undefined;
+}
 function newModeSessionId(prefix, now = new Date().toISOString()) {
   const safePrefix = ModeSessionPrefixSchema.parse(prefix);
   const day = TimestampSchema7.parse(now).slice(0, 10);
@@ -22569,14 +22573,14 @@ class ModeSessionStore {
   async lookupAlias(mode, key) {
     const safeKey = ModeSessionKeySchema.parse(key);
     const index = await this.readAliasIndex(this.aliasPath(mode));
-    return index.aliases[safeKey];
+    return ownAlias(index.aliases, safeKey);
   }
   async bindAlias(mode, key, prefix, now) {
     const safeKey = ModeSessionKeySchema.parse(key);
     const path = this.aliasPath(mode);
     return withScopeWriteLock(dirname2(path), async () => {
       const index = await this.readAliasIndex(path);
-      const existing = index.aliases[safeKey];
+      const existing = ownAlias(index.aliases, safeKey);
       if (existing !== undefined)
         return { sessionId: existing, created: false };
       const sessionId = newModeSessionId(prefix, now);
@@ -22934,8 +22938,15 @@ function cadenceDue(log, every) {
 }
 function excerpt(text, limit) {
   const flat = text.replace(/\s+/g, " ").trim();
-  const codePoints = [...flat];
-  return codePoints.length <= limit ? flat : `${codePoints.slice(0, limit - 1).join("")}\u2026`;
+  if (flat.length <= limit)
+    return flat;
+  let kept = "";
+  for (const character of flat) {
+    if (kept.length + character.length > limit - 1)
+      break;
+    kept += character;
+  }
+  return `${kept}\u2026`;
 }
 function safeExcerpt(text, limit) {
   return excerpt(scanAndRedact(text).redacted, limit);
@@ -23096,16 +23107,18 @@ var MIN_WINDOW_MS = 100;
 var MAX_WINDOW_MS = 60000;
 var SEAT_CEILING_MS = 120000;
 var WINDOW_CHARS = 24000;
+var WINDOW_TAIL_BYTES = 256 * 1024;
 var VERBS = ["watch", "hold", "ask", "heed", "note", "start", "end", "status"];
 function isNoteVerb(verb) {
   return verb === "watch" || verb === "hold" || verb === "ask" || verb === "note";
 }
+var POSITIONAL_VERBS = new Set(["note", "heed"]);
 var AdvisorOutputSchema = exports_external.union([
   exports_external.strictObject({ note: AdvisorNoteSchema }),
   exports_external.strictObject({ heeded: exports_external.strictObject({ id: NoteIdSchema, value: HeededSchema }) }),
   exports_external.strictObject({ started: exports_external.strictObject({ session: ModeSessionIdSchema }) }),
   exports_external.strictObject({
-    ended: exports_external.strictObject({ notes: exports_external.number().int().nonnegative(), committed: exports_external.boolean() })
+    ended: exports_external.strictObject({ notes: exports_external.number().int().nonnegative(), closed: exports_external.boolean() })
   }),
   exports_external.strictObject({
     status: exports_external.strictObject({
@@ -23198,7 +23211,9 @@ async function windowText(input) {
   } else {
     const path = isAbsolute7(source) ? source : resolve9(input.context.cwd, source);
     try {
-      text = await Bun.file(path).text();
+      const file2 = Bun.file(path);
+      const size = file2.size;
+      text = await (size > WINDOW_TAIL_BYTES ? file2.slice(size - WINDOW_TAIL_BYTES) : file2).text();
     } catch (error51) {
       throw new Error(`Unable to read transcript window: ${source}`, { cause: error51 });
     }
@@ -23342,12 +23357,20 @@ async function consult(input, request, log, at) {
     rounds: 1
   };
 }
+function degradationOf(note) {
+  if (note.status === "ok" || note.reason === "cadence")
+    return [];
+  return [`note-${note.status}: ${note.reason ?? "unknown"}`];
+}
 async function handle(input) {
   const sessions = input.sessions;
   if (sessions === null) {
     throw new Error("advise requires --records-root: the note log is the record");
   }
   const verb = verbOf(input);
+  if (input.positionals.length > 0 && !POSITIONAL_VERBS.has(verb)) {
+    throw new Error(`advise --${verb} accepts options only`);
+  }
   const request = isNoteVerb(verb) ? await readRequest(verb, input) : null;
   const session2 = await resolveSession(input, sessions, verb);
   if (session2 === null) {
@@ -23371,6 +23394,8 @@ async function handle(input) {
     });
   }
   if (verb === "start") {
+    if (log.ended)
+      throw new Error(`Advisor session ${session2.id} has ended; start a new session`);
     if (!session2.exists) {
       await sessions.append(ADVISOR_MODE, session2.id, {
         at,
@@ -23387,12 +23412,12 @@ async function handle(input) {
   if (verb === "end") {
     if (!session2.exists)
       throw new Error(`Unknown advisor session: ${session2.id}`);
-    let ended = { notes: log.notes.length, committed: false };
+    let ended = { notes: log.notes.length, closed: false };
     let seats = log.seats;
     const written = await sessions.appendDerived(ADVISOR_MODE, session2.id, (events) => {
       const current = readAdvisorLog(events);
       seats = current.seats;
-      ended = { notes: current.notes.length, committed: !current.ended };
+      ended = { notes: current.notes.length, closed: !current.ended };
       return current.ended ? null : { at, kind: "ended", data: { notes: current.notes.length } };
     });
     return completed({
@@ -23436,7 +23461,7 @@ async function handle(input) {
     if (current.ended) {
       throw new Error(`Advisor session ${session2.id} has ended; start a new session`);
     }
-    note = { ...consulted.note, id: nextNoteId(current) };
+    note = AdvisorNoteSchema.parse({ ...consulted.note, id: nextNoteId(current) });
     return { at, kind: "note", data: { note, seat: consulted.seat } };
   });
   return completed({
@@ -23446,7 +23471,7 @@ async function handle(input) {
     seats: consulted.seat === null ? [] : [consulted.seat],
     rounds: consulted.rounds,
     spend: consulted.spend,
-    degraded: note.status === "ok" ? [] : [`note-${note.status}: ${note.reason ?? "unknown"}`]
+    degraded: degradationOf(note)
   });
 }
 var advisor = {

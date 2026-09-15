@@ -264,7 +264,7 @@ describe('advise through the CLI', () => {
       const ended = await runCliFacade(advise(root, '--session', KEY, '--end'), environment);
       expect(ended.exitCode).toBe(0);
       const payload = JSON.parse(ended.stdout);
-      expect(payload.envelope.output).toEqual({ ended: { notes: 1, committed: true } });
+      expect(payload.envelope.output).toEqual({ ended: { notes: 1, closed: true } });
       expect(payload.envelope.record.session).toBe(`general/modes/advisor/${session}.jsonl`);
       expect(payload.envelope.record.committed).toBe(true);
       expect(payload.envelope.record.commitSha).toMatch(/^[a-f0-9]{40}$/);
@@ -287,13 +287,33 @@ describe('advise through the CLI', () => {
       const again = await runCliFacade(advise(root, '--session', KEY, '--end'), environment);
       expect(again.exitCode).toBe(0);
       const repeated = JSON.parse(again.stdout);
-      expect(repeated.envelope.output).toEqual({ ended: { notes: 1, committed: false } });
+      expect(repeated.envelope.output).toEqual({ ended: { notes: 1, closed: false } });
       expect(repeated.envelope.record).toEqual({
         session: `general/modes/advisor/${session}.jsonl`,
       });
       const late = await runCliFacade(advise(root, '--session', KEY, '--ask', 'q'), environment);
       expect(late.exitCode).toBe(2);
       expect(late.stderr).toContain('has ended');
+    });
+  });
+
+  test('--end reports closing the log apart from committing it', async () => {
+    await withRoot(async (root) => {
+      // No git work tree here, so the CLI's commit step cannot run. `ended.closed` is the mode's
+      // own fact — this call appended the `ended` line — and `record.committed` is the CLI's.
+      const fixture = await fixtureEnvironment(root);
+      await runCliFacade(
+        advise(root, '--session', KEY, '--hold', '--class', 'deploy', '--tool', 'wrangler deploy'),
+        fixture.environment,
+      );
+      const ended = await runCliFacade(
+        advise(root, '--session', KEY, '--end'),
+        fixture.environment,
+      );
+      expect(ended.exitCode).toBe(0);
+      const payload = JSON.parse(ended.stdout);
+      expect(payload.envelope.output).toEqual({ ended: { notes: 1, closed: true } });
+      expect(payload.envelope.record.committed).toBe(false);
     });
   });
 
@@ -316,6 +336,10 @@ describe('advise through the CLI', () => {
         [['advise', '--session', KEY, '--ask', 'q'], '--records-root'],
         [advise(root, '--session', KEY, '--heed', 'n-1', 'yes'), 'Unknown advisor session'],
         [advise(root, '--session', KEY, '--bogus', '1'), 'Unknown option'],
+        // `acceptsPositionals` turns the CLI's own refusal off for the whole command, so a
+        // stray argument on a verb that reads none used to exit 0 and do something else.
+        [advise(root, '--session', KEY, '--status', 'oops'), 'accepts options only'],
+        [advise(root, '--session', KEY, '--ask', 'q', 'and', 'more'), 'accepts options only'],
       ];
       for (const [argv, message] of cases) {
         const result = await runCliFacade(argv, fixture.environment);
