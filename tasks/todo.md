@@ -27,7 +27,7 @@ is cut over on the rig.
       map, moved, motions with support and opposition, no ruling ever.
 - [ ] 5. Triage: `triage`, schema-bound per-item verdicts, one or two seats, disagreement routed
       to a human, `sub-only`, `unprocessed` never routed.
-- [ ] 6. Audience: `audience`, persona seats react to a hashed draft, structured fields, tallies
+- [x] 6. Audience: `audience`, persona seats react to a hashed draft, structured fields, tallies
       as counts, verbatim attributed quotes, `sub-only`.
 - [ ] 7. Release: bump `2026.9.7`, CHANGELOG, README and ARCHITECTURE; cut over the rig through
       the updater; verify through the shim.

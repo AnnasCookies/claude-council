@@ -75,6 +75,16 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   puts a follow-up to exactly one consultant; `--forward <lens>` is the only way another
   consultant's report reaches it. The session is an append-only JSONL log under the records root,
   committed before the run reports success, and the spend cap covers the whole session.
+- **Audience mode.** `convene audience --personas ops-manager,new-starter,sceptic --draft docs/announcement.md`
+  seats one cheap voice per supplied persona, each reading the same hashed draft blind, and returns
+  counts of their structured reactions (`clear`, `wouldAct`, `stoppedAt`) beside their verbatim
+  quotes. The mode never rewrites the draft and produces no number but a count. Spend is
+  `sub-only`: a family whose only route is metered is not seated and is named in `degraded`, and a
+  voice whose subscription could not answer is `skipped`, leaving `tallies.answered` below the
+  persona count. `--personas-file <path>` takes a JSON array of `{ name, description }` for briefs
+  that need commas, `--question` says what the draft is for, and with `--records-root` the run
+  writes one append-only session log holding the draft's path and SHA-256 and one event per voice,
+  committed before the run reports success. The plugin command is `/convene:audience`.
 
 ## 2026.9.6
 

@@ -504,7 +504,9 @@ Records: the reactions with the draft's hash.
 **Example.**
 
 ```text
-council audience --personas ops-manager,new-starter,sceptic --draft docs/announcement.md   # new
+convene audience --personas ops-manager,new-starter,sceptic --draft docs/announcement.md
+convene audience --personas-file readers.json --draft docs/announcement.md \
+  --question "Will an ops manager act on this?" --records-root ~/.claude/council --json
 ```
 
 ## Entry points
