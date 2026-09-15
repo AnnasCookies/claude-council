@@ -80,9 +80,11 @@ export interface IdeationSessionState {
  * second prompt or an event this mode did not write all mean the file is not the session it claims
  * to be, and continuing would append to a record nobody can reproduce.
  *
- * A pass whose cluster event is missing — a crash between the two appends — is not an error: the
- * last cluster event recorded still governs the numbering, and the next pass re-clusters every idea
- * anyway, so the only thing that must survive is the counter that stops a retired id coming back.
+ * A pass whose cluster event is missing is not an error. The mode publishes the pass and its
+ * clustering in one write, so a live run no longer produces that shape; a log truncated by a full
+ * disk, or edited by hand, still can. The last cluster event recorded governs the numbering, and
+ * the next pass re-clusters every idea anyway, so the only thing that must survive is the counter
+ * that stops a retired id coming back.
  */
 export function readIdeationSession(events: readonly ModeSessionEvent[]): IdeationSessionState {
   const passes: IdeationPass[] = [];

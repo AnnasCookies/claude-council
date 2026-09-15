@@ -38,7 +38,8 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   log under the records root, which the mode requires. Seats are cheap by default: each family's
   first registered fallback where it lists one, the primary otherwise, and the dearer primary is
   dropped from the fallbacks so a substituted model fails identity rather than billing quietly.
-  See `docs/modes.md` and the Ideation section of the README.
+  See `docs/modes.md` and the Ideation section of the README. The plugin command is
+  `/convene:ideate`.
 
 ## 2026.9.6
 

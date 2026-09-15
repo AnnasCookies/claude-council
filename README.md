@@ -107,7 +107,7 @@ bun --no-install dist/cli.js doctor --json
 bun --no-install dist/cli.js health --json
 ```
 
-The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
+The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 
@@ -192,7 +192,7 @@ same family does not raise it. `--spend-cap <n>` overrides it.
 
 Every idea from every pass is kept, including the ones you did not pick. `ideate` needs a records
 root for that reason and exits `2` without one; each pass appends a `pass` line and a `cluster`
-line to `<records-root>/general/modes/ideation/<session>.jsonl`, and the terminal record is
+line to `<records-root>/<scope>/modes/ideation/<session>.jsonl`, and the terminal record is
 committed before the run reports success.
 
 The clustering is the engine's own and is labelled as such. Ideas are lowercased, stripped of

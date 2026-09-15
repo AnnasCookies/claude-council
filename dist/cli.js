@@ -23843,13 +23843,15 @@ function resolveSeatLenses(input) {
     throw new Error(`--seats ${seats} is fewer than the ${input.named.length} lenses named`);
   }
   const pool = assertDistinct(input.named ?? CATALOGUE_LENSES.slice(0, seats));
-  return Array.from({ length: seats }, (_, index) => {
+  const seated = Array.from({ length: seats }, (_, index) => {
     const base = pool[index % pool.length];
     if (base === undefined)
       throw new Error("A room needs at least one lens");
     const cycle = Math.floor(index / pool.length) + 1;
     return cycle === 1 ? base : PanelLensSchema.parse({ name: `${base.name}-${cycle}`, description: base.description });
   });
+  assertDistinct(seated);
+  return seated;
 }
 function parseModelOverrides(value) {
   const overrides = new Map;
@@ -23980,6 +23982,7 @@ var DEFAULT_SEATS = 12;
 var MAX_SEATS = 24;
 var DEFAULT_IDEAS_PER_SEAT = 3;
 var MAX_IDEAS_PER_SEAT = 10;
+var MAX_SESSION_IDEAS = 2000;
 var IdeationAnswerSchema = exports_external.strictObject({
   ideas: exports_external.array(exports_external.strictObject({ text: exports_external.string().trim().min(1) })).min(1)
 });
@@ -24132,6 +24135,10 @@ async function handle2(input) {
     const settled = events.length === 0 ? null : readIdeationSession(events);
     if (settled !== null && settled.prompt !== prompt) {
       throw new Error("This session was opened on a different prompt; open a new session to ideate on another one");
+    }
+    const held = settled?.ideas.length ?? 0;
+    if (held + offered.length > MAX_SESSION_IDEAS) {
+      throw new Error(`An ideation session holds at most ${MAX_SESSION_IDEAS} ideas; this one holds ${held} and this pass would add ${offered.length}. Open a new session by leaving --session off.`);
     }
     let number4 = settled?.nextIdeaNumber ?? 1;
     const ideas = offered.map((idea) => IdeaSchema.parse({ id: `i-${number4++}`, seat: idea.seat, lens: idea.lens, text: idea.text }));
