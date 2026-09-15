@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -130,6 +130,27 @@ describe('the briefing pack', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  // Windows symlink creation needs either Developer Mode or an elevated process, which a CI
+  // runner does not grant by default; the containment rule itself is platform-independent, so the
+  // gap in coverage is the symlink fixture, not the code under test.
+  test.skipIf(process.platform === 'win32')(
+    'a symlink inside the working directory pointing outside it is refused like any other escape',
+    async () => {
+      const root = await temporaryProject();
+      const outside = await temporaryProject();
+      try {
+        await Bun.write(join(outside, 'secret.md'), '# outside the working directory\n');
+        await symlink(join(outside, 'secret.md'), join(root, 'link.md'));
+        await expect(collectContext(['link.md'], root)).rejects.toThrow(
+          /inside the working directory/,
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+      }
+    },
+  );
 
   test('renders the pack as untrusted evidence with the boundary instruction once', async () => {
     const root = await temporaryProject();
