@@ -39,14 +39,29 @@ import {
 const DEFAULT_SEATS = 12;
 /**
  * The panel holds a bounded number of seats open at once — six by default, and its own ceiling is
- * 24 — so this is not the concurrency limit. It is a bound on the room: every seat costs a call
- * whether or not it is in flight, and every idea it returns is re-clustered against every other
- * on this pass and on every later one. Raising it is a decision about cost and about how much a
- * human can read back, not about what one machine can hold open.
+ * 24 — so this is not the concurrency limit, and it is not what bounds the clustering either. One
+ * pass is at most `MAX_SEATS * MAX_IDEAS_PER_SEAT` ideas, but a pass re-clusters every idea the
+ * session holds, and nothing bounds the number of passes: the cost that matters is the session
+ * total, which `MAX_SESSION_IDEAS` bounds. This is a bound on the room a human reads back in one
+ * sitting, and on what one invocation pays for.
  */
 const MAX_SEATS = 24;
 const DEFAULT_IDEAS_PER_SEAT = 3;
 const MAX_IDEAS_PER_SEAT = 10;
+/**
+ * How many ideas one session may accumulate, over every pass.
+ *
+ * The clustering is quadratic in the session total and it runs inside the records store's write
+ * lock, because the ids and the grouping have to be settled from the log rather than from a stale
+ * read. That lock gives a waiting call about two seconds of retries (`store.ts`: 200 retries at
+ * 10 ms) and treats a holder as stale after thirty. Measured on one developer machine, the
+ * lock-held parse and clustering cost roughly 0.7 s at 2000 accumulated ideas and roughly 2.9 s at
+ * 4000 — so past this ceiling a concurrent `ideate --session <same>` starts failing with a raw
+ * lock error, and far past it the lock is taken as stale and a pass is silently lost. Refusing the
+ * pass with an error that says to open a new session is the honest failure; a session that big is
+ * past what a human reads back anyway.
+ */
+const MAX_SESSION_IDEAS = 2000;
 
 /**
  * The seat's answer. The schema deliberately sets no maximum: a seat that returns more than it was
@@ -313,6 +328,12 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     if (settled !== null && settled.prompt !== prompt) {
       throw new Error(
         'This session was opened on a different prompt; open a new session to ideate on another one',
+      );
+    }
+    const held = settled?.ideas.length ?? 0;
+    if (held + offered.length > MAX_SESSION_IDEAS) {
+      throw new Error(
+        `An ideation session holds at most ${MAX_SESSION_IDEAS} ideas; this one holds ${held} and this pass would add ${offered.length}. Open a new session by leaving --session off.`,
       );
     }
     let number = settled?.nextIdeaNumber ?? 1;

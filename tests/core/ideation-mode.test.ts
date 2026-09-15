@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
@@ -168,6 +168,38 @@ const twoIdeas: Reply = (lens) =>
 
 async function temporaryRoot(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'council-ideation-'));
+}
+
+/**
+ * Write a session log holding `count` recorded ideas, without running the passes that would have
+ * produced them. Reaching the session ceiling through the handler would cost hundreds of panel
+ * calls; the ceiling is a property of the log, so the log is what the fixture supplies.
+ */
+async function seedSessionLog(
+  root: string,
+  sessionId: string,
+  prompt: string,
+  count: number,
+): Promise<string> {
+  const store = ModeSessionStore.open(root);
+  const path = store.absolutePath('ideation', sessionId);
+  await mkdir(join(root, 'general', 'modes', 'ideation'), { recursive: true });
+  const ideas = Array.from({ length: count }, (_, index) => ({
+    id: `i-${index + 1}`,
+    seat: 'xai/xai-lite#strategist',
+    lens: 'strategist',
+    text: `recorded idea ${index + 1}`,
+  }));
+  const lines = [
+    {
+      at: NOW,
+      kind: 'pass',
+      data: { n: 1, scope: 'all', prompt, ideasPerSeat: 1, seats: [], invalid: [], ideas },
+    },
+    { at: NOW, kind: 'cluster', data: { n: 1, clusters: [], nextClusterNumber: 1 } },
+  ];
+  await Bun.write(path, lines.map((line) => `${JSON.stringify(line)}\n`).join(''));
+  return path;
 }
 
 describe('ideation prompt', () => {
@@ -501,6 +533,35 @@ describe('ideation handler', () => {
 });
 
 describe('ideation usage errors', () => {
+  test('refuses a pass that would take the session past its idea ceiling', async () => {
+    const root = await temporaryRoot();
+    try {
+      const prompt = 'Ways to make advisor notes visible';
+      const path = await seedSessionLog(root, SESSION, prompt, 1999);
+      const before = await Bun.file(path).text();
+
+      const fixture = build({
+        root,
+        sessionId: SESSION,
+        motion: prompt,
+        families: ['xai'],
+        flags: { seats: ['2'], 'ideas-per-seat': ['1'] },
+      });
+      await expect(ideation.handle(fixture.input)).rejects.toThrow(
+        /An ideation session holds at most 2000 ideas; this one holds 1999 and this pass would add 2\. Open a new session by leaving --session off\./,
+      );
+      // The ceiling is a property of the log, so it is read under the lock like the prompt is: the
+      // seats have already answered by then, and the refusal costs the record nothing.
+      expect(fixture.calls()).toHaveLength(2);
+      expect(await Bun.file(path).text()).toBe(before);
+      expect(
+        readIdeationSession(await ModeSessionStore.open(root).read('ideation', SESSION)).ideas,
+      ).toHaveLength(1999);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('refuses a persona list beside a lens list, before the file is even read', async () => {
     const root = await temporaryRoot();
     try {

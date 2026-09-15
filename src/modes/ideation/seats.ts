@@ -107,6 +107,14 @@ export async function loadPersonaLenses(path: string, cwd: string): Promise<Pane
  * A named list is a request for those lenses exactly, so a room smaller than the list is a
  * contradiction and fails; the catalogue is only the default pool, so a small room simply takes
  * the first few of it.
+ *
+ * The seated list is checked for duplicates as well as the pool, because the cycle suffix is added
+ * after the pool was checked and can collide with a pool name that already looks like one: personas
+ * "Security" and "Security 2" slug to `security` and `security-2`, and the second time round the
+ * pool `security` is seated as `security-2` too. The panel would only catch that when both landed
+ * on the same family, since a seat id carries the family and the model; with the seats spread over
+ * two families it would seat two lenses with one name and say nothing. It is a usage error at every
+ * family count, so it is raised here.
  */
 export function resolveSeatLenses(input: {
   readonly seats: number;
@@ -117,7 +125,7 @@ export function resolveSeatLenses(input: {
     throw new Error(`--seats ${seats} is fewer than the ${input.named.length} lenses named`);
   }
   const pool = assertDistinct(input.named ?? CATALOGUE_LENSES.slice(0, seats));
-  return Array.from({ length: seats }, (_, index) => {
+  const seated = Array.from({ length: seats }, (_, index) => {
     const base = pool[index % pool.length];
     if (base === undefined) throw new Error('A room needs at least one lens');
     const cycle = Math.floor(index / pool.length) + 1;
@@ -125,6 +133,8 @@ export function resolveSeatLenses(input: {
       ? base
       : PanelLensSchema.parse({ name: `${base.name}-${cycle}`, description: base.description });
   });
+  assertDistinct(seated);
+  return seated;
 }
 
 export function parseModelOverrides(value: string | undefined): Map<ProviderFamily, string> {

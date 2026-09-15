@@ -89,6 +89,39 @@ describe('ideation lenses', () => {
     expect(() => resolveSeatLenses({ seats: 0, named: null })).toThrow();
   });
 
+  test('a persona whose slug collides with a cycle suffix is a usage error', async () => {
+    // The pool is distinct, so the old check passed; the collision only appears once `security`
+    // comes round a second time and is seated as `security-2` beside the persona of that name.
+    const named = [
+      PanelLensSchema.parse({ name: 'security', description: 'Look for the attack path.' }),
+      PanelLensSchema.parse({ name: 'security-2', description: 'Look for the second one.' }),
+    ];
+    expect(resolveSeatLenses({ seats: 2, named }).map((lens) => lens.name)).toEqual([
+      'security',
+      'security-2',
+    ]);
+    expect(() => resolveSeatLenses({ seats: 4, named })).toThrow(/Duplicate lens name: security-2/);
+    // The personas a caller would actually write, through the same slugging the loader uses.
+    const root = await mkdtemp(join(tmpdir(), 'council-persona-cycle-'));
+    try {
+      const file = join(root, 'personas.json');
+      await writeFile(
+        file,
+        JSON.stringify([
+          { name: 'Security', description: 'Look for the attack path.' },
+          { name: 'Security 2', description: 'Look for the second one.' },
+        ]),
+      );
+      const lenses = await loadPersonaLenses(file, root);
+      expect(lenses.map((lens) => lens.name)).toEqual(['security', 'security-2']);
+      expect(() => resolveSeatLenses({ seats: 4, named: lenses })).toThrow(
+        /Duplicate lens name: security-2/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('a persona file supplies the lenses, validated and slugged', async () => {
     const root = await mkdtemp(join(tmpdir(), 'council-personas-'));
     try {
