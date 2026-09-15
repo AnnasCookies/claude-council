@@ -593,7 +593,7 @@ describe('handler mode dispatch', () => {
       consult: { mode: 'consultants', registered: true },
       forum: { mode: 'forum', registered: true },
       triage: { mode: 'triage', registered: true },
-      audience: { mode: 'audience', registered: false },
+      audience: { mode: 'audience', registered: true },
     });
     const unknown = await runCliFacade(['bogus']);
     expect(unknown.exitCode).toBe(2);
@@ -627,6 +627,7 @@ describe('handler mode dispatch', () => {
       'consultants',
       'forum',
       'triage',
+      'audience',
     ]);
   });
 
