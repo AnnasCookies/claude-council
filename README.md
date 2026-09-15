@@ -118,6 +118,65 @@ The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/c
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 
+### Triage
+
+`triage` sorts a batch of items against a declared schema and returns a route for each one. It
+never takes the route: the calling agent does.
+
+```bash
+# One seat, the built-in pr-comment schema
+bun --no-install dist/cli.js triage \
+  --caller agent --harness claude-code \
+  --in comments.json
+
+# Two seats for a disagreement check, four items in flight at a time
+bun --no-install dist/cli.js triage \
+  --caller agent --harness claude-code \
+  --schema pr-comment --in comments.json \
+  --seats 2 --providers anthropic,openai --concurrency 4 --json
+
+# A schema of your own
+bun --no-install dist/cli.js triage --schema-file schemas/issue.json --in issues.json
+```
+
+`--in` points at a JSON array of items, each `{ "id": string, "text": string }`, ids unique, at
+most 500 to a batch:
+
+```json
+[
+  { "id": "c1", "text": "This dereferences a null pointer when the list is empty." },
+  { "id": "c2", "text": "Nit: trailing whitespace." }
+]
+```
+
+The built-in `pr-comment` schema declares:
+
+| Field        | Terms                                                   |
+| ------------ | ------------------------------------------------------- |
+| `classes`    | `bug`, `style`, `question`, `nit`, `praise`, `security` |
+| `severities` | `low`, `medium`, `high`                                 |
+| `routes`     | `fix`, `discuss`, `ignore`, `human`                     |
+
+`--schema-file` takes the same JSON shape — `{ "name", "classes", "severities", "routes" }`, every
+list non-empty, unique and lower-case — and `human` is appended to its routes when absent, because
+a disagreement has to have somewhere to go.
+
+Each item is sorted on its own text alone, by one seat by default or two under `--seats 2` (which
+needs two provider families; `--providers` sets the order they are taken in). Two seats that agree
+on class and route route there; two that disagree route to `human` with `agreed: false`, and both
+verdicts stay in the output — a disagreement is never averaged. An item nobody could read is
+listed in `unprocessed` with its reason — `policy` when the secrets guard blocked its text,
+`no-seat` when no subscription seat was available, `no-verdict` when every answer missed the
+declared schema — and is never routed.
+
+Triage never falls back to a metered key: `--billing api-only` is refused, a family whose only
+route is metered is never given a seat, and a seat a fallback would have rescued is recorded as
+skipped. `--concurrency` bounds how many items are in flight (default 4, at most 8) and
+`--timeout-ms` bounds each item. The routed batch is appended to
+`<records-root>/general/modes/triage/<session>.jsonl`, one event per item carrying every seat's
+verdict or failure including the raw text of an answer that did not validate, and committed before
+the run reports success.
+
 ### Result envelope
 
 Every executed run returns a validated `ResultEnvelope`, printed alongside the command's own

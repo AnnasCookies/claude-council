@@ -35,7 +35,7 @@ the five knobs from `docs/vision.md`, its execution pattern, its defaults, its s
 it prepares a session (the committee's health preflight lives here) and the shape of its `output`
 block; the CLI seats and runs it. A handler mode declares its own flags and runs itself on the
 panel primitive, returning the envelope fields the CLI cannot know. `committee` and
-`second-opinion` are runner modes; `advisor`, `ideation` and `forum` are handler modes;
+`second-opinion` are runner modes; `advisor`, `ideation`, `forum` and `triage` are handler modes;
 `docs/modes.md` specifies the rest.
 
 The advisor owns one panel seat under `never-metered`, a bounded hold, and an append-only note
@@ -54,6 +54,11 @@ in the mode scores, ranks or votes.
 stance and motion contracts, `prompts.ts` the opening and reply prompts (every prior position
 quoted as untrusted data), `aggregate.ts` the position map, the moves and the motions, and
 `index.ts` the handler. Nothing in it rules, ranks or scores.
+
+`src/modes/triage/` is the desk: `schema.ts` binds the caller's schema to the verdict contract,
+`route.ts` is the one routing rule (agreement on class and route, disagreement to `human`),
+`items.ts` validates the batch at the boundary, and `index.ts` seats one or two schema-bound voices
+per item under `never-metered` and never routes an item without a valid verdict.
 
 `src/cli.ts` parses flags, resolves the mode for the command, builds the envelope, persists the
 session and prints. `tests/core/dependency-direction.test.ts` enforces that modes reach the
