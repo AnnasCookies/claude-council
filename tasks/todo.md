@@ -12,18 +12,19 @@ OMP profile name stay. The engine ships as `2026.9.6`.
 
 ## Approach
 
-- [ ] 1. GitHub rename, origin repointed, upstream remote dropped, branch cut from main.
-- [ ] 2. Readers renamed: `package.json`, both plugin manifests, `src/cli.ts` help name,
+- [ ] 1. GitHub rename: the session was not allowed to run it, the user runs `gh repo rename`.
+- [x] 1a. Origin repointed, upstream remote dropped, branch cut from main.
+- [x] 2. Readers renamed: `package.json`, both plugin manifests, `src/cli.ts` help name,
       `src/substrate/execution/cli.ts` root error and temp prefix; `bun install` refreshes the lock.
-- [ ] 3. Gates rewritten: ownership test (origin `AnnasCookies/convene`, no upstream, LICENSE
+- [x] 3. Gates rewritten: ownership test (origin `AnnasCookies/convene`, no upstream, LICENSE
       notice still asserted), privacy fixture, containment loader expectations, CI workflow
       without the upstream step, new `tests/release/naming.ts` with an explicit allow-list.
-- [ ] 4. Test fixtures and temp prefixes renamed; OMP profile constant kept with a comment.
-- [ ] 5. Docs: README, CHANGELOG (`2026.9.6` section), vision, modes, brief amendment, two stale
+- [x] 4. Test fixtures and temp prefixes renamed; OMP profile constant kept with a comment.
+- [x] 5. Docs: README, CHANGELOG (`2026.9.6` section), vision, modes, brief amendment, two stale
       skill links.
-- [ ] 6. Version `2026.9.6` in `package.json` and `plugin.json`; `bun run check`; rebuild `dist`.
-- [ ] 7. Push, PR, CI green on three platforms; close PR #14 in favour of it.
-- [ ] 8. dotagents PR: updater with stale-plugin cutover, runtime shim and its test, health script,
+- [x] 6. Version `2026.9.6` in `package.json` and `plugin.json`; `bun run check`; rebuild `dist`.
+- [ ] 7. PR #15 open, #14 closed; CI is red on the ownership gate alone until the rename lands.
+- [x] 8. dotagents PR #110: updater with stale-plugin cutover, runtime shim and its test, health script,
       session-notes script, wrapper test, council skill.
 
 ## Files
