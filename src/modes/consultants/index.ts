@@ -207,7 +207,6 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
   let synthesis: { by: string; text: string } | null = null;
   let synthesisSeats: EnvelopeSeat[] = [];
   let synthesisFallbacks = 0;
-  let synthesisUsed = 0;
   if (answered.length < 2) {
     // Two reports are the least that can conflict, so there is nothing for a synthesiser to read.
     const reason = `fewer than two consultants reported (${answered.length})`;
@@ -240,7 +239,6 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     );
     synthesisSeats = panelEnvelopeSeats(synthesisPanel.seats);
     synthesisFallbacks = synthesisPanel.spend.fallbacks;
-    synthesisUsed = synthesisPanel.spend.used;
     const synthesised = synthesisPanel.seats[0];
     if (synthesised === undefined) throw new Error('The synthesis panel returned no seat');
     if (synthesised.status === 'ok') {
@@ -263,19 +261,17 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     }
   }
 
-  // Both rounds shared one ledger, so its cap and its refusal count are the session's rather than
-  // a sum this handler has to keep in step with them by hand. `used` is not read from the ledger,
-  // though: the ledger's own counter only grows when a subscription seat actually falls back
-  // through it, so a seat that was metered from the start (a metered-only fixture, or a caller who
-  // asked for `--billing api-only`) never touches it and would be spent for free. `panel.spend.used`
-  // counts every seat whose transport was `api`, whichever way it got there, so a follow-up's own
-  // remaining-budget arithmetic (which reads this event back off the log) sees the true spend.
-  const used = panel.spend.used + synthesisUsed;
+  // Both rounds shared one ledger, so its counters are the session's spend rather than a sum this
+  // handler has to keep in step with them by hand: the cap is a budget for metered fallbacks
+  // specifically (`withCredentialFallback` reserves from it only when a subscription seat fails
+  // and a metered fallback is attempted), not a count of every seat that happened to answer on a
+  // metered key, so `used` and `refused` both come from the ledger rather than from counting
+  // seats by transport.
   const fallbacks = panel.spend.fallbacks + synthesisFallbacks;
   await log.append('spend', {
     command: 'brief',
     cap: ledger.cap,
-    used,
+    used: ledger.used,
     fallbacks,
     refused: ledger.refused,
   });
@@ -284,7 +280,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     billing: input.spend.billing,
     policy: 'capped',
     cap: ledger.cap,
-    used,
+    used: ledger.used,
     fallbacks,
     refused: ledger.refused,
     stoppedAtCap: ledger.refused > 0,
@@ -394,14 +390,19 @@ async function followUp(
     name: ask,
     description: `The ${ask} consultant on this brief.`,
   };
-  // An explicit --spend-cap raises the session's cap, as the exhausted-cap message invites; it
-  // never lowers it, because the earlier commands were already paid for under the higher one. The
-  // CLI hands every command a freshly built ledger sized from `--spend-cap` when given or from the
+  // An explicit --spend-cap raises the session's cap, as the exhausted-cap message invites; it may
+  // not lower it, because the earlier commands were already paid for under the higher one. The CLI
+  // hands every command a freshly built ledger sized from `--spend-cap` when given or from the
   // mode's own default otherwise, so a follow-up with no `--spend-cap` of its own must not let that
   // default quietly override the cap the session already recorded: only a flag the caller actually
-  // typed on this command can raise it.
+  // typed on this command can change it.
   const explicitCap = input.flags.has('spend-cap') ? input.spend.ledger.cap : undefined;
-  const cap = Math.max(state.spend.cap, explicitCap ?? 0);
+  if (explicitCap !== undefined && explicitCap < state.spend.cap) {
+    throw new Error(
+      `A follow-up may raise the session cap, not lower it: this session is already capped at ${state.spend.cap}`,
+    );
+  }
+  const cap = explicitCap ?? state.spend.cap;
   const remaining = Math.max(0, cap - state.spend.used);
   const log = recorder(input, sessions, session);
 
@@ -486,7 +487,7 @@ async function followUp(
   await log.append('spend', {
     command: 'ask',
     cap,
-    used: panel.spend.used,
+    used: ledger.used,
     fallbacks: panel.spend.fallbacks,
     refused: ledger.refused,
   });
@@ -507,7 +508,7 @@ async function followUp(
       billing: input.spend.billing,
       policy: 'capped',
       cap,
-      used: state.spend.used + panel.spend.used,
+      used: state.spend.used + ledger.used,
       fallbacks: state.spend.fallbacks + panel.spend.fallbacks,
       refused: ledger.refused,
       stoppedAtCap: ledger.refused > 0,

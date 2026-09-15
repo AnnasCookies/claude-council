@@ -10,6 +10,11 @@ import {
   type ProviderFamily,
   type ProviderRequest,
 } from '../../../src/substrate';
+// Reached directly rather than through `../../../src/substrate`: the dependency-direction rule
+// binds `src/modes`, not test fixtures, and `withCredentialFallback` is exactly how
+// `tests/core/panel.test.ts` and `tests/core/cli-facade.test.ts` build a seat that must actually
+// spend from the ledger to answer.
+import { withCredentialFallback } from '../../../src/substrate/execution/provider';
 
 export const NOW = '2026-07-28T12:00:00.000Z';
 export const BRIEF_SESSION = 'cs-2026-07-28-0a1b2c';
@@ -20,8 +25,14 @@ export interface ConsultantsFixtureOptions {
   readonly cwd?: string;
   readonly recordsRoot?: string;
   readonly failing?: readonly ProviderFamily[];
-  /** Report every seat as answered on a metered key, so the session cap is reachable in a test. */
-  readonly metered?: boolean;
+  /**
+   * Every seat's subscription leg fails `quota-exhausted` (a fallback-permitting code) and falls
+   * back to a metered secondary through `withCredentialFallback`, exactly like a real dual-
+   * credential family: this is what actually reserves from the session's spend ledger, so the cap
+   * is reachable in a test. A plain `credentialPath: 'api-key'` seat that never touched the ledger
+   * would leave `SpendLedger.used` at zero regardless of the cap.
+   */
+  readonly fallback?: boolean;
   /** Replaces the synthesiser's answer, to exercise a mis-shaped one. */
   readonly conflicts?: unknown;
   readonly env?: Record<string, string>;
@@ -31,6 +42,10 @@ export interface ConsultantsFixture {
   readonly environment: CliFacadeEnvironment;
   readonly prompts: () => readonly { readonly role: string; readonly prompt: string }[];
   readonly calls: () => number;
+  /** Only meaningful under `fallback: true`: how many times a subscription leg was attempted. */
+  readonly subscriptionCalls: () => number;
+  /** Only meaningful under `fallback: true`: how many times a metered leg actually answered. */
+  readonly meteredCalls: () => number;
 }
 
 function lensesInSynthesisPrompt(prompt: string): string[] {
@@ -69,63 +84,160 @@ export async function consultantsFixture(
   const registry = await loadModelRegistry();
   const prompts: { role: string; prompt: string }[] = [];
   let calls = 0;
-  const adapters = Object.fromEntries(
-    ProviderFamilySchema.options.map((provider) => [
-      provider,
-      {
-        family: provider,
-        transport: registry[provider].transport,
-        async availability() {
+  let subscriptionCalls = 0;
+  let meteredCalls = 0;
+
+  function plainAdapter(provider: ProviderFamily): ProviderAdapter {
+    return {
+      family: provider,
+      transport: registry[provider].transport,
+      async availability() {
+        return {
+          status: 'available' as const,
+          provider,
+          model: registry[provider].primary,
+          reason: '',
+        };
+      },
+      async invoke(request: ProviderRequest) {
+        calls += 1;
+        prompts.push({ role: request.role, prompt: request.prompt });
+        if (options.failing?.includes(provider) === true) {
           return {
-            status: 'available' as const,
-            provider,
-            model: registry[provider].primary,
-            reason: '',
-          };
-        },
-        async invoke(request: ProviderRequest) {
-          calls += 1;
-          prompts.push({ role: request.role, prompt: request.prompt });
-          if (options.failing?.includes(provider) === true) {
-            return {
-              status: 'failed' as const,
-              seatId: request.seatId,
-              provider,
-              requestedModel: registry[provider].primary,
-              role: request.role,
-              latencyMs: 1,
-              error: {
-                code: 'quota-exhausted',
-                message: 'Deterministic quota fixture.',
-                retryable: false,
-              },
-            };
-          }
-          return {
-            status: 'ok' as const,
+            status: 'failed' as const,
             seatId: request.seatId,
             provider,
             requestedModel: registry[provider].primary,
-            actualModel: registry[provider].primary,
-            modelIdentity: 'verified' as const,
-            route: 'primary' as const,
             role: request.role,
             latencyMs: 1,
-            credentialPath: options.metered === true ? ('api-key' as const) : ('subscription' as const),
-            answer: fixtureAnswer(request, options),
+            error: {
+              code: 'quota-exhausted',
+              message: 'Deterministic quota fixture.',
+              retryable: false,
+            },
           };
-        },
-        async probe() {
-          return {
-            status: 'healthy' as const,
-            provider,
-            requestedModel: registry[provider].primary,
-            actualModel: registry[provider].primary,
-            latencyMs: 1,
-            reason: '',
-          };
-        },
-      } satisfies ProviderAdapter,
+        }
+        return {
+          status: 'ok' as const,
+          seatId: request.seatId,
+          provider,
+          requestedModel: registry[provider].primary,
+          actualModel: registry[provider].primary,
+          modelIdentity: 'verified' as const,
+          route: 'primary' as const,
+          role: request.role,
+          latencyMs: 1,
+          credentialPath: 'subscription' as const,
+          answer: fixtureAnswer(request, options),
+        };
+      },
+      async probe() {
+        return {
+          status: 'healthy' as const,
+          provider,
+          requestedModel: registry[provider].primary,
+          actualModel: registry[provider].primary,
+          latencyMs: 1,
+          reason: '',
+        };
+      },
+    };
+  }
+
+  /**
+   * A subscription leg that always fails `quota-exhausted` — a fallback-permitting code — wrapped
+   * with `withCredentialFallback` around a metered secondary that always answers. This is the only
+   * shape that actually calls `SpendLedger.reserve()`, which is what the session cap governs.
+   */
+  function fallbackAdapter(provider: ProviderFamily): ProviderAdapter {
+    const subscription: ProviderAdapter = {
+      family: provider,
+      transport: registry[provider].transport,
+      async availability() {
+        return {
+          status: 'available' as const,
+          provider,
+          model: registry[provider].primary,
+          reason: '',
+        };
+      },
+      async invoke(request: ProviderRequest) {
+        // Not counted in `calls` or recorded in `prompts`: it never answers, and
+        // `withCredentialFallback` hands the fallback the same request object, so recording it
+        // here would only duplicate whatever the metered leg logs for the same attempt.
+        subscriptionCalls += 1;
+        return {
+          status: 'failed' as const,
+          seatId: request.seatId,
+          provider,
+          requestedModel: registry[provider].primary,
+          role: request.role,
+          latencyMs: 1,
+          error: {
+            code: 'quota-exhausted',
+            message: 'The subscription quota is spent.',
+            retryable: true,
+          },
+        };
+      },
+      async probe() {
+        return {
+          status: 'healthy' as const,
+          provider,
+          requestedModel: registry[provider].primary,
+          actualModel: registry[provider].primary,
+          latencyMs: 1,
+          reason: '',
+        };
+      },
+    };
+    const metered: ProviderAdapter = {
+      family: provider,
+      transport: registry[provider].transport,
+      async availability() {
+        return {
+          status: 'available' as const,
+          provider,
+          model: registry[provider].primary,
+          reason: '',
+        };
+      },
+      async invoke(request: ProviderRequest) {
+        meteredCalls += 1;
+        calls += 1;
+        prompts.push({ role: request.role, prompt: request.prompt });
+        return {
+          status: 'ok' as const,
+          seatId: request.seatId,
+          provider,
+          requestedModel: registry[provider].primary,
+          actualModel: registry[provider].primary,
+          modelIdentity: 'verified' as const,
+          route: 'primary' as const,
+          role: request.role,
+          latencyMs: 1,
+          credentialPath: 'api-key' as const,
+          answer: fixtureAnswer(request, options),
+        };
+      },
+      async probe() {
+        return {
+          status: 'healthy' as const,
+          provider,
+          requestedModel: registry[provider].primary,
+          actualModel: registry[provider].primary,
+          latencyMs: 1,
+          reason: '',
+        };
+      },
+    };
+    return withCredentialFallback(subscription, () => metered, 'http');
+  }
+
+  const adapters = Object.fromEntries(
+    ProviderFamilySchema.options.map((provider) => [
+      provider,
+      options.fallback === true ? fallbackAdapter(provider) : plainAdapter(provider),
     ]),
   ) as Partial<Record<ProviderFamily, ProviderAdapter>>;
 
@@ -141,6 +253,8 @@ export async function consultantsFixture(
     },
     prompts: () => prompts,
     calls: () => calls,
+    subscriptionCalls: () => subscriptionCalls,
+    meteredCalls: () => meteredCalls,
   };
 }
 

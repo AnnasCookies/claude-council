@@ -203,15 +203,49 @@ describe('consult: follow-up questions', () => {
     const root = await temporaryRepository('convene-consult-cap-');
     const cwd = await project();
     try {
-      // Two consultants and a synthesiser, every seat answering on a metered key, against a cap
-      // of two: the brief alone spends the session's budget.
-      const fixture = await briefed(root, cwd, {
-        metered: true,
-        spendCapArgument: ['--spend-cap', '2'],
+      // Every seat's subscription leg fails `quota-exhausted` and falls back to a metered
+      // secondary through `withCredentialFallback` — the shape that actually reserves from the
+      // session's ledger. Two report seats spend the cap of two; the synthesiser's own fallback
+      // attempt is refused before it ever reaches the metered adapter.
+      const fixture = await consultantsFixture({
+        fallback: true,
+        cwd,
+        env: gitIdentity(root),
       });
-      // Three metered seats against a cap of two: the brief alone spends the session's budget.
-      expect(fixture.calls()).toBe(3);
-      const before = fixture.calls();
+      const briefResult = await runCliFacade(
+        [
+          'consult',
+          '--records-root',
+          root,
+          '--session',
+          BRIEF_SESSION,
+          '--lens',
+          'security,ux',
+          '--personas',
+          join(cwd, 'personas.json'),
+          '--context',
+          'src',
+          '--motion',
+          'Is this login path safe to ship?',
+          '--spend-cap',
+          '2',
+        ],
+        fixture.environment,
+      );
+      expect(briefResult.exitCode).toBe(4);
+      const briefPayload = JSON.parse(briefResult.stdout);
+      const briefEnvelope = ResultEnvelopeSchema.parse(briefPayload.envelope);
+      expect(briefEnvelope.spend).toMatchObject({
+        cap: 2,
+        used: 2,
+        refused: 1,
+        stoppedAtCap: true,
+      });
+      expect(fixture.subscriptionCalls()).toBe(3);
+      expect(fixture.meteredCalls()).toBe(2);
+
+      const subscriptionBefore = fixture.subscriptionCalls();
+      const meteredBefore = fixture.meteredCalls();
       const result = await runCliFacade(
         [
           'consult',
@@ -233,11 +267,12 @@ describe('consult: follow-up questions', () => {
       expect(envelope.seats).toHaveLength(1);
       expect(envelope.seats[0]).toMatchObject({ lens: 'security', status: 'skipped' });
       expect(envelope.seats[0]?.reason).toContain('spend-cap');
-      expect(envelope.spend).toMatchObject({ cap: 2, used: 3, stoppedAtCap: true });
+      expect(envelope.spend).toMatchObject({ cap: 2, used: 2, stoppedAtCap: true });
       expect(envelope.degraded).toContainEqual('spend-cap-reached');
       expect(envelope.output.qa).toEqual([]);
       // No consultant was invoked, and the refusal is on the record.
-      expect(fixture.calls()).toBe(before);
+      expect(fixture.subscriptionCalls()).toBe(subscriptionBefore);
+      expect(fixture.meteredCalls()).toBe(meteredBefore);
       const log = await Bun.file(
         join(root, 'general', 'modes', 'consultants', `${BRIEF_SESSION}.jsonl`),
       ).text();
@@ -252,11 +287,37 @@ describe('consult: follow-up questions', () => {
     const root = await temporaryRepository('convene-consult-cap-raise-');
     const cwd = await project();
     try {
-      const fixture = await briefed(root, cwd, {
-        metered: true,
-        spendCapArgument: ['--spend-cap', '2'],
+      const fixture = await consultantsFixture({
+        fallback: true,
+        cwd,
+        env: gitIdentity(root),
       });
-      const before = fixture.calls();
+      const briefResult = await runCliFacade(
+        [
+          'consult',
+          '--records-root',
+          root,
+          '--session',
+          BRIEF_SESSION,
+          '--lens',
+          'security,ux',
+          '--personas',
+          join(cwd, 'personas.json'),
+          '--context',
+          'src',
+          '--motion',
+          'Is this login path safe to ship?',
+          '--spend-cap',
+          '2',
+        ],
+        fixture.environment,
+      );
+      expect(briefResult.exitCode).toBe(4);
+      const briefEnvelope = ResultEnvelopeSchema.parse(JSON.parse(briefResult.stdout).envelope);
+      expect(briefEnvelope.spend).toMatchObject({ cap: 2, used: 2, refused: 1 });
+
+      const subscriptionBefore = fixture.subscriptionCalls();
+      const meteredBefore = fixture.meteredCalls();
       const result = await runCliFacade(
         [
           'consult',
@@ -274,8 +335,40 @@ describe('consult: follow-up questions', () => {
       );
       expect(result.exitCode).toBe(0);
       const envelope = ResultEnvelopeSchema.parse(JSON.parse(result.stdout).envelope);
-      expect(envelope.spend).toMatchObject({ cap: 6, used: 4, stoppedAtCap: false });
-      expect(fixture.calls() - before).toBe(1);
+      // The session was already at cap 2 with 2 spent; raising it to 6 leaves one more fallback
+      // reservation for this run, spending 3 in total, and refuses nothing.
+      expect(envelope.spend).toMatchObject({ cap: 6, used: 3, stoppedAtCap: false });
+      expect(fixture.subscriptionCalls() - subscriptionBefore).toBe(1);
+      expect(fixture.meteredCalls() - meteredBefore).toBe(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('a follow-up may not lower the session cap', async () => {
+    const root = await temporaryRepository('convene-consult-cap-lower-');
+    const cwd = await project();
+    try {
+      const fixture = await briefed(root, cwd, { spendCapArgument: ['--spend-cap', '4'] });
+      const result = await runCliFacade(
+        [
+          'consult',
+          '--records-root',
+          root,
+          '--session',
+          BRIEF_SESSION,
+          '--spend-cap',
+          '1',
+          '--ask',
+          'security',
+          'One more question, please.',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('may raise the session cap, not lower it');
+      expect(result.stderr).toContain('capped at 4');
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(cwd, { recursive: true, force: true });
