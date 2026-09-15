@@ -89,8 +89,8 @@ function options(overrides: Partial<SessionOptions> = {}): SessionOptions {
 }
 
 describe('modes registry', () => {
-  test('registers committee and second opinion', () => {
-    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion']);
+  test('registers committee, second opinion and the advisor', () => {
+    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion', 'advisor']);
     expect(modes.committee.pattern).toBe('rounds');
     expect(modes['second-opinion'].pattern).toBe('parallel');
     expect(modes.committee.spend.defaultCap(5, 2)).toBe(10);

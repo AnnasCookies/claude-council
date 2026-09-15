@@ -588,7 +588,7 @@ describe('handler mode dispatch', () => {
       expect(help.commands).toContain(command);
     }
     expect(help.handlerCommands).toEqual({
-      advise: { mode: 'advisor', registered: false },
+      advise: { mode: 'advisor', registered: true },
       ideate: { mode: 'ideation', registered: false },
       consult: { mode: 'consultants', registered: false },
       forum: { mode: 'forum', registered: false },
@@ -611,12 +611,14 @@ describe('handler mode dispatch', () => {
     ).toEqual([
       ['committee', 'runner'],
       ['second-opinion', 'runner'],
+      ['advisor', 'handler'],
       ['audience', 'handler'],
     ]);
     const builtIn = JSON.parse((await runCliFacade(['modes'])).stdout);
     expect(builtIn.modes.map((mode: { name: string }) => mode.name)).toEqual([
       'committee',
       'second-opinion',
+      'advisor',
     ]);
   });
 

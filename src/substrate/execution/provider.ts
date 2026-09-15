@@ -2322,6 +2322,15 @@ export function withCredentialFallback(
 ): ProviderAdapter {
   const adapter: ProviderAdapter = {
     ...primary,
+    // DECISION: forwarded explicitly rather than left to the `...primary` spread above, which
+    // only copies enumerable own properties. A `ProviderAdapter` built as an object literal has
+    // `availability` as one of those and survived the spread by accident; one built as a class
+    // (a seat fixture, for instance) has it on the prototype instead, and the spread silently
+    // dropped it, breaking a pre-invocation availability check on a wrapped adapter with no signal
+    // beyond `adapter.availability is not a function` at the call site.
+    async availability(context) {
+      return primary.availability(context);
+    },
     async invoke(request) {
       const first = await primary.invoke(request);
       if (first.status === 'ok' || !permitsCredentialFallback(first)) return first;
