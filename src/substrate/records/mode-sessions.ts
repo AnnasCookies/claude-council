@@ -66,11 +66,34 @@ export const ModeSessionKeySchema = z
   .max(256)
   .refine((key) => !/[\p{Cc}\p{Cf}]/u.test(key), 'A session key has no control characters');
 
+/**
+ * The alias map is validated as entries rather than with `z.record`, because `z.record` builds
+ * its output object by assignment: a key named `__proto__` is swallowed by the prototype setter
+ * instead of becoming an own property, so an index that had stored one could never read it back
+ * and every call would mint a fresh id for the same harness session. `Object.fromEntries`
+ * defines each key, so the index round-trips whatever a harness used as its session key.
+ */
+const ModeSessionAliasesSchema = z
+  .preprocess(
+    (value) => (typeof value === 'object' && value !== null ? Object.entries(value) : value),
+    z.array(z.tuple([ModeSessionKeySchema, ModeSessionIdSchema])),
+  )
+  .transform((entries) => Object.fromEntries(entries));
+
 const ModeSessionAliasIndexSchema = z.strictObject({
   schemaVersion: z.literal(1),
-  aliases: z.record(ModeSessionKeySchema, ModeSessionIdSchema),
+  aliases: ModeSessionAliasesSchema,
 });
 type ModeSessionAliasIndex = z.infer<typeof ModeSessionAliasIndexSchema>;
+
+/**
+ * Read one alias, never the prototype. A bare `index.aliases[key]` answers a key the index does
+ * not hold — `constructor`, `toString`, `__proto__` — from `Object.prototype`, handing the caller
+ * a function or an object where the signature promises a session id.
+ */
+function ownAlias(aliases: Record<string, string>, key: string): string | undefined {
+  return Object.hasOwn(aliases, key) ? aliases[key] : undefined;
+}
 
 export interface ModeSessionAlias {
   readonly sessionId: string;
@@ -178,7 +201,7 @@ export class ModeSessionStore {
   async lookupAlias(mode: string, key: string): Promise<string | undefined> {
     const safeKey = ModeSessionKeySchema.parse(key);
     const index = await this.readAliasIndex(this.aliasPath(mode));
-    return index.aliases[safeKey];
+    return ownAlias(index.aliases, safeKey);
   }
 
   /**
@@ -197,7 +220,7 @@ export class ModeSessionStore {
     const path = this.aliasPath(mode);
     return withScopeWriteLock(dirname(path), async () => {
       const index = await this.readAliasIndex(path);
-      const existing = index.aliases[safeKey];
+      const existing = ownAlias(index.aliases, safeKey);
       if (existing !== undefined) return { sessionId: existing, created: false };
       const sessionId = newModeSessionId(prefix, now);
       const next: ModeSessionAliasIndex = {

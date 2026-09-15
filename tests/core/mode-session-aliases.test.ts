@@ -76,6 +76,33 @@ describe('mode session aliases', () => {
     });
   });
 
+  test('a key named after an Object property is read from the index, never the prototype', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      // A harness session key is opaque, so nothing stops one being `__proto__` or `constructor`.
+      // Indexing the parsed object without an own-property check answered both from
+      // `Object.prototype`, handing back an object or a function typed as a session id.
+      for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+        expect([key, await store.lookupAlias('advisor', key)]).toEqual([key, undefined]);
+      }
+      const bound = new Map<string, string>();
+      for (const key of ['__proto__', 'constructor', 'claude:ordinary']) {
+        bound.set(key, (await store.bindAlias('advisor', key, 'ad', NOW)).sessionId);
+      }
+      expect(new Set(bound.values()).size).toBe(3);
+      for (const [key, sessionId] of bound) {
+        // Binding stays idempotent for these keys too: a key the index could not read back would
+        // mint a fresh id on every call and split one harness session across many logs.
+        expect([key, await store.lookupAlias('advisor', key)]).toEqual([key, sessionId]);
+        expect([key, await store.bindAlias('advisor', key, 'ad', NOW)]).toEqual([
+          key,
+          { sessionId, created: false },
+        ]);
+      }
+      expect(await store.lookupAlias('advisor', 'toString')).toBeUndefined();
+    });
+  });
+
   test('serialises concurrent binds of one new key to a single id', async () => {
     await withRoot(async (root) => {
       const store = ModeSessionStore.open(root);
