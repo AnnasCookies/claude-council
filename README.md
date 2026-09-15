@@ -66,7 +66,7 @@ bun --no-install dist/cli.js consult \
   --records-root ~/.claude/council \
   --caller human --harness "Claude Code" \
   --lens security,privacy,maintainer \
-  --context src --context docs/vision.md \
+  --context docs/modes.md --context README.md \
   --motion "Is this login path safe to ship?"
 
 # Ask one of them a follow-up, forwarding another consultant's report only if you choose to
@@ -306,12 +306,14 @@ earlier report and its own questions as quoted data; another consultant's report
 through `--forward <lens>`. There is no broadcast.
 
 The session is an append-only JSONL log under the records root
-(`general/modes/consultants/<id>.jsonl`, or `projects/<id>/…` under project scope), committed
-before the run reports success, and every command returns the whole session rebuilt from it. The
-spend cap covers the session rather than the command: it defaults to one reserved metered fallback
-call per eligible provider family, shared by the report round, the synthesiser and every
-follow-up, and a follow-up past it returns its seat as `skipped` with reason `spend-cap`, exit 4
-and `spend-cap-reached` in `degraded`. Raise it with `--spend-cap <n>` on the follow-up.
+(`<records-root>/<scope>/modes/consultants/<session-id>.jsonl`), committed before the run reports
+success, and every command returns the whole session rebuilt from it. The spend cap covers the
+session rather than the command: it defaults to one reserved metered fallback call per eligible
+provider family, shared by the report round, the synthesiser and every follow-up, and a follow-up
+past it returns its seat as `skipped` with reason `spend-cap`, exit 4 and `spend-cap-reached` in
+`degraded`. Raise it with `--spend-cap <n>` on the follow-up. Like every mode, the cap bounds
+metered fallbacks and nothing else: it does not bound `--billing api-only`, where a seat is
+metered from the start and never reaches the ledger the cap governs.
 
 ## Forum
 

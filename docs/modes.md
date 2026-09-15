@@ -275,8 +275,8 @@ records root.
 **Example.**
 
 ```text
-convene consult --lens security,privacy,maintainer --context src --context docs/vision.md --motion "…"
-convene consult --lens security,data-model,ux --personas consultants.json --context src --motion "…"
+convene consult --lens security,privacy,maintainer --context docs/modes.md --context README.md --motion "…"
+convene consult --lens security,data-model,ux --personas consultants.json --context docs/modes.md --motion "…"
 convene consult --session cs-2026-09-15-3f9a1c --ask security "Does the fallback path leak the key in logs?"
 convene consult --session cs-2026-09-15-3f9a1c --ask ux --forward security "Given that, what does the consent screen have to say?"
 ```
