@@ -55,6 +55,29 @@ const ModeSessionScopeSchema = z.discriminatedUnion('scope', [
 ]);
 export type ModeSessionScope = z.infer<typeof ModeSessionScopeSchema>;
 
+/**
+ * A harness's own session identity: Claude Code's `session_id`, omp's session id, a codex thread
+ * id. It is opaque to the store, so the only rules are that it fits a JSON object key and cannot
+ * carry a control character into the index file.
+ */
+export const ModeSessionKeySchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((key) => !/[\p{Cc}\p{Cf}]/u.test(key), 'A session key has no control characters');
+
+const ModeSessionAliasIndexSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  aliases: z.record(ModeSessionKeySchema, ModeSessionIdSchema),
+});
+type ModeSessionAliasIndex = z.infer<typeof ModeSessionAliasIndexSchema>;
+
+export interface ModeSessionAlias {
+  readonly sessionId: string;
+  /** True when this call minted the id; false when the key was already bound. */
+  readonly created: boolean;
+}
+
 export function newModeSessionId(prefix: string, now: string = new Date().toISOString()): string {
   const safePrefix = ModeSessionPrefixSchema.parse(prefix);
   const day = TimestampSchema.parse(now).slice(0, 10);
@@ -133,6 +156,62 @@ export class ModeSessionStore {
     const scopePart =
       this.scope.scope === 'general' ? 'general' : `projects/${this.scope.projectId}`;
     return `${scopePart}/modes/${safeMode}/${safeId}.jsonl`;
+  }
+
+  /** The per-mode alias index, harness session key to store session id, beside the logs. */
+  aliasPath(mode: string): string {
+    return join(this.directory(mode), 'index.json');
+  }
+
+  private async readAliasIndex(path: string): Promise<ModeSessionAliasIndex> {
+    const file = Bun.file(path);
+    if (!(await file.exists())) return { schemaVersion: 1, aliases: {} };
+    let value: unknown;
+    try {
+      value = JSON.parse(await file.text());
+    } catch (error) {
+      throw new Error(`Invalid mode session alias index JSON: ${path}`, { cause: error });
+    }
+    return ModeSessionAliasIndexSchema.parse(value);
+  }
+
+  async lookupAlias(mode: string, key: string): Promise<string | undefined> {
+    const safeKey = ModeSessionKeySchema.parse(key);
+    const index = await this.readAliasIndex(this.aliasPath(mode));
+    return index.aliases[safeKey];
+  }
+
+  /**
+   * Bind a harness session key to a store session id, minting one on first use. The whole
+   * read-mint-write runs under the scope lock so two hooks firing for the same new session
+   * cannot each mint an id and split one session's notes across two logs. A corrupt index is
+   * refused rather than replaced: it may be the only map from live sessions to their logs.
+   */
+  async bindAlias(
+    mode: string,
+    key: string,
+    prefix: string,
+    now?: string,
+  ): Promise<ModeSessionAlias> {
+    const safeKey = ModeSessionKeySchema.parse(key);
+    const path = this.aliasPath(mode);
+    return withScopeWriteLock(dirname(path), async () => {
+      const index = await this.readAliasIndex(path);
+      const existing = index.aliases[safeKey];
+      if (existing !== undefined) return { sessionId: existing, created: false };
+      const sessionId = newModeSessionId(prefix, now);
+      const next: ModeSessionAliasIndex = {
+        schemaVersion: 1,
+        aliases: { ...index.aliases, [safeKey]: sessionId },
+      };
+      await writeTextAtomically(path, `${JSON.stringify(next, null, 2)}\n`, {
+        replace: true,
+        validate: (text) => {
+          ModeSessionAliasIndexSchema.parse(JSON.parse(text));
+        },
+      });
+      return { sessionId, created: true };
+    });
   }
 
   async exists(mode: string, sessionId: string): Promise<boolean> {
