@@ -1,20 +1,46 @@
 import { committee } from './committee';
 import { secondOpinion } from './second-opinion';
-import { MODE_NAMES, type ModeDefinition, type ModeName } from './types';
+import {
+  SPECIFIED_MODE_NAMES,
+  isHandlerMode,
+  type ModeDefinition,
+  type ModeName,
+  type RunnerModeDefinition,
+  type SpecifiedModeName,
+} from './types';
 
 export * from './types';
 
-export const modes: Readonly<Record<ModeName, ModeDefinition>> = Object.freeze({
-  committee,
-  'second-opinion': secondOpinion,
-});
-
-export function getMode(name: string): ModeDefinition {
-  const mode = (modes as Readonly<Record<string, ModeDefinition | undefined>>)[name];
-  if (mode === undefined) {
-    throw new Error(`Unknown mode: ${name}. Registered modes: ${MODE_NAMES.join(', ')}`);
+/**
+ * The shipped definitions are declared as the union; narrowing them once here keeps
+ * `modes.committee.prepare` and `.defaults` typed for the CLI and the tests.
+ */
+function runnerMode(mode: ModeDefinition): RunnerModeDefinition {
+  if (isHandlerMode(mode)) {
+    throw new TypeError(`Mode ${mode.name} is a handler mode, not a runner mode`);
   }
   return mode;
+}
+
+export const modes: Readonly<Record<ModeName, RunnerModeDefinition>> = Object.freeze({
+  committee: runnerMode(committee),
+  'second-opinion': runnerMode(secondOpinion),
+});
+
+/** What a build can run, keyed by specified name. Tests inject one to register a fixture mode. */
+export type ModeRegistry = Readonly<Partial<Record<SpecifiedModeName, ModeDefinition>>>;
+
+export function getMode(name: string, registry: ModeRegistry = modes): ModeDefinition {
+  const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
+  const mode = known === undefined ? undefined : registry[known];
+  if (mode === undefined) {
+    throw new Error(`Unknown mode: ${name}. Registered modes: ${Object.keys(registry).join(', ')}`);
+  }
+  return mode;
+}
+
+export function getRunnerMode(name: string, registry: ModeRegistry = modes): RunnerModeDefinition {
+  return runnerMode(getMode(name, registry));
 }
 
 /**

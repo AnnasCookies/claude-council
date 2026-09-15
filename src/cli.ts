@@ -3,7 +3,7 @@ import { readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import packageManifest from '../package.json';
-import { getMode, modes, resolveModeForCommand, type ModeName } from './modes';
+import { getRunnerMode, modes, resolveModeForCommand, type ModeName } from './modes';
 import {
   DataClassificationSchema,
   MotionImpactSchema,
@@ -735,7 +735,7 @@ async function runCouncilCommand(
     });
   }
 
-  const mode = getMode(options.mode);
+  const mode = getRunnerMode(options.mode);
   const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters =
     environment.adapters ??
