@@ -1659,6 +1659,7 @@ async function handlerModeCommand(
       timeoutMs,
       billingMode,
       ...(recordsRoot === undefined ? {} : { recordsRoot }),
+      ...(spendCap === undefined ? {} : { spendCap }),
     },
     flags: parsed.flags,
     positionals: parsed.positionals,
