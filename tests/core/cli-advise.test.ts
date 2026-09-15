@@ -155,21 +155,37 @@ describe('advise through the CLI', () => {
     });
   });
 
-  test('--watch on stdin consults every Nth call and the other calls are cheap', async () => {
+  test('--watch on stdin consults every Nth call and the window never leaves the process', async () => {
     await withRoot(async (root) => {
       const fixture = await fixtureEnvironment(root);
-      const window = 'user: migrate the table\nassistant: I will drop and recreate it';
+      // Two sentinels: one in the text the agent typed, one in what it was about to do. Neither is
+      // a secret, so nothing redacts them — if either reaches the log or an envelope it is because
+      // the window itself was recorded, which is the whole point of the excerpt-only contract.
+      const sentinels = ['WINDOW-SENTINEL-PROMPT', 'WINDOW-SENTINEL-PLAN'];
+      const window = `user: migrate the table ${sentinels[0]}\nassistant: I will drop and recreate it ${sentinels[1]}`;
       const statuses: string[] = [];
+      const envelopes: string[] = [];
+      let session = '';
       for (let turn = 0; turn < 3; turn += 1) {
         const result = await runCliFacade(
           advise(root, '--session', KEY, '--watch', '--every', '3', '--transcript', '-'),
           { ...fixture.environment, stdin: window },
         );
         expect(result.exitCode).toBe(0);
-        statuses.push(JSON.parse(result.stdout).envelope.output.note.status);
+        const payload = JSON.parse(result.stdout);
+        session = payload.session;
+        statuses.push(payload.envelope.output.note.status);
+        envelopes.push(JSON.stringify(ResultEnvelopeSchema.parse(payload.envelope)));
       }
       expect(statuses).toEqual(['skipped', 'skipped', 'ok']);
       expect(fixture.calls()).toBe(1);
+      const log = await Bun.file(
+        ModeSessionStore.open(root).absolutePath('advisor', session),
+      ).text();
+      for (const sentinel of sentinels) {
+        expect(log).not.toContain(sentinel);
+        for (const envelope of envelopes) expect(envelope).not.toContain(sentinel);
+      }
     });
   });
 
@@ -219,9 +235,14 @@ describe('advise through the CLI', () => {
         fixture.environment,
       );
       expect(unknown.exitCode).toBe(0);
-      expect(JSON.parse(unknown.stdout).envelope.output).toEqual({
+      const unbound = JSON.parse(unknown.stdout);
+      expect(unbound.envelope.output).toEqual({
         status: { exists: false, notes: 0, last: null },
       });
+      // No log is bound to the key, so there is no session id to report — and the harness key is
+      // not one, so it does not go in the field every other envelope fills with an id of ours.
+      expect(unbound.envelope.session).toBe('unknown');
+      expect(unbound.envelope.session).not.toContain('claude:nobody');
       expect(fixture.calls()).toBe(1);
     });
   });

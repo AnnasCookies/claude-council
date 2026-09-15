@@ -358,6 +358,33 @@ describe('advisor mode', () => {
           stdin: 'w',
         }),
       ).rejects.toThrow(/never spends a metered key/);
+      // A misspelt family is a usage mistake, answered like every neighbouring flag rather than
+      // with the raw parser error the schema would throw.
+      await expect(
+        result(root, {
+          flags: { watch: true, transcript: '-', 'cadence-family': 'bogus' },
+          stdin: 'w',
+        }),
+      ).rejects.toThrow(
+        '--cadence-family must be one of anthropic, openai, xai, google, deepseek, moonshot',
+      );
+    });
+  });
+
+  test('a note verb refused on its own flags binds no alias', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      // The request is read before the session is resolved, so a harness key that only ever asked
+      // for something impossible does not leave a minted session id behind it.
+      await expect(
+        result(root, { flags: { hold: true, class: 'delete' }, session: 'claude:fresh' }),
+      ).rejects.toThrow(/--tool/);
+      await expect(
+        result(root, { flags: { note: true, from: 'OMP' }, positionals: ['x'] }),
+      ).rejects.toThrow(/--from/);
+      expect(await store.lookupAlias('advisor', 'claude:fresh')).toBeUndefined();
+      expect(await store.lookupAlias('advisor', KEY)).toBeUndefined();
+      expect(await Bun.file(store.aliasPath('advisor')).exists()).toBe(false);
     });
   });
 
@@ -375,6 +402,84 @@ describe('advisor mode', () => {
       });
       expect(anthropic.calls).toHaveLength(0);
       expect(await logText(root, outcome.session)).not.toContain(secret);
+    });
+  });
+
+  test('a hard-blocked hold records the reason and none of the tool text', async () => {
+    await withRoot(async (root) => {
+      const anthropic = cautious('anthropic');
+      const secret = ['sk', 'proj', 'abcdefghijklmnopqrstuvwxyz0123456789'].join('-');
+      const outcome = await result(root, {
+        flags: { hold: true, class: 'credential', tool: `bw get password prod ${secret}` },
+        adapters: { anthropic },
+      });
+      const note = (outcome.output as { note: Record<string, unknown> }).note;
+      expect(note).toMatchObject({ id: 'n-1', trigger: 'hold', status: 'skipped', seat: null });
+      expect(String(note.reason)).toMatch(/^policy: /);
+      // The excerpt was cut from the very text the guard refused, so it is dropped with it.
+      expect(note.refersTo).toEqual({});
+      expect(anthropic.calls).toHaveLength(0);
+      expect(JSON.stringify(outcome)).not.toContain(secret);
+      expect(await logText(root, outcome.session)).not.toContain(secret);
+    });
+  });
+
+  test('a hard-blocked ask records the reason and none of the question', async () => {
+    await withRoot(async (root) => {
+      const anthropic = cautious('anthropic');
+      const secret = ['sk', 'proj', 'zyxwvutsrqponmlkjihgfedcba9876543210'].join('-');
+      const outcome = await result(root, {
+        flags: { ask: `Should I rotate ${secret} before the deploy?` },
+        adapters: { anthropic },
+      });
+      const note = (outcome.output as { note: Record<string, unknown> }).note;
+      expect(note).toMatchObject({ id: 'n-1', trigger: 'ask', status: 'skipped', seat: null });
+      expect(String(note.reason)).toMatch(/^policy: /);
+      expect(note.refersTo).toEqual({});
+      expect(anthropic.calls).toHaveLength(0);
+      expect(JSON.stringify(outcome)).not.toContain(secret);
+      expect(await logText(root, outcome.session)).not.toContain(secret);
+    });
+  });
+
+  test('two concurrent note verbs mint distinct ids instead of both minting n-1', async () => {
+    await withRoot(async (root) => {
+      const anthropic = cautious('anthropic');
+      const call = () =>
+        result(root, {
+          flags: { watch: true, every: '1', transcript: '-' },
+          stdin: 'user: keep going\nassistant: dropping the table',
+          adapters: { anthropic },
+        });
+      const outcomes = await Promise.all([call(), call()]);
+      const ids = outcomes
+        .map((outcome) => (outcome.output as { note: { id: string } }).note.id)
+        .sort();
+      expect(ids).toEqual(['n-1', 'n-2']);
+      // A log carrying a duplicate id cannot be read back at all, so a session that still reports
+      // its notes is the proof that the two calls did not collide.
+      const status = await result(root, { flags: { status: true } });
+      expect(status.output).toMatchObject({ status: { exists: true, notes: 2 } });
+    });
+  });
+
+  test('two concurrent --end calls commit the log exactly once', async () => {
+    await withRoot(async (root) => {
+      const hold = await result(root, {
+        flags: { hold: true, class: 'deploy', tool: 'wrangler deploy' },
+      });
+      const call = () => result(root, { flags: { end: true } });
+      const outcomes = await Promise.all([call(), call()]);
+      const ended = outcomes.map(
+        (outcome) => (outcome.output as { ended: { notes: number; committed: boolean } }).ended,
+      );
+      expect(ended.filter((entry) => entry.committed)).toEqual([{ notes: 1, committed: true }]);
+      expect(ended.filter((entry) => !entry.committed)).toEqual([{ notes: 1, committed: false }]);
+      expect(outcomes.flatMap((outcome) => outcome.record.paths)).toEqual([
+        ModeSessionStore.open(root).absolutePath('advisor', hold.session),
+      ]);
+      const log = await logText(root, hold.session);
+      expect(log.match(/"kind":"ended"/g)).toHaveLength(1);
     });
   });
 

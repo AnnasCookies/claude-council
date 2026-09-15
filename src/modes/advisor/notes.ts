@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { EnvelopeSeatSchema, type EnvelopeSeat, type ModeSessionEvent } from '../../substrate';
+import {
+  EnvelopeSeatSchema,
+  scanAndRedact,
+  type EnvelopeSeat,
+  type ModeSessionEvent,
+} from '../../substrate';
 
 const TimestampSchema = z.string().datetime({ offset: true });
 
@@ -142,4 +147,15 @@ export function excerpt(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   const codePoints = [...flat];
   return codePoints.length <= limit ? flat : `${codePoints.slice(0, limit - 1).join('')}…`;
+}
+
+/**
+ * The excerpt form for anything that is written to the note log. The outbound guard hard-blocks a
+ * high-confidence secret, but it allows a payload whose findings were only redactions, and what it
+ * allowed outbound is not what should be kept: the log is durable and is committed to a
+ * repository, so the redacted form is the one that is stored. Redacting before the cut also keeps
+ * a placeholder whole rather than slicing a secret in half at the limit.
+ */
+export function safeExcerpt(text: string, limit: number): string {
+  return excerpt(scanAndRedact(text).redacted, limit);
 }

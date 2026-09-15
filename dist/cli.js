@@ -17899,6 +17899,9 @@ function withTransportResolution(adapter, transportResolution) {
   return {
     ...adapter,
     transportResolution,
+    async invoke(request) {
+      return adapter.invoke(request);
+    },
     async availability(context) {
       const availability = await adapter.availability(context);
       return availability.status === "available" ? { ...availability, reason: transportResolution.reason } : availability;
@@ -22604,11 +22607,18 @@ class ModeSessionStore {
   }
   async append(mode, sessionId, event) {
     const record2 = ModeSessionEventSchema.parse(event);
+    return this.appendDerived(mode, sessionId, () => record2);
+  }
+  async appendDerived(mode, sessionId, derive) {
     const path = this.absolutePath(mode, sessionId);
     return withScopeWriteLock(dirname2(path), async () => {
       const file2 = Bun.file(path);
       const existing = await file2.exists() ? await file2.text() : "";
-      parseEvents(existing, path);
+      const events = parseEvents(existing, path);
+      const derived = derive(events);
+      if (derived === null)
+        return { paths: [] };
+      const record2 = ModeSessionEventSchema.parse(derived);
       const content = `${existing}${JSON.stringify(record2)}
 `;
       await writeTextAtomically(path, content, {
@@ -22927,6 +22937,9 @@ function excerpt(text, limit) {
   const codePoints = [...flat];
   return codePoints.length <= limit ? flat : `${codePoints.slice(0, limit - 1).join("")}\u2026`;
 }
+function safeExcerpt(text, limit) {
+  return excerpt(scanAndRedact(text).redacted, limit);
+}
 
 // src/modes/advisor/seat.ts
 var AdvisorAnswerSchema = exports_external.strictObject({
@@ -23076,6 +23089,7 @@ async function consultSeat(input) {
 // src/modes/advisor/index.ts
 var ADVISOR_MODE = "advisor";
 var SESSION_PREFIX = "ad";
+var UNBOUND_SESSION = "unknown";
 var DEFAULT_EVERY = 3;
 var DEFAULT_WINDOW_MS = 8000;
 var MIN_WINDOW_MS = 100;
@@ -23083,6 +23097,9 @@ var MAX_WINDOW_MS = 60000;
 var SEAT_CEILING_MS = 120000;
 var WINDOW_CHARS = 24000;
 var VERBS = ["watch", "hold", "ask", "heed", "note", "start", "end", "status"];
+function isNoteVerb(verb) {
+  return verb === "watch" || verb === "hold" || verb === "ask" || verb === "note";
+}
 var AdvisorOutputSchema = exports_external.union([
   exports_external.strictObject({ note: AdvisorNoteSchema }),
   exports_external.strictObject({ heeded: exports_external.strictObject({ id: NoteIdSchema, value: HeededSchema }) }),
@@ -23192,7 +23209,11 @@ function cadenceFamilies(input) {
   const value = oneFlag(input, "cadence-family");
   if (value === undefined)
     return input.options.providerFamilies;
-  const family = ProviderFamilySchema.parse(value.trim());
+  const parsed = ProviderFamilySchema.safeParse(value.trim());
+  if (!parsed.success) {
+    throw new Error(`--cadence-family must be one of ${ProviderFamilySchema.options.join(", ")}`);
+  }
+  const family = parsed.data;
   if (!input.options.eligibleProviderFamilies.includes(family)) {
     throw new Error(`--cadence-family ${family} is not an eligible provider family`);
   }
@@ -23223,7 +23244,7 @@ async function readRequest(verb, input) {
       return {
         trigger: "hold",
         material: tool,
-        refersTo: { toolCall: excerpt(tool, TOOL_CALL_EXCERPT_LIMIT) },
+        refersTo: { toolCall: safeExcerpt(tool, TOOL_CALL_EXCERPT_LIMIT) },
         families: input.options.providerFamilies,
         budgetMs: integerFlag(input, "window-ms", DEFAULT_WINDOW_MS, MIN_WINDOW_MS, MAX_WINDOW_MS),
         riskClass: riskClass.data
@@ -23234,7 +23255,7 @@ async function readRequest(verb, input) {
       return {
         trigger: "ask",
         material: question,
-        refersTo: { question: excerpt(question, QUESTION_EXCERPT_LIMIT) },
+        refersTo: { question: safeExcerpt(question, QUESTION_EXCERPT_LIMIT) },
         families: input.options.providerFamilies,
         budgetMs: ceiling
       };
@@ -23267,20 +23288,20 @@ function unserved(base, status, reason) {
   };
 }
 async function consult(input, request, log, at) {
-  const base = { id: nextNoteId(log), trigger: request.trigger, refersTo: request.refersTo, at };
+  const base = { trigger: request.trigger, refersTo: request.refersTo, at };
   if (request.every !== undefined && !cadenceDue(log, request.every)) {
     return unserved(base, "skipped", "cadence");
   }
   const decision = input.guard([request.material]);
   if (decision.kind === "blocked") {
-    return unserved(base, "skipped", `policy: ${decision.reasonCodes.join(", ")}`);
+    return unserved({ ...base, refersTo: {} }, "skipped", `policy: ${decision.reasonCodes.join(", ")}`);
   }
   if (request.trigger === "external") {
     return {
       note: {
         ...base,
         severity: "info",
-        text: excerpt(request.material, NOTE_TEXT_LIMIT),
+        text: safeExcerpt(request.material, NOTE_TEXT_LIMIT),
         heeded: "unknown",
         status: "ok",
         reason: null,
@@ -23327,10 +23348,11 @@ async function handle(input) {
     throw new Error("advise requires --records-root: the note log is the record");
   }
   const verb = verbOf(input);
+  const request = isNoteVerb(verb) ? await readRequest(verb, input) : null;
   const session2 = await resolveSession(input, sessions, verb);
   if (session2 === null) {
     return completed({
-      session: input.options.sessionKey ?? "unknown",
+      session: UNBOUND_SESSION,
       output: { status: { exists: false, notes: 0, last: null } },
       recordPath: null
     });
@@ -23365,24 +23387,19 @@ async function handle(input) {
   if (verb === "end") {
     if (!session2.exists)
       throw new Error(`Unknown advisor session: ${session2.id}`);
-    if (log.ended) {
-      return completed({
-        session: session2.id,
-        output: { ended: { notes: log.notes.length, committed: false } },
-        recordPath,
-        seats: log.seats
-      });
-    }
-    const written = await sessions.append(ADVISOR_MODE, session2.id, {
-      at,
-      kind: "ended",
-      data: { notes: log.notes.length }
+    let ended = { notes: log.notes.length, committed: false };
+    let seats = log.seats;
+    const written = await sessions.appendDerived(ADVISOR_MODE, session2.id, (events) => {
+      const current = readAdvisorLog(events);
+      seats = current.seats;
+      ended = { notes: current.notes.length, committed: !current.ended };
+      return current.ended ? null : { at, kind: "ended", data: { notes: current.notes.length } };
     });
     return completed({
       session: session2.id,
-      output: { ended: { notes: log.notes.length, committed: true } },
+      output: { ended },
       recordPath,
-      seats: log.seats,
+      seats,
       paths: written.paths
     });
   }
@@ -23397,7 +23414,7 @@ async function handle(input) {
     if (!heeded.success || rest.length > 0) {
       throw new Error("advise --heed <note-id> takes exactly one of yes, no or unknown");
     }
-    if (!log.notes.some((note) => note.id === id))
+    if (!log.notes.some((note2) => note2.id === id))
       throw new Error(`Unknown advisor note: ${id}`);
     await sessions.append(ADVISOR_MODE, session2.id, {
       at,
@@ -23410,21 +23427,26 @@ async function handle(input) {
       recordPath
     });
   }
-  const request = await readRequest(verb, input);
+  if (request === null)
+    throw new Error(`advise --${verb} carries no note request`);
   const consulted = await consult(input, request, log, at);
-  await sessions.append(ADVISOR_MODE, session2.id, {
-    at,
-    kind: "note",
-    data: { note: consulted.note, seat: consulted.seat }
+  let note = { ...consulted.note, id: nextNoteId(log) };
+  await sessions.appendDerived(ADVISOR_MODE, session2.id, (events) => {
+    const current = readAdvisorLog(events);
+    if (current.ended) {
+      throw new Error(`Advisor session ${session2.id} has ended; start a new session`);
+    }
+    note = { ...consulted.note, id: nextNoteId(current) };
+    return { at, kind: "note", data: { note, seat: consulted.seat } };
   });
   return completed({
     session: session2.id,
-    output: { note: consulted.note },
+    output: { note },
     recordPath,
     seats: consulted.seat === null ? [] : [consulted.seat],
     rounds: consulted.rounds,
     spend: consulted.spend,
-    degraded: consulted.note.status === "ok" ? [] : [`note-${consulted.note.status}: ${consulted.note.reason ?? "unknown"}`]
+    degraded: note.status === "ok" ? [] : [`note-${note.status}: ${note.reason ?? "unknown"}`]
   });
 }
 var advisor = {

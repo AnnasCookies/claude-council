@@ -97,8 +97,11 @@ describe('modes registry', () => {
     expect(modes['second-opinion'].spend.defaultCap(5, 1)).toBe(5);
   });
 
-  test('an unknown mode fails with the registered names', () => {
-    expect(() => getMode('forum')).toThrow(/Unknown mode: forum.*committee, second-opinion/);
+  test('an unknown mode fails with the whole registered list', () => {
+    // Anchored on both ends: a prefix match passed while the advisor was missing from the listing.
+    expect(() => getMode('forum')).toThrow(
+      /^Unknown mode: forum\. Registered modes: committee, second-opinion, advisor$/,
+    );
   });
 
   test('commands resolve to modes as they did before', () => {

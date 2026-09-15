@@ -20,9 +20,9 @@ import {
   RiskClassSchema,
   TOOL_CALL_EXCERPT_LIMIT,
   cadenceDue,
-  excerpt,
   nextNoteId,
   readAdvisorLog,
+  safeExcerpt,
   type AdvisorLog,
   type AdvisorNote,
   type NoteTrigger,
@@ -38,6 +38,14 @@ import {
 
 export const ADVISOR_MODE = 'advisor';
 const SESSION_PREFIX = 'ad';
+/**
+ * What the envelope reports when `--status` was asked about a harness key no log is bound to.
+ * The envelope's `session` is a store session id and its schema refuses an empty string, and the
+ * harness key is neither: echoing it there put a foreign identifier in the field every other
+ * envelope fills with an id of this engine's own making. The status block already says
+ * `exists: false`, so this is a placeholder, not a fact being hidden.
+ */
+const UNBOUND_SESSION = 'unknown';
 const DEFAULT_EVERY = 3;
 const DEFAULT_WINDOW_MS = 8_000;
 const MIN_WINDOW_MS = 100;
@@ -50,6 +58,11 @@ const WINDOW_CHARS = 24_000;
 const VERBS = ['watch', 'hold', 'ask', 'heed', 'note', 'start', 'end', 'status'] as const;
 type Verb = (typeof VERBS)[number];
 type NoteVerb = Extract<Verb, 'watch' | 'hold' | 'ask' | 'note'>;
+
+/** The verbs that produce a note, and so the ones whose own flags `readRequest` validates. */
+function isNoteVerb(verb: Verb): verb is NoteVerb {
+  return verb === 'watch' || verb === 'hold' || verb === 'ask' || verb === 'note';
+}
 
 export const AdvisorOutputSchema = z.union([
   z.strictObject({ note: AdvisorNoteSchema }),
@@ -201,7 +214,11 @@ async function windowText(input: HandlerInput): Promise<string> {
 function cadenceFamilies(input: HandlerInput): readonly ProviderFamily[] {
   const value = oneFlag(input, 'cadence-family');
   if (value === undefined) return input.options.providerFamilies;
-  const family = ProviderFamilySchema.parse(value.trim());
+  const parsed = ProviderFamilySchema.safeParse(value.trim());
+  if (!parsed.success) {
+    throw new Error(`--cadence-family must be one of ${ProviderFamilySchema.options.join(', ')}`);
+  }
+  const family = parsed.data;
   if (!input.options.eligibleProviderFamilies.includes(family)) {
     throw new Error(`--cadence-family ${family} is not an eligible provider family`);
   }
@@ -251,7 +268,7 @@ async function readRequest(verb: NoteVerb, input: HandlerInput): Promise<NoteReq
       return {
         trigger: 'hold',
         material: tool,
-        refersTo: { toolCall: excerpt(tool, TOOL_CALL_EXCERPT_LIMIT) },
+        refersTo: { toolCall: safeExcerpt(tool, TOOL_CALL_EXCERPT_LIMIT) },
         families: input.options.providerFamilies,
         budgetMs: integerFlag(input, 'window-ms', DEFAULT_WINDOW_MS, MIN_WINDOW_MS, MAX_WINDOW_MS),
         riskClass: riskClass.data,
@@ -262,7 +279,7 @@ async function readRequest(verb: NoteVerb, input: HandlerInput): Promise<NoteReq
       return {
         trigger: 'ask',
         material: question,
-        refersTo: { question: excerpt(question, QUESTION_EXCERPT_LIMIT) },
+        refersTo: { question: safeExcerpt(question, QUESTION_EXCERPT_LIMIT) },
         families: input.options.providerFamilies,
         budgetMs: ceiling,
       };
@@ -287,14 +304,15 @@ async function readRequest(verb: NoteVerb, input: HandlerInput): Promise<NoteReq
 }
 
 interface Consulted {
-  readonly note: AdvisorNote;
+  /** Everything but the id, which only the store's write lock can mint without a collision. */
+  readonly note: Omit<AdvisorNote, 'id'>;
   readonly seat: EnvelopeSeat | null;
   readonly spend: Spend;
   readonly rounds: number;
 }
 
 function unserved(
-  base: Pick<AdvisorNote, 'id' | 'trigger' | 'refersTo' | 'at'>,
+  base: Pick<AdvisorNote, 'trigger' | 'refersTo' | 'at'>,
   status: 'skipped' | 'no-advice',
   reason: string,
 ): Consulted {
@@ -312,7 +330,7 @@ async function consult(
   log: AdvisorLog,
   at: string,
 ): Promise<Consulted> {
-  const base = { id: nextNoteId(log), trigger: request.trigger, refersTo: request.refersTo, at };
+  const base = { trigger: request.trigger, refersTo: request.refersTo, at };
   if (request.every !== undefined && !cadenceDue(log, request.every)) {
     return unserved(base, 'skipped', 'cadence');
   }
@@ -320,14 +338,22 @@ async function consult(
   // commands apply to a motion. A hard-blocked secret never reaches a seat or the record.
   const decision = input.guard([request.material]);
   if (decision.kind === 'blocked') {
-    return unserved(base, 'skipped', `policy: ${decision.reasonCodes.join(', ')}`);
+    // What the guard refused does not reach the record either. The excerpt in `base.refersTo` was
+    // cut from the very text it blocked, so the note keeps the reason and drops the excerpt: a
+    // note that reads "policy: high-confidence-secret-detected" and then quotes the secret is the
+    // leak the guard exists to prevent, and the log outlives the run.
+    return unserved(
+      { ...base, refersTo: {} },
+      'skipped',
+      `policy: ${decision.reasonCodes.join(', ')}`,
+    );
   }
   if (request.trigger === 'external') {
     return {
       note: {
         ...base,
         severity: 'info',
-        text: excerpt(request.material, NOTE_TEXT_LIMIT),
+        text: safeExcerpt(request.material, NOTE_TEXT_LIMIT),
         heeded: 'unknown',
         status: 'ok',
         reason: null,
@@ -374,10 +400,14 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     throw new Error('advise requires --records-root: the note log is the record');
   }
   const verb = verbOf(input);
+  // A note verb's own flags are read before the session is resolved, because resolving a harness
+  // key binds an alias: a request about to be refused for a missing --tool or an unknown --class
+  // must not leave a minted session id bound to the key behind it.
+  const request = isNoteVerb(verb) ? await readRequest(verb, input) : null;
   const session = await resolveSession(input, sessions, verb);
   if (session === null) {
     return completed({
-      session: input.options.sessionKey ?? 'unknown',
+      session: UNBOUND_SESSION,
       output: { status: { exists: false, notes: 0, last: null } },
       recordPath: null,
     });
@@ -412,26 +442,23 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   }
   if (verb === 'end') {
     if (!session.exists) throw new Error(`Unknown advisor session: ${session.id}`);
-    if (log.ended) {
-      return completed({
-        session: session.id,
-        output: { ended: { notes: log.notes.length, committed: false } },
-        recordPath,
-        seats: log.seats,
-      });
-    }
     // The only verb that hands the log to the CLI's commit path: the session's note log is its
-    // terminal record, committed once, when the session ends.
-    const written = await sessions.append(ADVISOR_MODE, session.id, {
-      at,
-      kind: 'ended',
-      data: { notes: log.notes.length },
+    // terminal record, committed once, when the session ends. Whether it has already ended is
+    // decided from the log under the store's write lock rather than from the read above, so two
+    // --end calls racing each other cannot both report a commit of the same log.
+    let ended = { notes: log.notes.length, committed: false };
+    let seats: readonly EnvelopeSeat[] = log.seats;
+    const written = await sessions.appendDerived(ADVISOR_MODE, session.id, (events) => {
+      const current = readAdvisorLog(events);
+      seats = current.seats;
+      ended = { notes: current.notes.length, committed: !current.ended };
+      return current.ended ? null : { at, kind: 'ended', data: { notes: current.notes.length } };
     });
     return completed({
       session: session.id,
-      output: { ended: { notes: log.notes.length, committed: true } },
+      output: { ended },
       recordPath,
-      seats: log.seats,
+      seats,
       paths: written.paths,
     });
   }
@@ -456,24 +483,31 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
       recordPath,
     });
   }
-  const request = await readRequest(verb, input);
+  // Every other verb has returned, so this one is a note verb and its request was read at the top
+  // of the handler; the check is what tells the compiler so.
+  if (request === null) throw new Error(`advise --${verb} carries no note request`);
   const consulted = await consult(input, request, log, at);
-  await sessions.append(ADVISOR_MODE, session.id, {
-    at,
-    kind: 'note',
-    data: { note: consulted.note, seat: consulted.seat },
+  // The note id is minted from the log inside the store's write lock, not from the read above.
+  // Two hooks firing at once would otherwise both mint n-1, and a log carrying a duplicate id
+  // fails every later read, so the session could never again be read, heeded or ended. The seat
+  // is consulted before the lock is taken; only what depends on the log is decided under it.
+  let note: AdvisorNote = { ...consulted.note, id: nextNoteId(log) };
+  await sessions.appendDerived(ADVISOR_MODE, session.id, (events) => {
+    const current = readAdvisorLog(events);
+    if (current.ended) {
+      throw new Error(`Advisor session ${session.id} has ended; start a new session`);
+    }
+    note = { ...consulted.note, id: nextNoteId(current) };
+    return { at, kind: 'note', data: { note, seat: consulted.seat } };
   });
   return completed({
     session: session.id,
-    output: { note: consulted.note },
+    output: { note },
     recordPath,
     seats: consulted.seat === null ? [] : [consulted.seat],
     rounds: consulted.rounds,
     spend: consulted.spend,
-    degraded:
-      consulted.note.status === 'ok'
-        ? []
-        : [`note-${consulted.note.status}: ${consulted.note.reason ?? 'unknown'}`],
+    degraded: note.status === 'ok' ? [] : [`note-${note.status}: ${note.reason ?? 'unknown'}`],
   });
 }
 
