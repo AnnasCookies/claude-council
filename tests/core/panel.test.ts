@@ -445,6 +445,119 @@ describe('runPanel', () => {
     expect(anthropic.calls[0]?.context.timeoutMs).toBeLessThanOrEqual(1_000);
   });
 
+  test('holds seats in flight to the concurrency bound and still answers every seat in order', async () => {
+    const seats = spreadSeats(['anthropic', 'openai'], lenses(10), registry);
+    let inFlight = 0;
+    let peak = 0;
+    const reply: FakeReply = async (request) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      inFlight -= 1;
+      return ok(
+        request,
+        request.seatId.startsWith('anthropic') ? 'anthropic' : 'openai',
+        '{"vote":"yes","note":"fine"}',
+      );
+    };
+    const result = await runPanel(
+      {
+        adapters: {
+          anthropic: new FakeAdapter('anthropic', reply),
+          openai: new FakeAdapter('openai', reply),
+        },
+        context: context(),
+      },
+      {
+        seats,
+        prompt: (seat) => seat.lens.description,
+        answer,
+        spend: capped(),
+        concurrency: 3,
+      },
+    );
+    expect(peak).toBe(3);
+    expect(result.answered).toBe(10);
+    // Workers finish out of order; the result must still be seat order, because a mode reads
+    // `seats[i]` as the answer from the lens it built `seats[i]` for.
+    expect(result.seats.map((seat) => seat.id)).toEqual(seats.map((seat) => seat.id));
+  });
+
+  test('rejects a concurrency outside one to twenty-four', async () => {
+    const seats = spreadSeats(['anthropic'], lenses(1), registry);
+    const anthropic = new FakeAdapter('anthropic', (request) =>
+      ok(request, 'anthropic', '{"vote":"yes","note":"n"}'),
+    );
+    const config = { adapters: { anthropic }, context: context() };
+    const input = { seats, prompt: () => 'p', answer, spend: capped() };
+    await expect(runPanel(config, { ...input, concurrency: 0 })).rejects.toThrow();
+    await expect(runPanel(config, { ...input, concurrency: 25 })).rejects.toThrow();
+    await expect(runPanel(config, { ...input, concurrency: 1.5 })).rejects.toThrow();
+    expect(anthropic.calls).toHaveLength(0);
+  });
+
+  test('a blank answer instruction is refused before any prompt is built', async () => {
+    const seats = spreadSeats(['anthropic'], lenses(1), registry);
+    const anthropic = new FakeAdapter('anthropic', (request) =>
+      ok(request, 'anthropic', '{"vote":"yes","note":"n"}'),
+    );
+    await expect(
+      runPanel(
+        { adapters: { anthropic }, context: context() },
+        {
+          seats,
+          prompt: () => 'p',
+          answer: { ...answer, instruction: '   \n  ' },
+          spend: capped(),
+        },
+      ),
+    ).rejects.toThrow(/non-blank instruction/);
+    expect(anthropic.calls).toHaveLength(0);
+  });
+
+  test('a seat the pool reaches after the panel deadline fails as timeout rather than running on', async () => {
+    const seats = spreadSeats(['anthropic', 'openai'], lenses(2), registry);
+    const slow = new FakeAdapter('anthropic', async (request) => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return ok(request, 'anthropic', '{"vote":"yes","note":"slow"}');
+    });
+    const openai = new FakeAdapter('openai', (request) =>
+      ok(request, 'openai', '{"vote":"yes","note":"n"}'),
+    );
+    const result = await runPanel(
+      { adapters: { anthropic: slow, openai }, context: { ...context(), timeoutMs: 20 } },
+      { seats, prompt: () => 'p', answer, spend: capped(), concurrency: 1 },
+    );
+    expect(result.seats[0]?.status).toBe('ok');
+    expect(result.seats[1]).toMatchObject({ status: 'failed', code: 'timeout', latencyMs: null });
+    expect(result.seats[1]?.reason).toContain('deadline');
+    expect(openai.calls).toHaveLength(0);
+    expect(result.answered).toBe(1);
+  });
+
+  test('never-metered reports a metered transport an adapter took anyway, rather than hiding it', async () => {
+    // `used` counts what the adapters say they spent, not what the policy allowed. A panel that
+    // reported zero here would make a mis-wired roster invisible on the record.
+    const seats = spreadSeats(['anthropic'], lenses(1), registry);
+    const anthropic = new FakeAdapter('anthropic', (request) =>
+      ok(request, 'anthropic', '{"vote":"yes","note":"paid"}', { credentialPath: 'api-key' }),
+    );
+    const result = await runPanel(
+      { adapters: { anthropic }, context: context() },
+      { seats, prompt: () => 'p', answer, spend: { policy: 'never-metered' } },
+    );
+    expect(result.seats[0]).toMatchObject({ status: 'ok', transport: 'api' });
+    expect(result.spend).toEqual({
+      billing: 'sub-only',
+      policy: 'never-metered',
+      cap: 0,
+      used: 1,
+      fallbacks: 0,
+      refused: 0,
+      stoppedAtCap: false,
+    });
+  });
+
   test('a hard-blocked secret in any prompt stops the panel before any seat is invoked', async () => {
     const seats = spreadSeats(['anthropic', 'openai'], lenses(2), registry);
     const anthropic = new FakeAdapter('anthropic', (request) =>

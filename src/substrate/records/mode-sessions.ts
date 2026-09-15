@@ -23,13 +23,29 @@ export const ModeSessionModeSchema = z
   .regex(/^[a-z][a-z-]{0,31}$/, 'A mode name is lower-case letters and hyphens');
 
 /**
+ * The mode's own payload, kept opaque so a corrupt or foreign line is refused on structure alone
+ * rather than on a mode's semantics. Opaque is not anything: `undefined` does not survive
+ * `JSON.stringify`, so it used to be accepted here and then fail the store's own read-back of the
+ * line it had just written, blaming the file for the caller's value. It is refused on the way in
+ * instead, where the message can say what to pass instead. Declared as `ZodType<unknown>` so a
+ * mode may still hand over a value it holds only as `unknown`; this check is what rules out the
+ * one value that cannot round-trip.
+ */
+const ModeSessionDataSchema: z.ZodType<unknown> = z
+  .unknown()
+  .refine(
+    (value) => value !== undefined,
+    'A mode session event needs JSON-serialisable data; pass null for an event that carries none',
+  );
+
+/**
  * One line of a session log. `data` is the mode's own shape; the store keeps it opaque so a
  * corrupt or foreign line is refused on structure alone, not on a mode's semantics.
  */
 export const ModeSessionEventSchema = z.strictObject({
   at: TimestampSchema,
   kind: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, 'An event kind is a lower-case slug'),
-  data: z.unknown(),
+  data: ModeSessionDataSchema,
 });
 export type ModeSessionEvent = z.infer<typeof ModeSessionEventSchema>;
 

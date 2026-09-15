@@ -101,6 +101,21 @@ describe('ModeSessionStore', () => {
     });
   });
 
+  test('refuses data that cannot round-trip through JSON, before the file is touched', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      const id = store.newSessionId('ad', NOW);
+      // `undefined` used to pass the input parse, then vanish from the written line and fail the
+      // store's own read-back — a file-level error for a caller-level mistake.
+      await expect(store.append('advisor', id, event('note', undefined))).rejects.toThrow(
+        /JSON-serialisable data/,
+      );
+      expect(existsSync(join(root, 'general'))).toBe(false);
+      await store.append('advisor', id, event('note', null));
+      expect((await store.read('advisor', id))[0]).toEqual({ at: NOW, kind: 'note', data: null });
+    });
+  });
+
   test('refuses to extend a log it cannot read back', async () => {
     await withRoot(async (root) => {
       const store = ModeSessionStore.open(root);

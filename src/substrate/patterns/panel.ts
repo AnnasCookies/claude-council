@@ -64,7 +64,9 @@ export function panelSeatId(family: ProviderFamily, model: string, lens: string)
  * One seat per lens, families dealt round-robin in the order given: twelve lenses over four
  * families is three seats per family, and the first lens always lands on the first family so a
  * caller can reason about the spread. The model is the family's registered primary, which is the
- * requested identity the adapter later verifies.
+ * requested identity the adapter later verifies. Only the primary: a mode that wants a family's
+ * cheaper or larger model for some seats hand-builds its {@link PanelSeatSpec}s instead of
+ * calling this.
  */
 export function spreadSeats(
   families: readonly ProviderFamily[],
@@ -84,6 +86,10 @@ export function spreadSeats(
   });
   return PanelSeatSpecsSchema.parse(seats);
 }
+
+/** The default bound on seats in flight, and the range a caller may ask for instead. */
+export const DEFAULT_PANEL_CONCURRENCY = 6;
+const PanelConcurrencySchema = z.number().int().min(1).max(24).default(DEFAULT_PANEL_CONCURRENCY);
 
 export type PanelSpend =
   | { readonly policy: 'never-metered' }
@@ -107,6 +113,12 @@ export interface PanelInput<T> {
   readonly prompt: (seat: PanelSeatSpec) => string;
   readonly answer: PanelAnswer<T>;
   readonly spend: PanelSpend;
+  /**
+   * How many seats may be in flight at once. Default six, which is the widest family roster; a
+   * twelve-voice panel would otherwise start twelve provider processes together and the machine,
+   * not the panel, pays for that. One to twenty-four, validated.
+   */
+  readonly concurrency?: number;
 }
 
 export interface PanelConfig {
@@ -378,6 +390,35 @@ async function invokeSeat<T>(
   return unservedSeat(seat, 'failed', response.error.code, response.error.message, response);
 }
 
+/**
+ * A bounded worker pool rather than one `Promise.all` over every prepared seat. Workers draw the
+ * next index from a shared cursor and write their result back at that index, so the returned array
+ * stays in `seats` order however the seats interleave, and at most `concurrency` seats — and so at
+ * most `concurrency` provider processes — are ever live.
+ */
+async function invokeSeats<T>(
+  config: PanelConfig,
+  input: PanelInput<T>,
+  prepared: readonly PreparedSeat[],
+  ledger: SpendLedger,
+  deadline: number,
+  concurrency: number,
+): Promise<PanelSeat<T>[]> {
+  const results: PanelSeat<T>[] = new Array<PanelSeat<T>>(prepared.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (let index = next; index < prepared.length; index = next) {
+      next += 1;
+      const entry = prepared[index];
+      if (entry === undefined) return;
+      results[index] = await invokeSeat(config, input, entry, ledger, deadline);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, prepared.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 function panelSpend<T>(spend: PanelSpend, seats: readonly PanelSeat<T>[]): Spend {
   const used = seats.filter((seat) => seat.transport === 'api').length;
   const fallbacks = seats.filter((seat) => seat.fallback).length;
@@ -407,16 +448,19 @@ function panelSpend<T>(spend: PanelSpend, seats: readonly PanelSeat<T>[]): Spend
 }
 
 /**
- * One blind round over N seats. Every seat is invoked at once with the prompt the caller built
- * for it, so no seat can see another's output from this round; the caller carries prior
- * material as data through {@link untrustedBlock}. Each reply is parsed as JSON and validated
- * against the caller's schema, and a miss keeps the raw text as an `invalid` seat.
+ * One blind round over N seats. Seats are invoked concurrently, up to `input.concurrency` at a
+ * time, each with the prompt the caller built for it, so no seat can see another's output from
+ * this round; the caller carries prior material as data through {@link untrustedBlock}. Each reply
+ * is parsed as JSON and validated against the caller's schema, and a miss keeps the raw text as an
+ * `invalid` seat. The panel deadline is shared: it starts before the first seat, so a seat the
+ * pool reaches after it has passed fails as `timeout` rather than running past it.
  */
 export async function runPanel<T>(
   config: PanelConfig,
   input: PanelInput<T>,
 ): Promise<PanelResult<T>> {
   const seats = PanelSeatSpecsSchema.parse(input.seats);
+  const concurrency = PanelConcurrencySchema.parse(input.concurrency);
   if (input.answer.instruction.trim().length === 0) {
     throw new Error('A panel answer contract needs a non-blank instruction');
   }
@@ -434,9 +478,7 @@ export async function runPanel<T>(
   // is touched, so a roster built with fallbacks still cannot reach a metered key from here.
   const ledger = input.spend.policy === 'capped' ? input.spend.ledger : createSpendLedger(0);
   const deadline = Date.now() + config.context.timeoutMs;
-  const results = await Promise.all(
-    prepared.map((entry) => invokeSeat(config, input, entry, ledger, deadline)),
-  );
+  const results = await invokeSeats(config, input, prepared, ledger, deadline, concurrency);
   const answered = results.filter((seat) => seat.status === 'ok');
   return {
     seats: results,

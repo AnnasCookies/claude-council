@@ -111,7 +111,8 @@ describe('panel seats in the envelope', () => {
     expect(envelope.dissent).toHaveLength(1);
     expect(envelope.unanimous).toBe(false);
     expect(ResultEnvelopeSchema.parse(envelope)).toEqual(envelope);
-    expect(() => buildEnvelope({ ...envelopeInput(seats), rounds: 4 })).toThrow();
+    expect(buildEnvelope({ ...envelopeInput(seats), rounds: 6 }).rounds).toBe(6);
+    expect(() => buildEnvelope({ ...envelopeInput(seats), rounds: 7 })).toThrow();
   });
 
   test('the runner-backed input still derives seats and unanimity itself', () => {

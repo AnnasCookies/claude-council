@@ -76,13 +76,21 @@ export const EnvelopeRecordSchema = z.strictObject({
 });
 export type EnvelopeRecord = z.infer<typeof EnvelopeRecordSchema>;
 
+/**
+ * The most rounds any envelope may report. The council runner and the session record it persists
+ * keep their own, lower ceiling of three blind-plus-rebuttal-plus-refinement rounds; a handler mode
+ * that runs its own passes — a forum's rebuttals, a consultants' redraft — may report up to six,
+ * and anything beyond that is a mode that has lost count rather than a longer deliberation.
+ */
+export const MAX_ENVELOPE_ROUNDS = 6;
+
 export const ResultEnvelopeSchema = z.strictObject({
   schemaVersion: z.literal(1),
   mode: NonEmptyStringSchema,
   session: NonEmptyStringSchema,
   caller: CallerSchema,
   pattern: ExecutionPatternSchema,
-  rounds: z.number().int().min(0).max(3),
+  rounds: z.number().int().min(0).max(MAX_ENVELOPE_ROUNDS),
   seats: z.array(EnvelopeSeatSchema),
   output: z.record(z.string(), z.unknown()),
   synthesis: z.strictObject({ by: NonEmptyStringSchema, text: NonEmptyStringSchema }).nullable(),
