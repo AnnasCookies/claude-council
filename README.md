@@ -88,6 +88,18 @@ bun --no-install dist/cli.js council \
   --billing api-only \
   --motion "Which integration boundary should this client service expose?"
 
+# A room for divergence: twelve cheap seats, one lens each, grouped but never ranked
+bun --no-install dist/cli.js ideate \
+  --records-root ~/.claude/council \
+  --caller human --harness "Claude Code" \
+  --seats 12 --ideas-per-seat 3 \
+  --motion "Ways to make advisor notes visible without interrupting flow"
+
+# Go deeper inside the groups you picked; only their ideas are shown to the seats
+bun --no-install dist/cli.js ideate \
+  --records-root ~/.claude/council \
+  --session id-2026-09-15-3f9a1c --expand k-2,k-5
+
 # Live route diagnostics
 bun --no-install dist/cli.js doctor --json
 
@@ -151,6 +163,46 @@ Verbs: `--start` (create a log and print its id), `--watch --every N --transcrip
 | agy         | none                                                                               | none                                                 | none                 | on demand only: `advise --ask`                                                         |
 
 omp's native `advisor:` seat is not wired; `--note --from omp` is the contract for when it is.
+
+## Ideation
+
+`ideate` is a room for divergence. Many cheap seats, each holding one catalogue lens or a supplied
+persona, answer the same prompt blind and in parallel; the engine groups what comes back and never
+chooses. The selection is yours.
+
+| Flag                        | Default                           | What it does                                                                                                                                                                                             |
+| --------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--seats <n>`               | 12, or the number of lenses named | How many seats, 1 to 24.                                                                                                                                                                                 |
+| `--lenses <a,b,c>`          | the governed catalogue, cycled    | Catalogue lens names (`security`, `operator`, `devils-advocate`, …). Naming more lenses than seats is an error; a room larger than the list cycles it, and the second time round a lens is `security-2`. |
+| `--personas <file>`         | —                                 | A JSON array of `{ "name", "description" }` supplied with the call, used instead of lenses. Its text is checked by the outbound policy before it reaches a provider.                                     |
+| `--ideas-per-seat <n>`      | 3                                 | How many ideas to ask each seat for, 1 to 10. A seat that returns more is generous, not wrong: the first `n` are kept.                                                                                   |
+| `--models <family>=<model>` | the cheap model per family        | Pin a model for a family.                                                                                                                                                                                |
+| `--expand <k-2,k-5>`        | —                                 | With `--session`, run another pass scoped to those clusters.                                                                                                                                             |
+
+Seats are cheap by default. The model registry records no cost, only a primary and same-family
+fallbacks, so `ideate` takes each family's first registered fallback where it lists one and its
+primary otherwise, and it drops the dearer primary from the fallbacks so a substituted model fails
+identity verification rather than billing quietly.
+
+Spend is `capped` under `sub-first`. Reaching the cap exits `4` even though the run completed. The
+default cap is not sized on seats or rounds, because the panel resolves seats only after this mode
+has run and the CLI cannot know the seat count yet: it is sized from the eligible provider
+families instead, one metered-fallback refusal per family, so a larger room or more lenses on the
+same family does not raise it. `--spend-cap <n>` overrides it.
+
+Every idea from every pass is kept, including the ones you did not pick. `ideate` needs a records
+root for that reason and exits `2` without one; each pass appends a `pass` line and a `cluster`
+line to `<records-root>/general/modes/ideation/<session>.jsonl`, and the terminal record is
+committed before the run reports success.
+
+The clustering is the engine's own and is labelled as such. Ideas are lowercased, stripped of
+punctuation and stopwords, compared by Jaccard over their token sets and grouped at 0.5 by
+union-find; a cluster's label is the three commonest tokens across its ideas, or the idea's own
+text when it stands alone. Nothing is scored, ranked or voted on by a model or by the engine: the
+cluster order is simply the order in which each group's first idea arrived, and `raw` — every idea
+id in arrival order — is always in the output, so a reader who distrusts the grouping can ignore
+it entirely. Clusters keep their ids across passes wherever a group is still the best home for its
+members, and a number retired by a merge is never issued again.
 
 ## Scope and project policy
 

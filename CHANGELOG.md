@@ -23,6 +23,17 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   own output, so a handler mode's minutes hold its result.
 - **Handler modes may take a session key and bare arguments** (`session: 'key'`,
   `acceptsPositionals`), and `advise` reads stdin only with `--transcript -`.
+- **Ideation mode.** `convene ideate` opens a room for divergence: many cheap seats, one catalogue
+  lens or supplied persona each, answering the same prompt blind and in parallel, then a
+  deterministic grouping the engine labels as its own. `--seats`, `--lenses`, `--personas`,
+  `--ideas-per-seat`, `--models` and, with `--session`, `--expand k-2,k-5` for a further pass
+  scoped to the clusters you named — those clusters' ideas are the only prior material a seat
+  sees, and they arrive as quoted, escaped data. Nothing is scored, ranked or voted on, the
+  unclustered list is always in the output, and every idea from every pass is kept on a session
+  log under the records root, which the mode requires. Seats are cheap by default: each family's
+  first registered fallback where it lists one, the primary otherwise, and the dearer primary is
+  dropped from the fallbacks so a substituted model fails identity rather than billing quietly.
+  See `docs/modes.md` and the Ideation section of the README.
 
 ## 2026.9.6
 

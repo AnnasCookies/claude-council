@@ -376,8 +376,11 @@ ranked. Tempo: minutes. Records: every idea from every pass, and the cluster lab
 **Example.**
 
 ```text
-council ideate --seats 12 --motion "Ways to make advisor notes visible without interrupting flow"   # new
-council ideate --session i3 --expand k-2,k-5                                                          # new
+council ideate --seats 12 --motion "Ways to make advisor notes visible without interrupting flow"
+council ideate --seats 6 --lenses security,operator,critic --ideas-per-seat 5 --motion "…"
+council ideate --seats 8 --personas ./personas.json --motion "…"
+council ideate --seats 12 --models google=gemini-3.6-flash-high --motion "…"
+council ideate --session id-2026-09-15-3f9a1c --expand k-2,k-5
 ```
 
 ## Triage

@@ -30,14 +30,25 @@ secrets (`policy/`, `evidence/`), records (`records/`), health (`health/`), the 
 patterns (`patterns/`), the spend ledger (`spend.ts`), the result envelope (`envelope.ts`) and
 the session helpers (`session.ts`). Its only public entry is `src/substrate/index.ts`.
 
-`src/modes/` is a registry of `ModeDefinition`s. A mode declares the five knobs from
-`docs/vision.md`, its execution pattern, its defaults, its spend policy, how it prepares a
-session (the committee's health preflight lives here) and the shape of its `output` block.
-`committee`, `second-opinion` and `advisor` are registered; `docs/modes.md` specifies the rest.
-The advisor is the first handler-style mode: it owns its execution (one panel seat under
-`never-metered`, a bounded hold, an append-only note log per harness session through
-`ModeSessionStore`) and returns the envelope fields the CLI cannot know. Its note log is committed
-only when `--end` closes the session; every other verb records but does not commit.
+`src/modes/` is a registry of `ModeDefinition`s, which are of two kinds. A runner mode declares
+the five knobs from `docs/vision.md`, its execution pattern, its defaults, its spend policy, how
+it prepares a session (the committee's health preflight lives here) and the shape of its `output`
+block; the CLI seats and runs it. A handler mode declares its own flags and runs itself on the
+panel primitive, returning the envelope fields the CLI cannot know. `committee` and
+`second-opinion` are runner modes; `advisor` and `ideation` are handler modes; `docs/modes.md`
+specifies the rest.
+
+The advisor owns one panel seat under `never-metered`, a bounded hold, and an append-only note
+log per harness session through `ModeSessionStore`. Its note log is committed only when `--end`
+closes the session; every other verb records but does not commit.
+
+`src/modes/ideation/` is four files: `cluster.ts` is the deterministic grouping and imports
+nothing but Zod, so it can be judged on its own; `seats.ts` turns the lens catalogue, a supplied
+persona list and the model registry into seat specs on the cheap model per family; `session.ts`
+owns the JSONL event shapes, the output schema and the rebuild of a session from its log;
+`index.ts` is the handler and the pure prompt builder. Its grouping is lexical and is labelled as
+the engine's own everywhere it appears — the unclustered list is always in the output, and nothing
+in the mode scores, ranks or votes.
 
 `src/cli.ts` parses flags, resolves the mode for the command, builds the envelope, persists the
 session and prints. `tests/core/dependency-direction.test.ts` enforces that modes reach the
