@@ -4,9 +4,11 @@ import {
   panelEnvelopeSeats,
   runPanel,
   untrustedBlock,
+  type ModeSessionEvent,
   type PanelAnswer,
   type PanelLens,
 } from '../../substrate';
+import { integerValue, listValue, oneValue } from '../flags';
 import type { HandlerInput, HandlerModeDefinition, HandlerOutcome } from '../types';
 import { clusterIdeas } from './cluster';
 import {
@@ -25,57 +27,26 @@ import {
   IdeationClusterEventSchema,
   IdeationOutputSchema,
   IdeationPassEventSchema,
+  IdeationPassSchema,
   PASS_EVENT_KIND,
   readIdeationSession,
   type Idea,
+  type IdeationOutput,
   type IdeationSessionState,
   type PassScope,
 } from './session';
 
 const DEFAULT_SEATS = 12;
 /**
- * The panel dispatches every seat at once and has no pool, so this is what one machine can hold
- * open rather than a view about how large a room should be. Raising it needs pooling first.
+ * The panel holds a bounded number of seats open at once — six by default, and its own ceiling is
+ * 24 — so this is not the concurrency limit. It is a bound on the room: every seat costs a call
+ * whether or not it is in flight, and every idea it returns is re-clustered against every other
+ * on this pass and on every later one. Raising it is a decision about cost and about how much a
+ * human can read back, not about what one machine can hold open.
  */
 const MAX_SEATS = 24;
 const DEFAULT_IDEAS_PER_SEAT = 3;
 const MAX_IDEAS_PER_SEAT = 10;
-
-type Flags = HandlerInput['flags'];
-
-function oneValue(flags: Flags, name: string): string | undefined {
-  const values = flags.get(name);
-  if (values === undefined) return undefined;
-  if (values.length !== 1) throw new Error(`Option --${name} may be provided only once`);
-  return values[0];
-}
-
-function integerValue(
-  flags: Flags,
-  name: string,
-  fallback: number,
-  minimum: number,
-  maximum: number,
-): number {
-  const raw = oneValue(flags, name);
-  if (raw === undefined) return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < minimum || value > maximum) {
-    throw new Error(`Option --${name} must be an integer from ${minimum} to ${maximum}`);
-  }
-  return value;
-}
-
-function listValue(flags: Flags, name: string): string[] | undefined {
-  const raw = oneValue(flags, name);
-  if (raw === undefined) return undefined;
-  const items = raw
-    .split(',')
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-  if (items.length === 0) throw new Error(`Option --${name} needs at least one value`);
-  return items;
-}
 
 /**
  * The seat's answer. The schema deliberately sets no maximum: a seat that returns more than it was
@@ -211,6 +182,19 @@ async function namedLenses(input: HandlerInput): Promise<PanelLens[] | null> {
   return null;
 }
 
+/**
+ * The mode's `output` block, which is a view of the session and nothing else: no field of it is
+ * carried from the call, so what the caller is handed is what a later `--expand` will read back.
+ */
+function ideationOutput(state: IdeationSessionState): IdeationOutput {
+  return {
+    prompt: state.prompt,
+    passes: [...state.passes],
+    clusters: [...state.clusters],
+    raw: state.ideas.map((idea) => idea.id),
+  };
+}
+
 async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   const sessions = input.sessions;
   if (sessions === null) {
@@ -237,8 +221,9 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
 
   const motion = input.options.motion?.trim();
   const prompt = prior?.prompt ?? motion;
-  if (prompt === undefined || prompt.length === 0)
-    throw new Error('A non-blank motion is required');
+  if (prompt === undefined || prompt.length === 0) {
+    throw new Error('ideate opens a room on a prompt: pass a non-blank --motion "<text>"');
+  }
   if (prior !== null && motion !== undefined && motion !== prior.prompt) {
     throw new Error(
       'This session was opened on a different prompt; open a new session to ideate on another one',
@@ -299,63 +284,83 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     },
   );
 
-  let number = prior?.nextIdeaNumber ?? 1;
-  const ideas: Idea[] = [];
+  // What the seats offered, still without ids. Numbering them here would number them from the read
+  // above, which is already stale by the time the panel returns.
+  const offered: { seat: string; lens: string; text: string }[] = [];
   const invalid: { seat: string; raw: string }[] = [];
   for (const seat of panel.seats) {
     if (seat.status === 'invalid') invalid.push({ seat: seat.id, raw: seat.raw });
     if (seat.status !== 'ok') continue;
     for (const idea of seat.answer.ideas.slice(0, ideasPerSeat)) {
-      ideas.push(
-        IdeaSchema.parse({ id: `i-${number}`, seat: seat.id, lens: seat.lens, text: idea.text }),
-      );
-      number += 1;
+      offered.push({ seat: seat.id, lens: seat.lens, text: idea.text });
     }
   }
 
-  const allIdeas = [...(prior?.ideas ?? []), ...ideas];
-  // Every idea from every pass is re-grouped together, so a cluster reflects the whole session
-  // rather than the pass that happened to create it.
-  const clustered = clusterIdeas(
-    allIdeas.map((idea) => ({ id: idea.id, text: idea.text })),
-    prior === null
-      ? undefined
-      : { clusters: prior.clusters, nextClusterNumber: prior.nextClusterNumber },
-  );
-
-  const passNumber = (prior?.passes.length ?? 0) + 1;
-  const pass = { n: passNumber, scope, ideas };
   const at = input.now();
-  const passWrite = await sessions.append(IDEATION_MODE, sessionId, {
-    at,
-    kind: PASS_EVENT_KIND,
-    data: IdeationPassEventSchema.parse({
-      ...pass,
-      prompt,
-      ideasPerSeat,
-      seats: panelEnvelopeSeats(panel.seats),
-      invalid,
-    }),
+  const envelopeSeats = panelEnvelopeSeats(panel.seats);
+  // The derivation carries its output out through this list. It runs inside the store's write lock
+  // and is the only place the pass is settled, so recomputing the output beside it from the read
+  // above would be recomputing it from a log that may already have moved.
+  const derived: IdeationOutput[] = [];
+  // Everything that reads the log is decided in here: the idea numbering, the pass number, the
+  // clustering over every idea the session holds, and the prompt this session was opened on. Two
+  // `ideate` calls on one session would otherwise both derive from the same stale read, mint
+  // overlapping idea ids, and leave a log `readIdeationSession` refuses to read back at all — so
+  // the session could never again be expanded, read or rendered. The panel above ran outside the
+  // lock; only the part of the decision that reads the log is in here, and it is synchronous.
+  const write = await sessions.appendDerived(IDEATION_MODE, sessionId, (events) => {
+    const settled = events.length === 0 ? null : readIdeationSession(events);
+    if (settled !== null && settled.prompt !== prompt) {
+      throw new Error(
+        'This session was opened on a different prompt; open a new session to ideate on another one',
+      );
+    }
+    let number = settled?.nextIdeaNumber ?? 1;
+    const ideas: Idea[] = offered.map((idea) =>
+      IdeaSchema.parse({ id: `i-${number++}`, seat: idea.seat, lens: idea.lens, text: idea.text }),
+    );
+    // Every idea from every pass is re-grouped together, so a cluster reflects the whole session
+    // rather than the pass that happened to create it.
+    const clustered = clusterIdeas(
+      [...(settled?.ideas ?? []), ...ideas].map((idea) => ({ id: idea.id, text: idea.text })),
+      settled === null
+        ? undefined
+        : { clusters: settled.clusters, nextClusterNumber: settled.nextClusterNumber },
+    );
+    const n = (settled?.passes.length ?? 0) + 1;
+    const appended: ModeSessionEvent[] = [
+      {
+        at,
+        kind: PASS_EVENT_KIND,
+        data: IdeationPassEventSchema.parse({
+          ...IdeationPassSchema.parse({ n, scope, ideas }),
+          prompt,
+          ideasPerSeat,
+          seats: envelopeSeats,
+          invalid,
+        }),
+      },
+      {
+        at,
+        kind: CLUSTER_EVENT_KIND,
+        data: IdeationClusterEventSchema.parse({
+          n,
+          clusters: clustered.clusters,
+          nextClusterNumber: clustered.nextClusterNumber,
+        }),
+      },
+    ];
+    // The output is the session rebuilt from the log as it will stand once these two lines land,
+    // and it is built and parsed before either of them is written. Validating it after the writes
+    // — which is what this used to do — meant an output the schema refused had already been
+    // recorded: the caller was told the pass failed while the log said it had happened.
+    derived.push(
+      IdeationOutputSchema.parse(ideationOutput(readIdeationSession([...events, ...appended]))),
+    );
+    return appended;
   });
-  const clusterWrite = await sessions.append(IDEATION_MODE, sessionId, {
-    at,
-    kind: CLUSTER_EVENT_KIND,
-    data: IdeationClusterEventSchema.parse({
-      n: passNumber,
-      clusters: clustered.clusters,
-      nextClusterNumber: clustered.nextClusterNumber,
-    }),
-  });
-
-  const output: Record<string, unknown> = {
-    prompt,
-    passes: [...(prior?.passes ?? []), pass],
-    clusters: clustered.clusters,
-    raw: allIdeas.map((idea) => idea.id),
-  };
-  // Parsed here as well as by the CLI: a mode that cannot satisfy its own schema should fail where
-  // the defect is, not two layers up.
-  IdeationOutputSchema.parse(output);
+  const output = derived.at(-1);
+  if (output === undefined) throw new Error('The ideation pass was never derived');
 
   const unanswered = seats.length - panel.answered;
   const degraded = unanswered === 0 ? [] : [`seats-unanswered: ${unanswered}`];
@@ -378,8 +383,8 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     spend: panel.spend,
     record: {
       session: sessions.recordPath(IDEATION_MODE, sessionId),
-      // Both appends land on the same file; the CLI commits a path list, not a write list.
-      paths: [...new Set([...passWrite.paths, ...clusterWrite.paths])],
+      // Both lines land on the same file in one write; the CLI commits a path list.
+      paths: write.paths,
     },
   };
 }
@@ -398,9 +403,11 @@ export const ideation: HandlerModeDefinition = {
   spend: {
     policy: 'capped',
     // Called by the CLI with the eligible family count and one pass, before this mode has resolved
-    // its lenses into seats — so this is sized on families, not seats. Every seat sharing a family
-    // shares that family's metered credential, so one refusal per family bounds what a pass can
-    // spend regardless of how many lenses land on it, and the round count plays no part in that.
+    // its lenses into seats — so this is sized on families, not seats, and the round count plays no
+    // part in it. The ledger it sizes is one global counter, not one per family: the cap is at most
+    // `families` metered calls per pass in total, whatever mix of families spends them. A family
+    // count is simply the size chosen for it, on the reasoning that a room should not pay metered
+    // rates more often than it has families to fall back on.
     defaultCap: (families: number) => families,
   },
   flags: {

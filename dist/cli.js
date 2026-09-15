@@ -22622,9 +22622,11 @@ class ModeSessionStore {
       const derived = derive(events);
       if (derived === null)
         return { paths: [] };
-      const record2 = ModeSessionEventSchema.parse(derived);
-      const content = `${existing}${JSON.stringify(record2)}
-`;
+      const records = (isEventList(derived) ? derived : [derived]).map((event) => ModeSessionEventSchema.parse(event));
+      if (records.length === 0)
+        return { paths: [] };
+      const content = `${existing}${records.map((record2) => `${JSON.stringify(record2)}
+`).join("")}`;
       await writeTextAtomically(path, content, {
         replace: true,
         validate: (text) => {
@@ -22634,6 +22636,9 @@ class ModeSessionStore {
       return { paths: [path] };
     });
   }
+}
+function isEventList(derived) {
+  return Array.isArray(derived);
 }
 // src/substrate/records/project-id.ts
 var NonEmptyStringSchema6 = exports_external.string().trim().min(1);
@@ -23564,6 +23569,35 @@ var committee = {
   }
 };
 
+// src/modes/flags.ts
+function oneValue(flags, name) {
+  const values = flags.get(name);
+  if (values === undefined)
+    return;
+  if (values.length !== 1)
+    throw new Error(`Option --${name} may be provided only once`);
+  return values[0];
+}
+function integerValue(flags, name, fallback, minimum, maximum) {
+  const raw = oneValue(flags, name);
+  if (raw === undefined)
+    return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`Option --${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+function listValue(flags, name) {
+  const raw = oneValue(flags, name);
+  if (raw === undefined)
+    return;
+  const items = raw.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
+  if (items.length === 0)
+    throw new Error(`Option --${name} needs at least one value`);
+  return items;
+}
+
 // src/modes/ideation/cluster.ts
 var IdeaIdSchema = exports_external.string().regex(/^i-[1-9][0-9]*$/, "An idea id is i-<n>, numbered from one in arrival order");
 var ClusterIdSchema = exports_external.string().regex(/^k-[1-9][0-9]*$/, "A cluster id is k-<n>");
@@ -23637,7 +23671,7 @@ var STOPWORDS = new Set([
   "your"
 ]);
 function tokenise(text) {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(" ").filter((token) => token.length > 1 && !STOPWORDS.has(token));
+  return text.toLowerCase().normalize("NFKD").replace(/\p{M}+/gu, "").split(/[^\p{L}\p{N}]+/u).filter((token) => token.length > 1 && !STOPWORDS.has(token));
 }
 function jaccard(left, right) {
   let shared = 0;
@@ -23946,33 +23980,6 @@ var DEFAULT_SEATS = 12;
 var MAX_SEATS = 24;
 var DEFAULT_IDEAS_PER_SEAT = 3;
 var MAX_IDEAS_PER_SEAT = 10;
-function oneValue(flags, name) {
-  const values = flags.get(name);
-  if (values === undefined)
-    return;
-  if (values.length !== 1)
-    throw new Error(`Option --${name} may be provided only once`);
-  return values[0];
-}
-function integerValue(flags, name, fallback, minimum, maximum) {
-  const raw = oneValue(flags, name);
-  if (raw === undefined)
-    return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < minimum || value > maximum) {
-    throw new Error(`Option --${name} must be an integer from ${minimum} to ${maximum}`);
-  }
-  return value;
-}
-function listValue(flags, name) {
-  const raw = oneValue(flags, name);
-  if (raw === undefined)
-    return;
-  const items = raw.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
-  if (items.length === 0)
-    throw new Error(`Option --${name} needs at least one value`);
-  return items;
-}
 var IdeationAnswerSchema = exports_external.strictObject({
   ideas: exports_external.array(exports_external.strictObject({ text: exports_external.string().trim().min(1) })).min(1)
 });
@@ -24050,6 +24057,14 @@ async function namedLenses(input) {
     return lenses.map(catalogueLens);
   return null;
 }
+function ideationOutput(state) {
+  return {
+    prompt: state.prompt,
+    passes: [...state.passes],
+    clusters: [...state.clusters],
+    raw: state.ideas.map((idea) => idea.id)
+  };
+}
 async function handle2(input) {
   const sessions = input.sessions;
   if (sessions === null) {
@@ -24062,8 +24077,9 @@ async function handle2(input) {
   const prior = opened ? readIdeationSession(await sessions.read(IDEATION_MODE, sessionId)) : null;
   const motion = input.options.motion?.trim();
   const prompt = prior?.prompt ?? motion;
-  if (prompt === undefined || prompt.length === 0)
-    throw new Error("A non-blank motion is required");
+  if (prompt === undefined || prompt.length === 0) {
+    throw new Error('ideate opens a room on a prompt: pass a non-blank --motion "<text>"');
+  }
   if (prior !== null && motion !== undefined && motion !== prior.prompt) {
     throw new Error("This session was opened on a different prompt; open a new session to ideate on another one");
   }
@@ -24098,8 +24114,7 @@ async function handle2(input) {
     answer: ideationAnswer(ideasPerSeat),
     spend: input.spend
   });
-  let number4 = prior?.nextIdeaNumber ?? 1;
-  const ideas = [];
+  const offered = [];
   const invalid = [];
   for (const seat of panel2.seats) {
     if (seat.status === "invalid")
@@ -24107,42 +24122,49 @@ async function handle2(input) {
     if (seat.status !== "ok")
       continue;
     for (const idea of seat.answer.ideas.slice(0, ideasPerSeat)) {
-      ideas.push(IdeaSchema.parse({ id: `i-${number4}`, seat: seat.id, lens: seat.lens, text: idea.text }));
-      number4 += 1;
+      offered.push({ seat: seat.id, lens: seat.lens, text: idea.text });
     }
   }
-  const allIdeas = [...prior?.ideas ?? [], ...ideas];
-  const clustered = clusterIdeas(allIdeas.map((idea) => ({ id: idea.id, text: idea.text })), prior === null ? undefined : { clusters: prior.clusters, nextClusterNumber: prior.nextClusterNumber });
-  const passNumber = (prior?.passes.length ?? 0) + 1;
-  const pass = { n: passNumber, scope, ideas };
   const at = input.now();
-  const passWrite = await sessions.append(IDEATION_MODE, sessionId, {
-    at,
-    kind: PASS_EVENT_KIND,
-    data: IdeationPassEventSchema.parse({
-      ...pass,
-      prompt,
-      ideasPerSeat,
-      seats: panelEnvelopeSeats(panel2.seats),
-      invalid
-    })
+  const envelopeSeats2 = panelEnvelopeSeats(panel2.seats);
+  const derived = [];
+  const write = await sessions.appendDerived(IDEATION_MODE, sessionId, (events) => {
+    const settled = events.length === 0 ? null : readIdeationSession(events);
+    if (settled !== null && settled.prompt !== prompt) {
+      throw new Error("This session was opened on a different prompt; open a new session to ideate on another one");
+    }
+    let number4 = settled?.nextIdeaNumber ?? 1;
+    const ideas = offered.map((idea) => IdeaSchema.parse({ id: `i-${number4++}`, seat: idea.seat, lens: idea.lens, text: idea.text }));
+    const clustered = clusterIdeas([...settled?.ideas ?? [], ...ideas].map((idea) => ({ id: idea.id, text: idea.text })), settled === null ? undefined : { clusters: settled.clusters, nextClusterNumber: settled.nextClusterNumber });
+    const n = (settled?.passes.length ?? 0) + 1;
+    const appended = [
+      {
+        at,
+        kind: PASS_EVENT_KIND,
+        data: IdeationPassEventSchema.parse({
+          ...IdeationPassSchema.parse({ n, scope, ideas }),
+          prompt,
+          ideasPerSeat,
+          seats: envelopeSeats2,
+          invalid
+        })
+      },
+      {
+        at,
+        kind: CLUSTER_EVENT_KIND,
+        data: IdeationClusterEventSchema.parse({
+          n,
+          clusters: clustered.clusters,
+          nextClusterNumber: clustered.nextClusterNumber
+        })
+      }
+    ];
+    derived.push(IdeationOutputSchema.parse(ideationOutput(readIdeationSession([...events, ...appended]))));
+    return appended;
   });
-  const clusterWrite = await sessions.append(IDEATION_MODE, sessionId, {
-    at,
-    kind: CLUSTER_EVENT_KIND,
-    data: IdeationClusterEventSchema.parse({
-      n: passNumber,
-      clusters: clustered.clusters,
-      nextClusterNumber: clustered.nextClusterNumber
-    })
-  });
-  const output = {
-    prompt,
-    passes: [...prior?.passes ?? [], pass],
-    clusters: clustered.clusters,
-    raw: allIdeas.map((idea) => idea.id)
-  };
-  IdeationOutputSchema.parse(output);
+  const output = derived.at(-1);
+  if (output === undefined)
+    throw new Error("The ideation pass was never derived");
   const unanswered = seats.length - panel2.answered;
   const degraded = unanswered === 0 ? [] : [`seats-unanswered: ${unanswered}`];
   return {
@@ -24160,7 +24182,7 @@ async function handle2(input) {
     spend: panel2.spend,
     record: {
       session: sessions.recordPath(IDEATION_MODE, sessionId),
-      paths: [...new Set([...passWrite.paths, ...clusterWrite.paths])]
+      paths: write.paths
     }
   };
 }

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { ideation, ideationPrompt } from '../../src/modes/ideation';
-import { IdeationOutputSchema } from '../../src/modes/ideation/session';
+import { IdeationOutputSchema, readIdeationSession } from '../../src/modes/ideation/session';
 import type { HandlerInput } from '../../src/modes';
 import {
   ModeSessionStore,
@@ -494,6 +494,261 @@ describe('ideation handler', () => {
       );
       if (outcome.kind !== 'result') throw new Error('unreachable');
       expect(outcome.spend.cap).toBe(7);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ideation usage errors', () => {
+  test('refuses a persona list beside a lens list, before the file is even read', async () => {
+    const root = await temporaryRoot();
+    try {
+      const fixture = build({
+        root,
+        motion: 'Two ways to seat the room',
+        flags: { personas: [join(root, 'never-read.json')], lenses: ['security'] },
+      });
+      await expect(ideation.handle(fixture.input)).rejects.toThrow(
+        /--personas supplies the seats itself; it cannot be combined with --lenses/,
+      );
+      expect(fixture.calls()).toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses a cluster named twice in --expand', async () => {
+    const root = await temporaryRoot();
+    try {
+      await ideation.handle(
+        build({
+          root,
+          sessionId: SESSION,
+          motion: 'Ways to make advisor notes visible',
+          flags: { seats: ['2'], 'ideas-per-seat': ['1'] },
+        }).input,
+      );
+      const twice = build({ root, sessionId: SESSION, flags: { expand: ['k-1,k-1'] } });
+      await expect(ideation.handle(twice.input)).rejects.toThrow(/Option --expand names k-1 twice/);
+      expect(twice.calls()).toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses a room or an idea count outside its range, at both ends', async () => {
+    const root = await temporaryRoot();
+    try {
+      const cases: [Record<string, readonly string[]>, RegExp][] = [
+        [{ seats: ['0'] }, /--seats must be an integer from 1 to 24/],
+        [{ seats: ['25'] }, /--seats must be an integer from 1 to 24/],
+        [{ seats: ['2.5'] }, /--seats must be an integer from 1 to 24/],
+        [{ 'ideas-per-seat': ['0'] }, /--ideas-per-seat must be an integer from 1 to 10/],
+        [{ 'ideas-per-seat': ['11'] }, /--ideas-per-seat must be an integer from 1 to 10/],
+      ];
+      for (const [flags, message] of cases) {
+        // The ledger is sized explicitly: the fixture stands in for the CLI, and the CLI would
+        // never have reached this mode with a seat count it could not size a cap from.
+        const fixture = build({ root, motion: 'Out of range', flags, spendCap: 1 });
+        await expect(ideation.handle(fixture.input)).rejects.toThrow(message);
+        expect(fixture.calls()).toHaveLength(0);
+      }
+      // A flag repeated is a usage error too, and it is the shared reader that says so.
+      const repeated = build({
+        root,
+        motion: 'Twice over',
+        flags: { seats: ['2', '3'] },
+        spendCap: 1,
+      });
+      await expect(ideation.handle(repeated.input)).rejects.toThrow(
+        /Option --seats may be provided only once/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('names --motion when the room has no prompt to open on', async () => {
+    const root = await temporaryRoot();
+    try {
+      const fixture = build({ root, flags: { seats: ['1'] } });
+      await expect(ideation.handle(fixture.input)).rejects.toThrow(
+        /ideate opens a room on a prompt: pass a non-blank --motion/,
+      );
+      expect(fixture.calls()).toHaveLength(0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('--models puts the named model on the seat specs the panel is given', async () => {
+    const root = await temporaryRoot();
+    try {
+      const fixture = build({
+        root,
+        sessionId: SESSION,
+        motion: 'Whose model answers',
+        families: ['xai', 'google'],
+        flags: { seats: ['2'], 'ideas-per-seat': ['1'], models: ['xai=xai-tiny'] },
+      });
+      const outcome = await ideation.handle(fixture.input);
+      if (outcome.kind !== 'result') throw new Error('unreachable');
+      // The override reaches the seat id and the requested model; the family it did not name keeps
+      // the cheap fallback the registry lists.
+      expect(outcome.seats.map((seat) => [seat.id, seat.model.requested])).toEqual([
+        ['xai/xai-tiny#strategist', 'xai-tiny'],
+        ['google/google-lite#architect', 'google-lite'],
+      ]);
+      expect(fixture.calls().map((request) => request.seatId)).toEqual([
+        'xai/xai-tiny#strategist',
+        'google/google-lite#architect',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ideation under concurrent calls', () => {
+  test('two concurrent first passes mint distinct, sequential ids and leave a readable log', async () => {
+    const root = await temporaryRoot();
+    try {
+      const call = () =>
+        ideation.handle(
+          build({
+            root,
+            sessionId: SESSION,
+            motion: 'Ways to make advisor notes visible',
+            families: ['xai'],
+            flags: { seats: ['2'], 'ideas-per-seat': ['1'] },
+          }).input,
+        );
+      const outcomes = await Promise.all([call(), call()]);
+      const outputs = outcomes.map((outcome) => {
+        if (outcome.kind !== 'result') throw new Error('unreachable');
+        return IdeationOutputSchema.parse(outcome.output);
+      });
+
+      // One pass each, numbered in the order the log settled them rather than the order the panels
+      // returned, and neither call reused the other's idea numbers.
+      const passNumbers = outputs.map((output) => output.passes.at(-1)?.n).sort();
+      expect(passNumbers).toEqual([1, 2]);
+      const minted = outputs.flatMap((output) => output.passes.at(-1)?.ideas ?? []);
+      expect(minted.map((idea) => idea.id).sort()).toEqual(['i-1', 'i-2', 'i-3', 'i-4']);
+      // The later pass sees the earlier one, so its own view of the session holds both.
+      const later = outputs.find((output) => output.passes.length === 2);
+      expect(later?.raw).toEqual(['i-1', 'i-2', 'i-3', 'i-4']);
+
+      // The proof that nothing collided: a log with a duplicate id or a pass out of sequence
+      // cannot be read back at all, so a session that still rebuilds is a session that survived.
+      const store = ModeSessionStore.open(root);
+      const state = readIdeationSession(await store.read('ideation', SESSION));
+      expect(state.passes.map((pass) => pass.n)).toEqual([1, 2]);
+      expect(state.ideas.map((idea) => idea.id)).toEqual(['i-1', 'i-2', 'i-3', 'i-4']);
+      expect(state.nextIdeaNumber).toBe(5);
+      const lines = (await Bun.file(store.absolutePath('ideation', SESSION)).text())
+        .trimEnd()
+        .split('\n');
+      expect(lines.map((line) => JSON.parse(line).kind)).toEqual([
+        'pass',
+        'cluster',
+        'pass',
+        'cluster',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('two concurrent expansion passes continue one numbering rather than overlapping', async () => {
+    const root = await temporaryRoot();
+    try {
+      await ideation.handle(
+        build({
+          root,
+          sessionId: SESSION,
+          motion: 'Ways to make advisor notes visible',
+          families: ['xai'],
+          flags: { seats: ['2'], 'ideas-per-seat': ['1'] },
+        }).input,
+      );
+      const call = () =>
+        ideation.handle(
+          build({
+            root,
+            sessionId: SESSION,
+            families: ['xai'],
+            flags: { seats: ['2'], 'ideas-per-seat': ['1'], expand: ['k-1'] },
+            reply: (lens) => JSON.stringify({ ideas: [{ text: `${lens} expanded note` }] }),
+          }).input,
+        );
+      const outcomes = await Promise.all([call(), call()]);
+      const outputs = outcomes.map((outcome) => {
+        if (outcome.kind !== 'result') throw new Error('unreachable');
+        return IdeationOutputSchema.parse(outcome.output);
+      });
+      expect(outputs.map((output) => output.passes.at(-1)?.n).sort()).toEqual([2, 3]);
+      const minted = outputs.flatMap((output) => output.passes.at(-1)?.ideas ?? []);
+      expect(minted.map((idea) => idea.id).sort()).toEqual(['i-3', 'i-4', 'i-5', 'i-6']);
+      for (const output of outputs) {
+        expect(output.passes.at(-1)?.scope).toEqual(['k-1']);
+      }
+
+      const store = ModeSessionStore.open(root);
+      const state = readIdeationSession(await store.read('ideation', SESSION));
+      expect(state.passes.map((pass) => pass.n)).toEqual([1, 2, 3]);
+      expect(state.ideas.map((idea) => idea.id)).toEqual([
+        'i-1',
+        'i-2',
+        'i-3',
+        'i-4',
+        'i-5',
+        'i-6',
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('a pass the log refuses writes neither of its two lines', async () => {
+    const root = await temporaryRoot();
+    try {
+      // Both calls open the same new session, so both find no log and both believe they are pass
+      // one; only inside the write lock does the loser learn the session already has a prompt.
+      const call = (motion: string) =>
+        ideation.handle(
+          build({
+            root,
+            sessionId: SESSION,
+            motion,
+            families: ['xai'],
+            flags: { seats: ['1'], 'ideas-per-seat': ['1'] },
+          }).input,
+        );
+      const settled = await Promise.allSettled([
+        call('The first question'),
+        call('A different question'),
+      ]);
+      const kept = settled.filter((result) => result.status === 'fulfilled');
+      const refused = settled.filter((result) => result.status === 'rejected');
+      expect([kept.length, refused.length]).toEqual([1, 1]);
+      expect(String(refused[0]?.status === 'rejected' ? refused[0].reason : '')).toContain(
+        'different prompt',
+      );
+
+      // The refusal happens before either line is written, so the winner's session is whole and
+      // the loser left nothing behind: no pass without its clustering, and no second prompt.
+      const store = ModeSessionStore.open(root);
+      const text = await Bun.file(store.absolutePath('ideation', SESSION)).text();
+      const lines = text.trimEnd().split('\n');
+      expect(lines).toHaveLength(2);
+      const state = readIdeationSession(await store.read('ideation', SESSION));
+      expect(state.passes).toHaveLength(1);
+      expect(state.ideas).toHaveLength(1);
+      const survivor = kept[0]?.status === 'fulfilled' ? kept[0].value : null;
+      if (survivor === null || survivor.kind !== 'result') throw new Error('unreachable');
+      expect(state.prompt).toBe(IdeationOutputSchema.parse(survivor.output).prompt);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -317,6 +317,9 @@ describe('convene ideate', () => {
         [['ideate', '--providers', 'anthropic', '--motion', 'm'], '--records-root'],
         [[...base, 'positional', '--motion', 'm'], 'options only'],
         [[...base, '--bogus', '1', '--motion', 'm'], 'Unknown option'],
+        // `ideate` does not take its prompt on stdin, so a missing one must say which flag
+        // to pass rather than describing a motion the caller never named.
+        [[...base], 'pass a non-blank --motion'],
       ];
       for (const [argv, message] of cases) {
         const result = await runCliFacade(argv, fixture.environment);
