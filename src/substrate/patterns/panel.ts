@@ -5,7 +5,7 @@ import {
   type ProviderFamily,
   type SeatResponse,
 } from '../domain/schemas';
-import type { Spend } from '../envelope';
+import type { EnvelopeSeat, Spend } from '../envelope';
 import { escapeUntrustedPromptText } from '../evidence/normalise';
 import {
   permitsCredentialFallback,
@@ -450,4 +450,18 @@ const UntrustedTagSchema = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
 export function untrustedBlock(tag: string, text: string): string {
   const safeTag = UntrustedTagSchema.parse(tag);
   return `<untrusted-${safeTag}>\n${escapeUntrustedPromptText(text)}\n</untrusted-${safeTag}>`;
+}
+
+/** The envelope's view of a panel: the same fields the runner's seats carry, minus the answer. */
+export function panelEnvelopeSeats(seats: readonly PanelSeat<unknown>[]): EnvelopeSeat[] {
+  return seats.map((seat) => ({
+    id: seat.id,
+    family: seat.family,
+    model: seat.model,
+    lens: seat.lens,
+    transport: seat.transport,
+    fallback: seat.fallback,
+    status: seat.status,
+    reason: seat.reason,
+  }));
 }
