@@ -136,7 +136,7 @@ bun --no-install dist/cli.js doctor --json
 bun --no-install dist/cli.js health --json
 ```
 
-The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:forum`, `/convene:triage`, `/convene:audience`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
+The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:consult`, `/convene:forum`, `/convene:triage`, `/convene:audience`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 

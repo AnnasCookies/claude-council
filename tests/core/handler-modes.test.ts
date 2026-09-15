@@ -136,7 +136,7 @@ describe('handler-style modes', () => {
     expect(getMode('audience')).toBe(modes.audience);
     // `forum` is specified in docs/modes.md and not registered by this build, which is what the
     // refusal by name is for; `audience` is registered now and can no longer stand in for it.
-    expect(() => getMode('forum')).toThrow(/Unknown mode: forum.*committee, second-opinion/);
+    expect(() => getMode('nope')).toThrow(/Unknown mode: nope.*committee, second-opinion/);
     expect(() => getRunnerMode('audience', registry)).toThrow(/handler mode/);
     expect(getRunnerMode('second-opinion', registry).pattern).toBe('parallel');
   });
@@ -144,7 +144,7 @@ describe('handler-style modes', () => {
   test('an unregistering override does not name the unregistered mode as registered', () => {
     const registry: ModeRegistry = { ...modes, audience: undefined };
     expect(() => getMode('nope', registry)).toThrow(
-      /^Unknown mode: nope\. Registered modes: committee, second-opinion, advisor$/,
+      /^Unknown mode: nope\. Registered modes: committee, second-opinion, advisor, ideation, consultants, forum, triage$/,
     );
   });
 

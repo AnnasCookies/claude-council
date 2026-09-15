@@ -406,6 +406,10 @@ describe('the audience subcommand', () => {
       ['committee', 'runner'],
       ['second-opinion', 'runner'],
       ['advisor', 'handler'],
+      ['ideation', 'handler'],
+      ['consultants', 'handler'],
+      ['forum', 'handler'],
+      ['triage', 'handler'],
       ['audience', 'handler'],
     ]);
     const audience = payload.modes.find((mode: { name: string }) => mode.name === 'audience');
