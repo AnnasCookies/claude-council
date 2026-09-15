@@ -27,6 +27,7 @@ export const MODE_NAMES = [
   'second-opinion',
   'advisor',
   'ideation',
+  'consultants',
   'forum',
   'triage',
 ] as const;

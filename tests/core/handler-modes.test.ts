@@ -99,7 +99,7 @@ function input(overrides: Partial<HandlerInput> = {}): HandlerInput {
 }
 
 describe('handler-style modes', () => {
-  test('the specified names include the eight modes; the registered names are the six this build carries', () => {
+  test('the specified names include the eight modes; the registered names are the seven this build carries', () => {
     expect([...SPECIFIED_MODE_NAMES]).toEqual([
       'committee',
       'second-opinion',
@@ -115,6 +115,7 @@ describe('handler-style modes', () => {
       'second-opinion',
       'advisor',
       'ideation',
+      'consultants',
       'forum',
       'triage',
     ]);

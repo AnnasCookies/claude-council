@@ -1,0 +1,191 @@
+import { readdir, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { normaliseEvidence, type EvidencePack } from '../../substrate';
+
+/** A file larger than this is skipped rather than truncated: half a file misleads a consultant. */
+export const MAX_CONTEXT_FILE_BYTES = 65_536;
+export const MAX_DIRECTORY_FILES = 40;
+const MAX_DIRECTORY_DEPTH = 8;
+const IGNORED_DIRECTORIES: ReadonlySet<string> = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  'coverage',
+]);
+// The same control characters the evidence schema refuses, checked here so a file is skipped with
+// a reason rather than failing the whole brief inside the normaliser.
+const UNSAFE_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+
+export interface ContextFile {
+  readonly locator: string;
+  readonly content: string;
+}
+
+export interface ContextCollection {
+  readonly files: readonly ContextFile[];
+  /** One `context-skipped:` or `context-truncated:` line per omission, for `degraded`. */
+  readonly skipped: readonly string[];
+}
+
+/**
+ * A brief carries repository-relative locators, so a path that escapes the working directory is
+ * refused before the file system is touched: the caller learns the path is out of bounds rather
+ * than that it is missing, and nothing outside the project can be read into a prompt by accident.
+ */
+function containmentError(absolute: string): Error {
+  return new Error(`--context paths must sit inside the working directory: ${absolute}`);
+}
+
+function assertInside(cwd: string, absolute: string): string {
+  const relativePath = relative(cwd, absolute);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw containmentError(absolute);
+  }
+  return relativePath;
+}
+
+/**
+ * The string check above only looks at the path the caller typed; it does not stop a symlink that
+ * sits inside `cwd` from pointing at a target outside it, because `stat` (and everything that
+ * reads the file afterwards) follows the link. `realpath` resolves every symlink in the path,
+ * including the final component, so the same containment rule is re-checked against where the
+ * path actually leads rather than where it is named.
+ */
+async function assertRealInside(cwd: string, absolute: string): Promise<void> {
+  const [realCwd, realAbsolute] = await Promise.all([realpath(cwd), realpath(absolute)]);
+  const relativePath = relative(realCwd, realAbsolute);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw containmentError(absolute);
+  }
+}
+
+/** Evidence locators are repository-relative and forward-slash on every platform. */
+function locatorFor(cwd: string, absolute: string): string {
+  const relativePath = assertInside(cwd, absolute);
+  if (relativePath.length === 0) {
+    throw new Error('--context needs a file or a directory, not the working directory itself');
+  }
+  return relativePath.split(sep).join('/');
+}
+
+async function readTextFile(
+  absolute: string,
+  locator: string,
+  skipped: string[],
+): Promise<ContextFile | null> {
+  const file = Bun.file(absolute);
+  if (file.size > MAX_CONTEXT_FILE_BYTES) {
+    skipped.push(`context-skipped: ${locator} is larger than 64 KiB`);
+    return null;
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.includes(0)) {
+    skipped.push(`context-skipped: ${locator} is not text`);
+    return null;
+  }
+  const content = new TextDecoder().decode(bytes);
+  if (content.includes('�') || UNSAFE_CONTROL_CHARACTERS.test(content)) {
+    skipped.push(`context-skipped: ${locator} is not text`);
+    return null;
+  }
+  if (content.trim().length === 0) {
+    skipped.push(`context-skipped: ${locator} is empty`);
+    return null;
+  }
+  return { locator, content };
+}
+
+async function collectDirectory(
+  root: string,
+  cwd: string,
+  files: ContextFile[],
+  skipped: string[],
+): Promise<void> {
+  const rootLocator = root === cwd ? '.' : locatorFor(cwd, root);
+  const queue: { path: string; depth: number }[] = [{ path: root, depth: 0 }];
+  let taken = 0;
+  while (queue.length > 0) {
+    const next = queue.shift();
+    if (next === undefined) break;
+    const entries = await readdir(next.path, { withFileTypes: true });
+    const ordered = [...entries].sort((left, right) => (left.name < right.name ? -1 : 1));
+    for (const entry of ordered) {
+      const absolute = join(next.path, entry.name);
+      if (entry.isDirectory()) {
+        // Dot-directories and build output are machine state, not the material a lens reads.
+        if (entry.name.startsWith('.') || IGNORED_DIRECTORIES.has(entry.name)) continue;
+        if (next.depth + 1 <= MAX_DIRECTORY_DEPTH)
+          queue.push({ path: absolute, depth: next.depth + 1 });
+        continue;
+      }
+      // Symbolic links and devices are not followed: a brief reads files the caller can see.
+      if (!entry.isFile()) continue;
+      if (taken >= MAX_DIRECTORY_FILES) {
+        skipped.push(
+          `context-truncated: ${rootLocator} contributed the first ${MAX_DIRECTORY_FILES} files`,
+        );
+        return;
+      }
+      const file = await readTextFile(absolute, locatorFor(cwd, absolute), skipped);
+      if (file !== null) {
+        files.push(file);
+        taken += 1;
+      }
+    }
+  }
+}
+
+/**
+ * Files and directories named with `--context`, read once, before any seat exists. A named path
+ * that is missing is a usage error: the caller asked for material this brief does not have, and
+ * briefing three consultants on silently less than was asked for is the worse failure.
+ */
+export async function collectContext(
+  paths: readonly string[],
+  cwd: string,
+): Promise<ContextCollection> {
+  const files: ContextFile[] = [];
+  const skipped: string[] = [];
+  const seen = new Set<string>();
+  for (const path of paths) {
+    const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+    assertInside(cwd, absolute);
+    const entry = await stat(absolute).catch((error: unknown) => {
+      throw new Error(`--context path not found: ${path}`, { cause: error });
+    });
+    // Existence is settled above; a missing path fails as "not found" before this ever runs, so a
+    // symlink target that has vanished between the two calls is the only way this can now throw
+    // ENOENT, and that failure is left to propagate rather than being reworded.
+    await assertRealInside(cwd, absolute);
+    const collected: ContextFile[] = [];
+    if (entry.isDirectory()) await collectDirectory(absolute, cwd, collected, skipped);
+    else if (entry.isFile()) {
+      const file = await readTextFile(absolute, locatorFor(cwd, absolute), skipped);
+      if (file !== null) collected.push(file);
+    } else throw new Error(`--context takes files and directories only: ${path}`);
+    for (const file of collected) {
+      // A file named directly and also reached through a directory is one evidence source.
+      if (seen.has(file.locator)) continue;
+      seen.add(file.locator);
+      files.push(file);
+    }
+  }
+  return { files, skipped };
+}
+
+/**
+ * The existing evidence normaliser does the work: it redacts, hashes, and renders each file as an
+ * `untrusted-evidence` block under one boundary instruction. Nothing here re-implements any of it.
+ */
+export function renderContext(files: readonly ContextFile[], retrievedAt: string): EvidencePack {
+  return normaliseEvidence(
+    files.map((file, index) => ({
+      id: `ctx-${index + 1}`,
+      kind: 'repository',
+      trust: 'untrusted',
+      locator: file.locator,
+      content: file.content,
+      retrievedAt,
+    })),
+  );
+}

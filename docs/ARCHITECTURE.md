@@ -35,7 +35,7 @@ the five knobs from `docs/vision.md`, its execution pattern, its defaults, its s
 it prepares a session (the committee's health preflight lives here) and the shape of its `output`
 block; the CLI seats and runs it. A handler mode declares its own flags and runs itself on the
 panel primitive, returning the envelope fields the CLI cannot know. `committee` and
-`second-opinion` are runner modes; `advisor`, `ideation`, `forum` and `triage` are handler modes;
+`second-opinion` are runner modes; `advisor`, `ideation`, `consultants`, `forum` and `triage` are handler modes;
 `docs/modes.md` specifies the rest.
 
 The advisor owns one panel seat under `never-metered`, a bounded hold, and an append-only note
@@ -49,6 +49,13 @@ owns the JSONL event shapes, the output schema and the rebuild of a session from
 `index.ts` is the handler and the pure prompt builder. Its grouping is lexical and is labelled as
 the engine's own everywhere it appears — the unclustered list is always in the output, and nothing
 in the mode scores, ranks or votes.
+
+`src/modes/consultants/` briefs one consultant per lens and keeps the session open: `lenses.ts`
+resolves catalogue lenses and personas, `context.ts` reads `--context` files inside the working
+directory (symlinks resolved before the containment check), `prompts.ts` holds the report, synthesis
+and follow-up prompts, `session.ts` the JSONL event shapes and the rebuild of a session from its log,
+and `index.ts` the handler. The synthesiser lists conflicts and never resolves one; the spend cap
+covers the whole session.
 
 `src/modes/forum/` runs one blind panel per round over the panel primitive: `answers.ts` holds the
 stance and motion contracts, `prompts.ts` the opening and reply prompts (every prior position

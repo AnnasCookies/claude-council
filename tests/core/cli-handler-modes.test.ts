@@ -590,7 +590,7 @@ describe('handler mode dispatch', () => {
     expect(help.handlerCommands).toEqual({
       advise: { mode: 'advisor', registered: true },
       ideate: { mode: 'ideation', registered: true },
-      consult: { mode: 'consultants', registered: false },
+      consult: { mode: 'consultants', registered: true },
       forum: { mode: 'forum', registered: true },
       triage: { mode: 'triage', registered: true },
       audience: { mode: 'audience', registered: false },
@@ -613,6 +613,7 @@ describe('handler mode dispatch', () => {
       ['second-opinion', 'runner'],
       ['advisor', 'handler'],
       ['ideation', 'handler'],
+      ['consultants', 'handler'],
       ['forum', 'handler'],
       ['triage', 'handler'],
       ['audience', 'handler'],
@@ -623,6 +624,7 @@ describe('handler mode dispatch', () => {
       'second-opinion',
       'advisor',
       'ideation',
+      'consultants',
       'forum',
       'triage',
     ]);

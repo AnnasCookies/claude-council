@@ -61,6 +61,21 @@ bun --no-install dist/cli.js forum \
   --caller human --harness "Claude Code" \
   --motion "Should the advisor live in the harness or a sidecar?"
 
+# One consultant per lens, briefed on the same material; the session stays open
+bun --no-install dist/cli.js consult \
+  --records-root ~/.claude/council \
+  --caller human --harness "Claude Code" \
+  --lens security,privacy,maintainer \
+  --context docs/modes.md --context README.md \
+  --motion "Is this login path safe to ship?"
+
+# Ask one of them a follow-up, forwarding another consultant's report only if you choose to
+bun --no-install dist/cli.js consult \
+  --records-root ~/.claude/council \
+  --session cs-2026-09-15-3f9a1c \
+  --ask security --forward privacy \
+  "Does the fallback path leak the key in logs?"
+
 # Significant, multi-round council with contrarian quorum
 bun --no-install dist/cli.js council \
   --classification public \
@@ -271,6 +286,34 @@ cluster order is simply the order in which each group's first idea arrived, and 
 id in arrival order — is always in the output, so a reader who distrusts the grouping can ignore
 it entirely. Clusters keep their ids across passes wherever a group is still the best home for its
 members, and a number retired by a merge is never issued again.
+
+### Consultants
+
+`consult` seats one consultant per named lens, briefs them all on the same material, and keeps the
+session open for follow-up questions. `--lens` is comma-separated and repeatable; a name is either
+a catalogue lens (`strategist`, `architect`, `designer`, `researcher`, `maintainer`, `operator`,
+`security`, `privacy`, `systems`, `performance`, `critic`) or a persona supplied with
+`--personas <file>`, a JSON array of `{ "name", "description" }`. Seats are spread over the
+families in `--providers` order. `--context <path>` takes one file or directory per occurrence: a
+directory contributes up to 40 text files, each up to 64 KiB, and everything it sends is rendered
+as untrusted evidence and passed through the secrets guard before any consultant is briefed.
+
+Every report names its lens and its seat. A named synthesiser seat then lists the conflicts
+between the lenses and never resolves one — there is no field for a resolution, and a synthesiser
+that recommends one produces an `invalid` seat whose raw answer stays on the record. A follow-up
+(`--session <id> --ask <lens> "<question>"`) reaches exactly one consultant, carrying its own
+earlier report and its own questions as quoted data; another consultant's report reaches it only
+through `--forward <lens>`. There is no broadcast.
+
+The session is an append-only JSONL log under the records root
+(`<records-root>/<scope>/modes/consultants/<session-id>.jsonl`), committed before the run reports
+success, and every command returns the whole session rebuilt from it. The spend cap covers the
+session rather than the command: it defaults to one reserved metered fallback call per eligible
+provider family, shared by the report round, the synthesiser and every follow-up, and a follow-up
+past it returns its seat as `skipped` with reason `spend-cap`, exit 4 and `spend-cap-reached` in
+`degraded`. Raise it with `--spend-cap <n>` on the follow-up. Like every mode, the cap bounds
+metered fallbacks and nothing else: it does not bound `--billing api-only`, where a seat is
+metered from the start and never reaches the ledger the cap governs.
 
 ## Forum
 

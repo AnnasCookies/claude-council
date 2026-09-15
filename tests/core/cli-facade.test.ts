@@ -1313,6 +1313,7 @@ describe('public CLI facade', () => {
       'second-opinion',
       'advisor',
       'ideation',
+      'consultants',
       'forum',
       'triage',
     ]);
