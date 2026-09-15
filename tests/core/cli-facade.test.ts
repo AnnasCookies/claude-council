@@ -342,9 +342,12 @@ describe('public CLI facade', () => {
         fixture.environment,
       );
 
-      expect(first.exitCode).toBe(0);
-      expect(second.exitCode).toBe(0);
-      expect(retry.exitCode).toBe(0);
+      // `root` is a plain temporary directory, not a Git work tree, so every run here degrades on
+      // records-not-committed; that is orthogonal to what this test is about (assignment
+      // rotation), so exit code 4 is expected rather than worked around.
+      expect(first.exitCode).toBe(4);
+      expect(second.exitCode).toBe(4);
+      expect(retry.exitCode).toBe(4);
       const firstAssignments = JSON.parse(first.stdout).execution.assignments;
       const retryAssignments = JSON.parse(retry.stdout).execution.assignments;
       const secondAssignments = JSON.parse(second.stdout).execution.assignments;
@@ -477,8 +480,10 @@ describe('public CLI facade', () => {
         await Bun.file(join(root, 'general', 'sessions', 'run-auto-reduced-quorum.json')).text(),
       );
 
-      expect(result.exitCode).toBe(0);
-      expect(payload.status).toBe('completed');
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed regardless of the reduced quorum this test is actually about.
+      expect(result.exitCode).toBe(4);
+      expect(payload.status).toBe('degraded');
       expect(payload.warning).toBe(AUTO_REDUCED_QUORUM_WARNING);
       expect(payload.preflight.requestedProviders).toEqual([
         'anthropic',
@@ -560,8 +565,10 @@ describe('public CLI facade', () => {
         await Bun.file(join(root, 'general', 'sessions', 'run-reduced-quorum.json')).text(),
       );
 
-      expect(result.exitCode).toBe(0);
-      expect(payload.status).toBe('completed');
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed regardless of the reduced quorum this test is actually about.
+      expect(result.exitCode).toBe(4);
+      expect(payload.status).toBe('degraded');
       expect(payload.warning).toBe(REDUCED_QUORUM_WARNING);
       expect(payload.manifest.quorumPolicy).toEqual({
         minimumDistinctFamilies: 3,
@@ -774,8 +781,11 @@ describe('public CLI facade', () => {
       );
       const payload = JSON.parse(result.stdout);
 
-      expect(result.exitCode).toBe(0);
-      expect(payload.status).toBe('completed');
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed regardless of the refinement round this test is actually about.
+      // `decisionState` is decided from the council's own outcome before that, so it is unmoved.
+      expect(result.exitCode).toBe(4);
+      expect(payload.status).toBe('degraded');
       expect(payload.records).toEqual({
         session: true,
         decisionState: 'awaiting-adjudication',
@@ -871,7 +881,10 @@ describe('public CLI facade', () => {
         fixture.environment,
       );
       expect(run.stderr).toBe('');
-      expect(run.exitCode).toBe(0);
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed; the persisted record it writes is unaffected (see below), which is
+      // what this test is actually about.
+      expect(run.exitCode).toBe(4);
       const runPayload = JSON.parse(run.stdout);
       expect(runPayload.records).toEqual({
         session: true,
@@ -1141,7 +1154,9 @@ describe('public CLI facade', () => {
         fixture.environment,
       );
 
-      expect(first.exitCode).toBe(0);
+      // `root` is a plain temporary directory, not a Git work tree, so the first run degrades on
+      // records-not-committed; that is orthogonal to the motion-identity refusal under test.
+      expect(first.exitCode).toBe(4);
       expect(changed.exitCode).toBe(2);
       expect(changed.stderr).toMatch(/different motion/i);
       expect(fixture.providerCalls()).toBe(callsAfterFirst);
@@ -1286,7 +1301,9 @@ describe('public CLI facade', () => {
         ],
         fixture.environment,
       );
-      expect(result.exitCode).toBe(0);
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed; the persisted envelope below is written before that and unaffected.
+      expect(result.exitCode).toBe(4);
       const payload = JSON.parse(result.stdout);
       expect(payload.records).toEqual({
         session: true,
@@ -1518,7 +1535,7 @@ describe('public CLI facade', () => {
     }
   });
 
-  test('a persisted run in a plain directory reports records-not-committed and still succeeds', async () => {
+  test('a persisted run in a plain directory reports records-not-committed and degrades the run', async () => {
     const root = await mkdtemp(join(tmpdir(), 'council-nocommit-facade-'));
     try {
       const fixture = await fixtureEnvironment(undefined, true);
@@ -1534,8 +1551,10 @@ describe('public CLI facade', () => {
         ],
         fixture.environment,
       );
-      expect(result.exitCode).toBe(0);
+      // docs/modes.md invariant 8: a record that never committed must not report success.
+      expect(result.exitCode).toBe(4);
       const payload = JSON.parse(result.stdout);
+      expect(payload.status).toBe('degraded');
       expect(payload.envelope.record.committed).toBe(false);
       expect(payload.envelope.record.minutes).toBeNull();
       expect(payload.envelope.degraded).toContainEqual(
@@ -1549,6 +1568,10 @@ describe('public CLI facade', () => {
   test('an unwritable minutes directory degrades the run instead of failing it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'council-minutes-facade-'));
     try {
+      // A real Git work tree, so the record itself commits cleanly and the only degradation this
+      // test exercises is the unwritable minutes directory, not records-not-committed too.
+      const init = Bun.spawnSync({ cmd: ['git', 'init', '-q'], cwd: root });
+      expect(init.exitCode).toBe(0);
       // A regular file where the minutes directory should be, so creating the directory fails
       // after the record has already been written.
       const blocked = join(root, 'minutes');
@@ -1556,7 +1579,14 @@ describe('public CLI facade', () => {
       const fixture = await fixtureEnvironment(undefined, true);
       const environment: CliFacadeEnvironment = {
         ...fixture.environment,
-        env: { COUNCIL_MINUTES_DIR: blocked },
+        env: {
+          COUNCIL_MINUTES_DIR: blocked,
+          GIT_AUTHOR_NAME: 'Council Test',
+          GIT_AUTHOR_EMAIL: 'council-test@example.invalid',
+          GIT_COMMITTER_NAME: 'Council Test',
+          GIT_COMMITTER_EMAIL: 'council-test@example.invalid',
+          GIT_CONFIG_GLOBAL: join(root, 'gitconfig'),
+        },
       };
       const result = await runCliFacade(
         [
@@ -1572,9 +1602,13 @@ describe('public CLI facade', () => {
       );
       expect(result.exitCode).toBe(0);
       const payload = JSON.parse(result.stdout);
+      expect(payload.envelope.record.committed).toBe(true);
       expect(payload.envelope.record.minutes).toBeNull();
       expect(payload.envelope.degraded).toContainEqual(
         expect.stringMatching(/^minutes-not-written: /),
+      );
+      expect(payload.envelope.degraded).not.toContainEqual(
+        expect.stringContaining('records-not-committed'),
       );
     } finally {
       await rm(root, { recursive: true, force: true });

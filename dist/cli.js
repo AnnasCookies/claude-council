@@ -26926,6 +26926,9 @@ async function commitRecords(root, paths, message, environment) {
     env: environment.env ?? process.env
   });
 }
+function recordNotCommitted(degraded) {
+  return degraded.some((entry) => entry.startsWith("records-not-committed"));
+}
 async function finaliseRecordedRun(input) {
   const { envelope: envelope2, degraded, environment } = input;
   const commit2 = await commitRecords(input.recordsRoot, input.paths, input.message, environment);
@@ -27249,7 +27252,7 @@ async function runCouncilCommand(command, args, environment) {
     ...executionOptions.refinementTrigger === undefined ? {} : { refinementTrigger: executionOptions.refinementTrigger }
   });
   const now = (environment.now ?? (() => new Date().toISOString()))();
-  const status = execution.outcome;
+  let status = execution.outcome;
   const decisionState = status === "completed" || status === "degraded" ? "awaiting-adjudication" : "not-adjudicable";
   const degraded = [];
   if (!options.caller.declared)
@@ -27298,6 +27301,8 @@ async function runCouncilCommand(command, args, environment) {
       environment
     });
   }
+  if (status === "completed" && recordNotCommitted(degraded))
+    status = "degraded";
   const stoppedAtCap = envelope2.spend.stoppedAtCap;
   return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
@@ -27752,6 +27757,7 @@ async function handlerModeCommand(command, args, environment) {
     });
   }
   const completedAt = now();
+  let status = outcome.status;
   const degraded = [];
   if (!caller.declared)
     degraded.push("caller-undeclared");
@@ -27791,12 +27797,14 @@ async function handlerModeCommand(command, args, environment) {
       environment
     });
   }
+  if (status === "completed" && recordNotCommitted(degraded))
+    status = "degraded";
   const stoppedAtCap = envelope2.spend.stoppedAtCap;
-  return output(outcome.status === "completed" && !stoppedAtCap ? 0 : 4, {
+  return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
     schemaVersion: SCHEMA_VERSION,
     command,
     mode: mode.name,
-    status: outcome.status,
+    status,
     session: outcome.session,
     ...stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(envelope2.spend.cap) } : {},
     preflight,

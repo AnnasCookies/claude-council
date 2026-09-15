@@ -128,9 +128,11 @@ describe('the forum subcommand', () => {
         ],
         fixture.environment,
       );
-      expect(result.exitCode).toBe(0);
+      // The records root is a plain temporary directory, not a git work tree, so the record lands
+      // on disk but never commits; docs/modes.md invariant 8 means that degrades the run.
+      expect(result.exitCode).toBe(4);
       const payload = JSON.parse(result.stdout);
-      expect(payload).toMatchObject({ command: 'forum', mode: 'forum', status: 'completed' });
+      expect(payload).toMatchObject({ command: 'forum', mode: 'forum', status: 'degraded' });
       expect(payload.session).toMatch(/^fo-2026-09-15-[a-f0-9]{6}$/);
       const session = payload.session as string;
 
@@ -251,7 +253,9 @@ describe('the forum subcommand', () => {
         ],
         fixture.environment,
       );
-      expect(first.exitCode).toBe(0);
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed; that is orthogonal to the session-reuse refusal under test.
+      expect(first.exitCode).toBe(4);
       expect(JSON.parse(first.stdout).session).toBe('fo-2026-09-15-0a1b2c');
 
       // The same session id cannot be handed a second forum: the ledger stays one argument.
@@ -330,7 +334,9 @@ describe('the forum subcommand', () => {
         ],
         fixture.environment,
       );
-      expect(lensed.exitCode).toBe(0);
+      // `root` is a plain temporary directory, not a Git work tree, so this run degrades on
+      // records-not-committed; that is orthogonal to the lens/persona selection under test.
+      expect(lensed.exitCode).toBe(4);
       expect(
         JSON.parse(lensed.stdout).envelope.seats.map((seat: { lens: string }) => seat.lens),
       ).toEqual(['critic', 'security', 'critic-2']);
@@ -363,7 +369,7 @@ describe('the forum subcommand', () => {
         ],
         fixture.environment,
       );
-      expect(withPersonas.exitCode).toBe(0);
+      expect(withPersonas.exitCode).toBe(4);
       expect(
         JSON.parse(withPersonas.stdout).envelope.seats.map((seat: { lens: string }) => seat.lens),
       ).toEqual(['ops-manager', 'new-starter']);
