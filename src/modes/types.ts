@@ -22,7 +22,14 @@ import type {
 } from '../substrate';
 
 /** The modes this build registers. A mode PR adds its name here when it adds its definition. */
-export const MODE_NAMES = ['committee', 'second-opinion', 'advisor', 'ideation', 'forum'] as const;
+export const MODE_NAMES = [
+  'committee',
+  'second-opinion',
+  'advisor',
+  'ideation',
+  'forum',
+  'triage',
+] as const;
 export type ModeName = (typeof MODE_NAMES)[number];
 
 /**

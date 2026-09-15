@@ -89,13 +89,14 @@ function options(overrides: Partial<SessionOptions> = {}): SessionOptions {
 }
 
 describe('modes registry', () => {
-  test('registers committee, second opinion, the advisor, ideation and forum', () => {
+  test('registers committee, second opinion, the advisor, ideation, forum and triage', () => {
     expect([...MODE_NAMES]).toEqual([
       'committee',
       'second-opinion',
       'advisor',
       'ideation',
       'forum',
+      'triage',
     ]);
     expect(modes.committee.pattern).toBe('rounds');
     expect(modes['second-opinion'].pattern).toBe('parallel');
@@ -110,13 +111,19 @@ describe('modes registry', () => {
     expect(isHandlerMode(modes.ideation)).toBe(true);
     expect(isHandlerMode(modes.forum)).toBe(true);
     expect(typeof modes.ideation.handle).toBe('function');
+    // triage is a handler mode alongside the advisor and ideation: it owns its execution and
+    // never falls back to a metered key.
+    expect(modes.triage.kind).toBe('handler');
+    expect(modes.triage.pattern).toBe('parallel');
+    expect(modes.triage.spend.policy).toBe('never-metered');
+    expect(modes.triage.spend.defaultCap(2, 1)).toBe(0);
   });
 
   test('an unknown mode fails with the whole registered list', () => {
-    // `forum` is registered now, so the example is a mode docs/modes.md specifies and this build
-    // does not carry.
-    expect(() => getMode('triage')).toThrow(
-      /^Unknown mode: triage\. Registered modes: committee, second-opinion, advisor, ideation, forum$/,
+    // `forum` and `triage` are registered now, so the example is a mode docs/modes.md specifies
+    // and this build does not carry.
+    expect(() => getMode('audience')).toThrow(
+      /^Unknown mode: audience\. Registered modes: committee, second-opinion, advisor, ideation, forum, triage$/,
     );
   });
 
