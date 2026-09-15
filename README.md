@@ -499,8 +499,9 @@ rendered as a Markdown minutes file there. See "Records and memory" in `docs/mod
 A run that has written and committed its record never fails afterwards. A commit that cannot
 happen — the records root is not a Git work tree, a record path resolves outside that work tree,
 or `git` itself errors — adds `records-not-committed: <reason>` to the envelope's `degraded`
-rather than failing the run; an unwritable `COUNCIL_MINUTES_DIR` adds `minutes-not-written:
-<reason>` and leaves `record.minutes` as `null`. Both still report success. The commit runs `git`
+and reports the run as `degraded` (exit 4), because a record that is not durably stored is not a
+success; an unwritable `COUNCIL_MINUTES_DIR` adds `minutes-not-written: <reason>`, leaves
+`record.minutes` as `null` and still reports success. The commit runs `git`
 with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_OBJECT_DIRECTORY` stripped from its
 environment, so running from inside a Git hook cannot redirect it at a different repository, and
 paths are compared after resolving symlinks so a symlinked records root is not mistaken for lying
