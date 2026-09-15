@@ -1,4 +1,5 @@
 import {
+  createSpendLedger,
   newModeSessionId,
   panelEnvelopeSeats,
   panelSeatId,
@@ -17,6 +18,8 @@ import { loadPersonas, parseLensNames, resolveLenses } from './lenses';
 import {
   SYNTHESISER_LENS,
   conflictsAnswer,
+  followUpAnswer,
+  followUpPrompt,
   reportAnswer,
   reportPrompt,
   synthesisPrompt,
@@ -27,6 +30,7 @@ import {
   CONSULTANTS_MODE,
   CONSULTANTS_SESSION_PREFIX,
   ConsultantsOutputSchema,
+  historyFor,
   replaySession,
   sessionOutput,
 } from './session';
@@ -203,6 +207,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
   let synthesis: { by: string; text: string } | null = null;
   let synthesisSeats: EnvelopeSeat[] = [];
   let synthesisFallbacks = 0;
+  let synthesisUsed = 0;
   if (answered.length < 2) {
     // Two reports are the least that can conflict, so there is nothing for a synthesiser to read.
     const reason = `fewer than two consultants reported (${answered.length})`;
@@ -235,6 +240,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     );
     synthesisSeats = panelEnvelopeSeats(synthesisPanel.seats);
     synthesisFallbacks = synthesisPanel.spend.fallbacks;
+    synthesisUsed = synthesisPanel.spend.used;
     const synthesised = synthesisPanel.seats[0];
     if (synthesised === undefined) throw new Error('The synthesis panel returned no seat');
     if (synthesised.status === 'ok') {
@@ -257,14 +263,19 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     }
   }
 
-  // Both rounds shared one ledger, so its own counters are the session's spend rather than a sum
-  // this handler has to keep in step with them by hand; only `fallbacks` is not something the
-  // ledger tracks, because a fallback can still fail without spending a reservation.
+  // Both rounds shared one ledger, so its cap and its refusal count are the session's rather than
+  // a sum this handler has to keep in step with them by hand. `used` is not read from the ledger,
+  // though: the ledger's own counter only grows when a subscription seat actually falls back
+  // through it, so a seat that was metered from the start (a metered-only fixture, or a caller who
+  // asked for `--billing api-only`) never touches it and would be spent for free. `panel.spend.used`
+  // counts every seat whose transport was `api`, whichever way it got there, so a follow-up's own
+  // remaining-budget arithmetic (which reads this event back off the log) sees the true spend.
+  const used = panel.spend.used + synthesisUsed;
   const fallbacks = panel.spend.fallbacks + synthesisFallbacks;
   await log.append('spend', {
     command: 'brief',
     cap: ledger.cap,
-    used: ledger.used,
+    used,
     fallbacks,
     refused: ledger.refused,
   });
@@ -273,7 +284,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     billing: input.spend.billing,
     policy: 'capped',
     cap: ledger.cap,
-    used: ledger.used,
+    used,
     fallbacks,
     refused: ledger.refused,
     stoppedAtCap: ledger.refused > 0,
@@ -300,6 +311,211 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
   };
 }
 
+function forwardNames(input: HandlerInput, ask: string): string[] {
+  const names = flagValues(input, 'forward')
+    .flatMap((value) => value.split(','))
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  for (const name of names) {
+    if (name === ask) throw new Error(`--forward ${name} is the consultant being asked`);
+  }
+  return [...new Set(names)];
+}
+
+/**
+ * One consultant, one question. The consultant is given its own report and its own Q&A history as
+ * data, and another consultant's report only where the caller forwarded it: a follow-up is never
+ * a broadcast, and no seat learns what another said by default.
+ */
+async function followUp(
+  input: HandlerInput,
+  sessions: ModeSessionStore,
+  ask: string,
+): Promise<HandlerOutcome> {
+  for (const flag of ['lens', 'context', 'personas'] as const) {
+    if (flagValues(input, flag).length > 0) {
+      throw new Error(
+        `--${flag} belongs to a brief; a follow-up takes --session, --ask, optional --forward and the question`,
+      );
+    }
+  }
+  if (input.options.motion !== undefined) {
+    throw new Error(
+      'A follow-up takes its question as the positional argument, not --motion: consult --session <id> --ask <lens> "<question>"',
+    );
+  }
+  const session = input.options.sessionId;
+  if (session === undefined) throw new Error('A follow-up needs --session <id>');
+  if (!(await sessions.exists(CONSULTANTS_MODE, session))) {
+    throw new Error(`Unknown consultants session: ${session}`);
+  }
+  const question = (input.positionals[0] ?? '').trim();
+  if (question.length === 0) {
+    throw new Error(
+      'A follow-up needs its question as one quoted argument: consult --session <id> --ask <lens> "<question>"',
+    );
+  }
+
+  const state = replaySession(await sessions.read(CONSULTANTS_MODE, session));
+  const consultant = state.reports.find((report) => report.lens === ask);
+  if (consultant === undefined) {
+    throw new Error(
+      `Unknown lens: ${ask}. This session seated: ${state.reports.map((report) => report.lens).join(', ')}`,
+    );
+  }
+  const report = consultant.report;
+  if (consultant.status !== 'ok' || report === null) {
+    throw new Error(`The ${ask} consultant never reported in this session, so it cannot follow up`);
+  }
+  const forwarded: ReportReference[] = forwardNames(input, ask).map((name) => {
+    const other = state.reports.find((entry) => entry.lens === name);
+    if (other === undefined || other.status !== 'ok' || other.report === null) {
+      throw new Error(`Cannot forward ${name}: this session has no report from that lens`);
+    }
+    return { lens: other.lens, seat: other.seat, report: other.report };
+  });
+
+  if (input.spend.policy !== 'capped') {
+    throw new Error('consult is a capped-spend mode; the CLI must always hand it a ledger');
+  }
+
+  const decision = input.guard([question]);
+  if (decision.kind === 'blocked') {
+    return {
+      kind: 'blocked',
+      status: 'blocked-policy',
+      message:
+        'The follow-up question did not pass the outbound policy guard, so the consultant was not asked.',
+      decision,
+    };
+  }
+
+  const lens: PanelLens = state.brief.lenses.find((entry) => entry.name === ask) ?? {
+    name: ask,
+    description: `The ${ask} consultant on this brief.`,
+  };
+  // An explicit --spend-cap raises the session's cap, as the exhausted-cap message invites; it
+  // never lowers it, because the earlier commands were already paid for under the higher one. The
+  // CLI hands every command a freshly built ledger sized from `--spend-cap` when given or from the
+  // mode's own default otherwise, so a follow-up with no `--spend-cap` of its own must not let that
+  // default quietly override the cap the session already recorded: only a flag the caller actually
+  // typed on this command can raise it.
+  const explicitCap = input.flags.has('spend-cap') ? input.spend.ledger.cap : undefined;
+  const cap = Math.max(state.spend.cap, explicitCap ?? 0);
+  const remaining = Math.max(0, cap - state.spend.used);
+  const log = recorder(input, sessions, session);
+
+  if (remaining === 0) {
+    // The cap covers the session, so an exhausted session does not quietly continue on the
+    // subscription: the seat is skipped, the refusal is recorded, and the caller is told how to
+    // raise the cap.
+    await log.append('spend', { command: 'ask', cap, used: 0, fallbacks: 0, refused: 1 });
+    const seat: EnvelopeSeat = {
+      id: consultant.seat,
+      family: consultant.family,
+      model: { requested: consultant.model, verified: null, verification: 'unverified' },
+      lens: consultant.lens,
+      transport: null,
+      fallback: false,
+      status: 'skipped',
+      reason: `spend-cap: the session cap of ${cap} metered call(s) is spent; raise it with --spend-cap <n>`,
+    };
+    return {
+      kind: 'result',
+      status: 'degraded',
+      session,
+      pattern: 'parallel',
+      rounds: 1,
+      seats: [seat],
+      output: await readOutput(sessions, session),
+      synthesis: null,
+      dissent: null,
+      unanimous: false,
+      degraded: [`answer-missing: ${ask} (spend-cap)`],
+      spend: {
+        billing: input.spend.billing,
+        policy: 'capped',
+        cap,
+        used: state.spend.used,
+        fallbacks: state.spend.fallbacks,
+        refused: 1,
+        stoppedAtCap: true,
+      },
+      record: { session: sessions.recordPath(CONSULTANTS_MODE, session), paths: log.paths },
+    };
+  }
+
+  const ledger = createSpendLedger(remaining);
+  const seat: PanelSeatSpec = {
+    id: consultant.seat,
+    family: consultant.family,
+    model: consultant.model,
+    lens,
+  };
+  const panel = await runPanel(
+    { adapters: input.adapters, context: input.context },
+    {
+      seats: [seat],
+      prompt: () =>
+        followUpPrompt({
+          lens,
+          question: state.brief.question,
+          report,
+          history: historyFor(state, ask),
+          forwarded,
+          ask: question,
+        }),
+      answer: followUpAnswer(),
+      spend: { policy: 'capped', billing: input.spend.billing, ledger },
+    },
+  );
+  const answered = panel.seats[0];
+  if (answered === undefined) throw new Error('The follow-up panel returned no seat');
+  const degraded: string[] = [];
+  if (answered.status === 'ok') {
+    await log.append('qa', {
+      to: ask,
+      seat: answered.id,
+      question,
+      answer: answered.answer.answer,
+      forwarded: forwarded.map((entry) => entry.lens),
+    });
+  } else {
+    degraded.push(`answer-missing: ${ask} (${answered.code})`);
+  }
+  await log.append('spend', {
+    command: 'ask',
+    cap,
+    used: panel.spend.used,
+    fallbacks: panel.spend.fallbacks,
+    refused: ledger.refused,
+  });
+
+  return {
+    kind: 'result',
+    status: degraded.length === 0 ? 'completed' : 'degraded',
+    session,
+    pattern: 'parallel',
+    rounds: 1,
+    seats: panelEnvelopeSeats(panel.seats),
+    output: await readOutput(sessions, session),
+    synthesis: null,
+    dissent: null,
+    unanimous: false,
+    degraded,
+    spend: {
+      billing: input.spend.billing,
+      policy: 'capped',
+      cap,
+      used: state.spend.used + panel.spend.used,
+      fallbacks: state.spend.fallbacks + panel.spend.fallbacks,
+      refused: ledger.refused,
+      stoppedAtCap: ledger.refused > 0,
+    },
+    record: { session: sessions.recordPath(CONSULTANTS_MODE, session), paths: log.paths },
+  };
+}
+
 async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   const sessions = input.sessions;
   if (sessions === null) {
@@ -314,7 +530,7 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   }
   const ask = askValue.trim();
   if (ask.length === 0) throw new Error('--ask needs the lens name of one consultant');
-  throw new Error('Follow-up questions arrive in the next task');
+  return followUp(input, sessions, ask);
 }
 
 export const consultants: HandlerModeDefinition = {

@@ -15,6 +15,8 @@ export const NOW = '2026-07-28T12:00:00.000Z';
 export const BRIEF_SESSION = 'cs-2026-07-28-0a1b2c';
 
 export interface ConsultantsFixtureOptions {
+  /** Extra arguments the brief helper appends, so a test can pin the session cap. */
+  readonly spendCapArgument?: readonly string[];
   readonly cwd?: string;
   readonly recordsRoot?: string;
   readonly failing?: readonly ProviderFamily[];
