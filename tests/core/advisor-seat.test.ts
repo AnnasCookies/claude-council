@@ -190,6 +190,31 @@ describe('advisor consultation', () => {
     expect(anthropic.calls[0]?.context.timeoutMs).toBeLessThanOrEqual(1_000);
   });
 
+  test('an astral-character answer over the limit is cut without a lone surrogate', async () => {
+    // A leading plain character puts the emoji run at an odd UTF-16 offset, so a naive
+    // `.slice(0, NOTE_TEXT_LIMIT)` would land inside a surrogate pair; `safeExcerpt` walks whole
+    // characters instead. 300 emoji plus the prefix is 601 units, one past NOTE_TEXT_LIMIT (600),
+    // so a cut is guaranteed.
+    const long = `x${'\u{1F600}'.repeat(300)}`;
+    const anthropic = new FakeAdapter('anthropic', (r) => ok(r, 'anthropic', answer('info', long)));
+    const result = await consultSeat({
+      family: 'anthropic',
+      adapters: { anthropic },
+      context: context(),
+      prompt: 'p',
+      budgetMs: 1_000,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.text.length).toBeLessThanOrEqual(NOTE_TEXT_LIMIT);
+    if (typeof result.text.isWellFormed === 'function') {
+      expect(result.text.isWellFormed()).toBe(true);
+    } else {
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(result.text),
+      ).toBe(false);
+    }
+  });
+
   test('an empty answer is silence, recorded as no-advice', async () => {
     const anthropic = new FakeAdapter('anthropic', (r) => ok(r, 'anthropic', answer('info', '  ')));
     const result = await consultSeat({

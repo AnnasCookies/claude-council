@@ -23097,7 +23097,7 @@ function fromPanelSeat(seat, spend2) {
   const envelopeSeat = panelEnvelopeSeats([seat])[0] ?? null;
   switch (seat.status) {
     case "ok": {
-      const text = excerpt(seat.answer.text, NOTE_TEXT_LIMIT);
+      const text = safeExcerpt(seat.answer.text, NOTE_TEXT_LIMIT);
       if (text.length === 0)
         return silent(seat.id, envelopeSeat, spend2, "no-advice", "seat-silent");
       return {
