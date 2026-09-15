@@ -30,7 +30,6 @@ const allowances: Allowance[] = [
     reason: 'the former origin is a refused fixture',
   },
   { path: 'tests/release/naming.ts', reason: 'this gate' },
-  { path: 'dist/cli.js', reason: 'the bundle carries the OMP profile constant' },
 ];
 
 function allowance(path: string, line: string): Allowance | undefined {
