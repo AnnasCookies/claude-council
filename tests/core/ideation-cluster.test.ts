@@ -19,6 +19,18 @@ describe('ideation tokens', () => {
     expect(tokenise('a of the and')).toEqual([]);
   });
 
+  test('folds accents rather than breaking on them, whatever the script', () => {
+    // An ASCII-only class broke `naïve` into `na` and `ve`: one word became two fragments, neither
+    // of which matched anything anyone else had written.
+    expect(tokenise('naïve plan')).toEqual(['naive', 'plan']);
+    expect(tokenise('Résumé caché')).toEqual(['resume', 'cache']);
+    // The composed and the decomposed spelling of one word are the same token.
+    expect(tokenise('naïve')).toEqual(tokenise('naïve'));
+    // A letter with no ASCII base is kept whole rather than discarded as punctuation.
+    expect(tokenise('Ελληνικά σχέδιο')).toEqual(['ελληνικα', 'σχεδιο']);
+    expect(tokenise('число 42')).toEqual(['число', '42']);
+  });
+
   test('jaccard is intersection over union, and two empty sets are not similar', () => {
     expect(jaccard(new Set(['a', 'b']), new Set(['a', 'b', 'c', 'd']))).toBe(0.5);
     expect(jaccard(new Set(['a', 'b']), new Set(['a', 'c', 'd']))).toBeCloseTo(0.25, 10);
@@ -58,6 +70,18 @@ describe('clusterIdeas', () => {
       { id: 'k-3', label: 'Colour code notes by severity', ideaIds: ['i-4'] },
     ]);
     expect(state.nextClusterNumber).toBe(4);
+  });
+
+  test('an accented spelling groups with its unaccented one, and the label is the folded form', () => {
+    const state = clusterIdeas(
+      ideas('A naïve plan the team préfère', 'A naive plan the team prefere', 'Colour code notes'),
+    );
+    // Before the tokeniser folded accents these two scored 1/5 and sat in separate groups, so the
+    // record showed the same idea twice under two headings.
+    expect(state.clusters).toEqual([
+      { id: 'k-1', label: 'naive plan team', ideaIds: ['i-1', 'i-2'] },
+      { id: 'k-2', label: 'Colour code notes', ideaIds: ['i-3'] },
+    ]);
   });
 
   test('clusters are ordered by their earliest idea and carry no score of any kind', () => {

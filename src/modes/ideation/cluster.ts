@@ -96,15 +96,23 @@ const STOPWORDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Lower-case, everything but letters and digits becomes a break, then stopwords and
- * one-character tokens go. Nothing is stemmed or singularised: a stemmer is a guess about the
- * language, and this grouping is meant to be reproducible rather than clever.
+ * Lower-case, then fold accents, then everything but a letter or a digit becomes a break, then
+ * stopwords and one-character tokens go. Nothing is stemmed or singularised: a stemmer is a guess
+ * about the language, and this grouping is meant to be reproducible rather than clever.
+ *
+ * The rule is Unicode-aware on purpose. An ASCII-only character class treats every accented letter
+ * as a break, so `naïve` arrives as `na` and `ve`: one word becomes two fragments, it never groups
+ * with the `naive` somebody else wrote, and the fragments compete for a place in the label. NFKD
+ * decomposes an accented letter into its base plus a combining mark, `\p{M}` removes the mark, and
+ * `\p{L}`/`\p{N}` keep every remaining letter and digit whatever the script, so both spellings
+ * tokenise to the same folded form.
  */
 export function tokenise(text: string): string[] {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .split(' ')
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .split(/[^\p{L}\p{N}]+/u)
     .filter((token) => token.length > 1 && !STOPWORDS.has(token));
 }
 
