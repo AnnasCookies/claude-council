@@ -258,8 +258,8 @@ export class ModeSessionStore {
   }
 
   /**
-   * Append an event the caller derives from the log as it stands, with the read, the derivation
-   * and the write all under one scope lock.
+   * Append what the caller derives from the log as it stands, with the read, the derivation and
+   * the write all under one scope lock.
    *
    * `append` cannot give that guarantee: a caller that reads the log, decides something from it
    * and then appends leaves a window between the two in which another call can append, so two
@@ -269,11 +269,19 @@ export class ModeSessionStore {
    * outside it, leaving only the part of the decision that reads the log in here. Returning
    * `null` appends nothing and reports no path, which is how a caller says the log already
    * settled the question.
+   *
+   * A derivation may return several events, and they are published in one rewrite. A mode whose
+   * step is two lines — ideation's pass and the clustering over it — would otherwise have to
+   * append twice, and a concurrent call taking the lock between the two reads a log in which the
+   * pass has landed and its clustering has not. Throwing from `derive` writes nothing at all,
+   * which is how a caller refuses a step the log it has just read turns out to forbid.
    */
   async appendDerived(
     mode: string,
     sessionId: string,
-    derive: (events: readonly ModeSessionEvent[]) => ModeSessionEvent | null,
+    derive: (
+      events: readonly ModeSessionEvent[],
+    ) => ModeSessionEvent | readonly ModeSessionEvent[] | null,
   ): Promise<RecordWrite> {
     const path = this.absolutePath(mode, sessionId);
     return withScopeWriteLock(dirname(path), async () => {
@@ -284,11 +292,15 @@ export class ModeSessionStore {
       const events = parseEvents(existing, path);
       const derived = derive(events);
       if (derived === null) return { paths: [] };
-      const record = ModeSessionEventSchema.parse(derived);
+      const records = (isEventList(derived) ? derived : [derived]).map((event) =>
+        ModeSessionEventSchema.parse(event),
+      );
+      // An empty list is the same statement as `null`: the log already settled the question.
+      if (records.length === 0) return { paths: [] };
       // Rewrite-and-rename rather than appendFile: a crash midway through an append leaves a torn
       // last line that fails every later read, whereas the rename publishes the complete new log
       // or leaves the old one untouched. The lock keeps two appends from racing the rewrite.
-      const content = `${existing}${JSON.stringify(record)}\n`;
+      const content = `${existing}${records.map((record) => `${JSON.stringify(record)}\n`).join('')}`;
       await writeTextAtomically(path, content, {
         replace: true,
         validate: (text) => {
@@ -298,4 +310,14 @@ export class ModeSessionStore {
       return { paths: [path] };
     });
   }
+}
+
+/**
+ * A predicate rather than a bare `Array.isArray`, so the list branch stays typed as a list of
+ * events instead of widening to `any[]` on the way through.
+ */
+function isEventList(
+  derived: ModeSessionEvent | readonly ModeSessionEvent[],
+): derived is readonly ModeSessionEvent[] {
+  return Array.isArray(derived);
 }

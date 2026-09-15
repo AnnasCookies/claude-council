@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { MODE_NAMES, getMode, modes, resolveModeForCommand } from '../../src/modes';
+import { MODE_NAMES, getMode, isHandlerMode, modes, resolveModeForCommand } from '../../src/modes';
 import type { ModeResultView } from '../../src/modes/types';
 import type {
   Availability,
@@ -89,18 +89,25 @@ function options(overrides: Partial<SessionOptions> = {}): SessionOptions {
 }
 
 describe('modes registry', () => {
-  test('registers committee, second opinion and the advisor', () => {
-    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion', 'advisor']);
+  test('registers committee, second opinion, the advisor and ideation', () => {
+    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion', 'advisor', 'ideation']);
     expect(modes.committee.pattern).toBe('rounds');
     expect(modes['second-opinion'].pattern).toBe('parallel');
+    expect(modes.ideation.pattern).toBe('parallel');
     expect(modes.committee.spend.defaultCap(5, 2)).toBe(10);
     expect(modes['second-opinion'].spend.defaultCap(5, 1)).toBe(5);
+    // The registry is mixed, and each entry keeps its own type: a runner mode has `prepare` and
+    // `defaults`, a handler mode has `handle`, and nothing has both.
+    expect(isHandlerMode(modes.committee)).toBe(false);
+    expect(isHandlerMode(modes.ideation)).toBe(true);
+    expect(typeof modes.ideation.handle).toBe('function');
   });
 
   test('an unknown mode fails with the whole registered list', () => {
-    // Anchored on both ends: a prefix match passed while the advisor was missing from the listing.
+    // Anchored on both ends: a prefix match passed while a registered mode was missing from the
+    // listing.
     expect(() => getMode('forum')).toThrow(
-      /^Unknown mode: forum\. Registered modes: committee, second-opinion, advisor$/,
+      /^Unknown mode: forum\. Registered modes: committee, second-opinion, advisor, ideation$/,
     );
   });
 

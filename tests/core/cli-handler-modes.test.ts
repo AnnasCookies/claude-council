@@ -589,7 +589,7 @@ describe('handler mode dispatch', () => {
     }
     expect(help.handlerCommands).toEqual({
       advise: { mode: 'advisor', registered: true },
-      ideate: { mode: 'ideation', registered: false },
+      ideate: { mode: 'ideation', registered: true },
       consult: { mode: 'consultants', registered: false },
       forum: { mode: 'forum', registered: false },
       triage: { mode: 'triage', registered: false },
@@ -612,6 +612,7 @@ describe('handler mode dispatch', () => {
       ['committee', 'runner'],
       ['second-opinion', 'runner'],
       ['advisor', 'handler'],
+      ['ideation', 'handler'],
       ['audience', 'handler'],
     ]);
     const builtIn = JSON.parse((await runCliFacade(['modes'])).stdout);
@@ -619,6 +620,7 @@ describe('handler mode dispatch', () => {
       'committee',
       'second-opinion',
       'advisor',
+      'ideation',
     ]);
   });
 

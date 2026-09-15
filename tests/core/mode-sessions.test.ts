@@ -153,6 +153,41 @@ describe('ModeSessionStore', () => {
     });
   });
 
+  test('publishes a derivation of several events in one write, or none of them', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      const id = store.newSessionId('id', NOW);
+      // Ten callers, each appending a pair. A caller that took the lock between somebody else's
+      // two lines would see a half-written step; the pairs below prove nobody can.
+      await Promise.all(
+        Array.from({ length: 10 }, () =>
+          store.appendDerived('ideation', id, (events) => {
+            const n = events.length / 2 + 1;
+            return [event('pass', { n }), event('cluster', { n })];
+          }),
+        ),
+      );
+      const events = await store.read('ideation', id);
+      expect(events.map((entry) => entry.kind)).toEqual(
+        Array.from({ length: 10 }, () => ['pass', 'cluster']).flat(),
+      );
+      expect(events.map((entry) => (entry.data as { n: number }).n)).toEqual([
+        1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10,
+      ]);
+
+      // A derivation that throws writes none of its events, not the ones it had already built.
+      await expect(
+        store.appendDerived('ideation', id, () => {
+          throw new Error('the log refuses this step');
+        }),
+      ).rejects.toThrow(/the log refuses this step/);
+      expect(await store.read('ideation', id)).toHaveLength(20);
+      // An empty list says the same thing as null: nothing to add.
+      expect(await store.appendDerived('ideation', id, () => [])).toEqual({ paths: [] });
+      expect(await store.read('ideation', id)).toHaveLength(20);
+    });
+  });
+
   test('serialises concurrent appends so every event lands once', async () => {
     await withRoot(async (root) => {
       const store = ModeSessionStore.open(root);

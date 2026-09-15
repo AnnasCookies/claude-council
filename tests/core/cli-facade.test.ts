@@ -1312,6 +1312,7 @@ describe('public CLI facade', () => {
       'committee',
       'second-opinion',
       'advisor',
+      'ideation',
     ]);
     expect(payload.modes[0]).toMatchObject({ pattern: 'rounds', spend: { policy: 'capped' } });
     const positional = await runCliFacade(['modes', 'version']);

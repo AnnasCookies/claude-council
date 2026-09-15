@@ -99,7 +99,7 @@ function input(overrides: Partial<HandlerInput> = {}): HandlerInput {
 }
 
 describe('handler-style modes', () => {
-  test('the specified names include the eight modes; the registered names are three', () => {
+  test('the specified names include the eight modes; the registered names are four', () => {
     expect([...SPECIFIED_MODE_NAMES]).toEqual([
       'committee',
       'second-opinion',
@@ -110,7 +110,7 @@ describe('handler-style modes', () => {
       'triage',
       'audience',
     ]);
-    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion', 'advisor']);
+    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion', 'advisor', 'ideation']);
   });
 
   test('the shipped modes are runner modes and a handler mode is told apart by kind', () => {

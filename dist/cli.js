@@ -1568,7 +1568,7 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 // src/cli.ts
 import { createHash as createHash5 } from "crypto";
 import { readdir as readdir2 } from "fs/promises";
-import { dirname as dirname3, isAbsolute as isAbsolute8, join as join7, resolve as resolve10 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute9, join as join7, resolve as resolve11 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -22622,9 +22622,11 @@ class ModeSessionStore {
       const derived = derive(events);
       if (derived === null)
         return { paths: [] };
-      const record2 = ModeSessionEventSchema.parse(derived);
-      const content = `${existing}${JSON.stringify(record2)}
-`;
+      const records = (isEventList(derived) ? derived : [derived]).map((event) => ModeSessionEventSchema.parse(event));
+      if (records.length === 0)
+        return { paths: [] };
+      const content = `${existing}${records.map((record2) => `${JSON.stringify(record2)}
+`).join("")}`;
       await writeTextAtomically(path, content, {
         replace: true,
         validate: (text) => {
@@ -22634,6 +22636,9 @@ class ModeSessionStore {
       return { paths: [path] };
     });
   }
+}
+function isEventList(derived) {
+  return Array.isArray(derived);
 }
 // src/substrate/records/project-id.ts
 var NonEmptyStringSchema6 = exports_external.string().trim().min(1);
@@ -23564,15 +23569,662 @@ var committee = {
   }
 };
 
-// src/modes/second-opinion/index.ts
+// src/modes/flags.ts
+function oneValue(flags, name) {
+  const values = flags.get(name);
+  if (values === undefined)
+    return;
+  if (values.length !== 1)
+    throw new Error(`Option --${name} may be provided only once`);
+  return values[0];
+}
+function integerValue(flags, name, fallback, minimum, maximum) {
+  const raw = oneValue(flags, name);
+  if (raw === undefined)
+    return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`Option --${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+function listValue(flags, name) {
+  const raw = oneValue(flags, name);
+  if (raw === undefined)
+    return;
+  const items = raw.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
+  if (items.length === 0)
+    throw new Error(`Option --${name} needs at least one value`);
+  return items;
+}
+
+// src/modes/ideation/cluster.ts
+var IdeaIdSchema = exports_external.string().regex(/^i-[1-9][0-9]*$/, "An idea id is i-<n>, numbered from one in arrival order");
+var ClusterIdSchema = exports_external.string().regex(/^k-[1-9][0-9]*$/, "A cluster id is k-<n>");
+var ClusterSchema = exports_external.strictObject({
+  id: ClusterIdSchema,
+  label: exports_external.string().trim().min(1),
+  ideaIds: exports_external.array(IdeaIdSchema).min(1)
+});
+var ClusterableIdeaSchema = exports_external.strictObject({
+  id: IdeaIdSchema,
+  text: exports_external.string().trim().min(1)
+});
+var SIMILARITY_THRESHOLD = 0.5;
+var STOPWORDS = new Set([
+  "about",
+  "all",
+  "an",
+  "and",
+  "any",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "can",
+  "do",
+  "for",
+  "from",
+  "has",
+  "have",
+  "how",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "its",
+  "let",
+  "make",
+  "more",
+  "no",
+  "not",
+  "of",
+  "on",
+  "or",
+  "our",
+  "out",
+  "so",
+  "that",
+  "the",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "to",
+  "up",
+  "use",
+  "was",
+  "we",
+  "were",
+  "what",
+  "when",
+  "which",
+  "who",
+  "will",
+  "with",
+  "you",
+  "your"
+]);
+function tokenise(text) {
+  return text.toLowerCase().normalize("NFKD").replace(/\p{M}+/gu, "").split(/[^\p{L}\p{N}]+/u).filter((token) => token.length > 1 && !STOPWORDS.has(token));
+}
+function jaccard(left, right) {
+  let shared = 0;
+  for (const token of left)
+    if (right.has(token))
+      shared += 1;
+  const union2 = left.size + right.size - shared;
+  return union2 === 0 ? 0 : shared / union2;
+}
+function rootOf(parent, index) {
+  let root = index;
+  for (;; ) {
+    const next = parent[root];
+    if (next === undefined)
+      throw new RangeError(`Cluster index out of range: ${root}`);
+    if (next === root)
+      break;
+    root = next;
+  }
+  let cursor = index;
+  for (;; ) {
+    const next = parent[cursor];
+    if (next === undefined || next === cursor)
+      break;
+    parent[cursor] = root;
+    cursor = next;
+  }
+  return root;
+}
+function groupIdeas(ideas) {
+  const tokens = ideas.map((idea) => new Set(tokenise(idea.text)));
+  const parent = ideas.map((_, index) => index);
+  for (let left = 0;left < ideas.length; left += 1) {
+    for (let right = left + 1;right < ideas.length; right += 1) {
+      const leftTokens = tokens[left];
+      const rightTokens = tokens[right];
+      if (leftTokens === undefined || rightTokens === undefined)
+        continue;
+      if (jaccard(leftTokens, rightTokens) < SIMILARITY_THRESHOLD)
+        continue;
+      const leftRoot = rootOf(parent, left);
+      const rightRoot = rootOf(parent, right);
+      if (leftRoot === rightRoot)
+        continue;
+      parent[Math.max(leftRoot, rightRoot)] = Math.min(leftRoot, rightRoot);
+    }
+  }
+  const groups = new Map;
+  for (const [index, idea] of ideas.entries()) {
+    const root = rootOf(parent, index);
+    const group = groups.get(root);
+    if (group === undefined)
+      groups.set(root, [idea.id]);
+    else
+      group.push(idea.id);
+  }
+  return [...groups.values()];
+}
+function labelFor(members) {
+  const first = members[0];
+  if (first === undefined)
+    throw new Error("A cluster always has at least one idea");
+  if (members.length === 1)
+    return first.text;
+  const frequency = new Map;
+  for (const member of members) {
+    for (const token of new Set(tokenise(member.text))) {
+      frequency.set(token, (frequency.get(token) ?? 0) + 1);
+    }
+  }
+  const ranked = [...frequency.entries()].sort((left, right) => right[1] - left[1]);
+  if (ranked.length === 0) {
+    return members.reduce((best, member) => member.text.length < best.text.length ? member : best, first).text;
+  }
+  return ranked.slice(0, 3).map(([token]) => token).join(" ");
+}
+function clusterIdeas(ideas, previous) {
+  const parsed = exports_external.array(ClusterableIdeaSchema).parse(ideas);
+  parsed.forEach((idea, index) => {
+    if (idea.id !== `i-${index + 1}`) {
+      throw new Error(`Ideas must arrive in order: expected i-${index + 1}, received ${idea.id}`);
+    }
+  });
+  const byId = new Map(parsed.map((idea) => [idea.id, idea]));
+  const groups = groupIdeas(parsed);
+  const claimed = new Map;
+  const taken = new Set;
+  const previousClusters = [...previous?.clusters ?? []].sort((left, right) => Number(left.id.slice(2)) - Number(right.id.slice(2)));
+  for (const cluster of previousClusters) {
+    const members = new Set(cluster.ideaIds);
+    let bestIndex = -1;
+    let bestOverlap = 0;
+    for (const [index, group] of groups.entries()) {
+      if (taken.has(index))
+        continue;
+      const overlap = group.filter((id) => members.has(id)).length;
+      if (overlap > bestOverlap) {
+        bestIndex = index;
+        bestOverlap = overlap;
+      }
+    }
+    if (bestIndex < 0)
+      continue;
+    claimed.set(bestIndex, cluster.id);
+    taken.add(bestIndex);
+  }
+  let next = previous?.nextClusterNumber ?? 1;
+  const clusters = groups.map((group, index) => {
+    const id = claimed.get(index) ?? `k-${next++}`;
+    const members = group.map((ideaId) => {
+      const idea = byId.get(ideaId);
+      if (idea === undefined)
+        throw new Error(`Unknown idea in cluster: ${ideaId}`);
+      return idea;
+    });
+    return ClusterSchema.parse({ id, label: labelFor(members), ideaIds: group });
+  });
+  return { clusters, nextClusterNumber: next };
+}
+
+// src/modes/ideation/seats.ts
+import { isAbsolute as isAbsolute8, resolve as resolve10 } from "path";
+var LensNameSchema2 = exports_external.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "A lens name is lower-case letters, digits and hyphens");
+function lensSlug(name) {
+  const slug = name.trim().toLowerCase().replace(/['\u2019]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const parsed = LensNameSchema2.safeParse(slug);
+  if (!parsed.success) {
+    throw new Error(`A lens or persona name must contain letters or digits; received "${name.slice(0, 40)}"`);
+  }
+  return parsed.data;
+}
+var CATALOGUE_LENSES = Object.freeze(roleCatalogue.map((lens) => Object.freeze(PanelLensSchema.parse({ name: lensSlug(lens.name), description: lens.prompt }))));
+function catalogueLens(name) {
+  const slug = lensSlug(name);
+  const lens = CATALOGUE_LENSES.find((candidate) => candidate.name === slug);
+  if (lens === undefined) {
+    throw new Error(`Unknown lens: ${name.slice(0, 40)}. The catalogue holds ${CATALOGUE_LENSES.map((candidate) => candidate.name).join(", ")}.`);
+  }
+  return lens;
+}
+var PersonaFileSchema = exports_external.array(exports_external.strictObject({
+  name: exports_external.string().trim().min(1).max(64),
+  description: exports_external.string().trim().min(1).max(2000)
+})).min(1).max(64);
+function assertDistinct(lenses) {
+  const seen = new Set;
+  for (const lens of lenses) {
+    if (seen.has(lens.name))
+      throw new Error(`Duplicate lens name: ${lens.name}`);
+    seen.add(lens.name);
+  }
+  return lenses;
+}
+async function loadPersonaLenses(path, cwd) {
+  const absolute = isAbsolute8(path) ? resolve10(path) : resolve10(cwd, path);
+  let value;
+  try {
+    value = await Bun.file(absolute).json();
+  } catch (error51) {
+    throw new Error(`Unable to read the persona list: ${absolute}`, { cause: error51 });
+  }
+  const lenses = PersonaFileSchema.parse(value).map((persona) => PanelLensSchema.parse({ name: lensSlug(persona.name), description: persona.description }));
+  assertDistinct(lenses);
+  return lenses;
+}
+function resolveSeatLenses(input) {
+  const seats = exports_external.number().int().min(1).parse(input.seats);
+  if (input.named !== null && seats < input.named.length) {
+    throw new Error(`--seats ${seats} is fewer than the ${input.named.length} lenses named`);
+  }
+  const pool = assertDistinct(input.named ?? CATALOGUE_LENSES.slice(0, seats));
+  const seated = Array.from({ length: seats }, (_, index) => {
+    const base = pool[index % pool.length];
+    if (base === undefined)
+      throw new Error("A room needs at least one lens");
+    const cycle = Math.floor(index / pool.length) + 1;
+    return cycle === 1 ? base : PanelLensSchema.parse({ name: `${base.name}-${cycle}`, description: base.description });
+  });
+  assertDistinct(seated);
+  return seated;
+}
+function parseModelOverrides(value) {
+  const overrides = new Map;
+  if (value === undefined)
+    return overrides;
+  const entries = value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  for (const entry of entries) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0) {
+      throw new Error(`Option --models takes <family>=<model> pairs; received "${entry.slice(0, 40)}"`);
+    }
+    const family = ProviderFamilySchema.parse(entry.slice(0, separator).trim());
+    const model = exports_external.string().trim().min(1).max(128).parse(entry.slice(separator + 1));
+    if (overrides.has(family))
+      throw new Error(`Option --models names ${family} twice`);
+    overrides.set(family, model);
+  }
+  return overrides;
+}
+function ideationRoute(route, override) {
+  const model = override ?? route.fallbacks[0] ?? route.primary;
+  return {
+    ...route,
+    primary: model,
+    fallbacks: route.fallbacks.filter((candidate) => candidate !== model)
+  };
+}
+function ideationRegistry(registry3, overrides) {
+  return ModelRegistrySchema.parse({
+    anthropic: ideationRoute(registry3.anthropic, overrides.get("anthropic")),
+    openai: ideationRoute(registry3.openai, overrides.get("openai")),
+    xai: ideationRoute(registry3.xai, overrides.get("xai")),
+    google: ideationRoute(registry3.google, overrides.get("google")),
+    deepseek: ideationRoute(registry3.deepseek, overrides.get("deepseek")),
+    moonshot: ideationRoute(registry3.moonshot, overrides.get("moonshot"))
+  });
+}
+function ideationSeats(input) {
+  return spreadSeats(input.families, input.lenses, input.registry);
+}
+
+// src/modes/ideation/session.ts
+var IDEATION_MODE = "ideation";
+var IDEATION_SESSION_PREFIX = "id";
+var PASS_EVENT_KIND = "pass";
+var CLUSTER_EVENT_KIND = "cluster";
 var NonEmptyStringSchema7 = exports_external.string().trim().min(1);
+var IdeaSchema = exports_external.strictObject({
+  id: IdeaIdSchema,
+  seat: NonEmptyStringSchema7,
+  lens: NonEmptyStringSchema7,
+  text: NonEmptyStringSchema7
+});
+var PassScopeSchema = exports_external.union([exports_external.literal("all"), exports_external.array(ClusterIdSchema).min(1)]);
+var IdeationPassSchema = exports_external.strictObject({
+  n: exports_external.number().int().min(1),
+  scope: PassScopeSchema,
+  ideas: exports_external.array(IdeaSchema)
+});
+var IdeationOutputSchema = exports_external.strictObject({
+  prompt: NonEmptyStringSchema7,
+  passes: exports_external.array(IdeationPassSchema).min(1),
+  clusters: exports_external.array(ClusterSchema),
+  raw: exports_external.array(IdeaIdSchema)
+});
+var IdeationPassEventSchema = exports_external.strictObject({
+  n: exports_external.number().int().min(1),
+  scope: PassScopeSchema,
+  prompt: NonEmptyStringSchema7,
+  ideasPerSeat: exports_external.number().int().min(1),
+  seats: exports_external.array(EnvelopeSeatSchema),
+  invalid: exports_external.array(exports_external.strictObject({ seat: NonEmptyStringSchema7, raw: exports_external.string() })),
+  ideas: exports_external.array(IdeaSchema)
+});
+var IdeationClusterEventSchema = exports_external.strictObject({
+  n: exports_external.number().int().min(1),
+  clusters: exports_external.array(ClusterSchema),
+  nextClusterNumber: exports_external.number().int().min(1)
+});
+function readIdeationSession(events) {
+  const passes = [];
+  const ideas = [];
+  let prompt = null;
+  let clusters = [];
+  let nextClusterNumber = 1;
+  for (const [index, event] of events.entries()) {
+    if (event.kind === PASS_EVENT_KIND) {
+      const data = IdeationPassEventSchema.parse(event.data);
+      if (prompt === null)
+        prompt = data.prompt;
+      else if (prompt !== data.prompt) {
+        throw new Error(`Ideation session line ${index + 1} changes the prompt; this is not one session`);
+      }
+      if (data.n !== passes.length + 1) {
+        throw new Error(`Ideation session line ${index + 1} is out of sequence: expected pass ${passes.length + 1}, recorded ${data.n}`);
+      }
+      passes.push(IdeationPassSchema.parse({ n: data.n, scope: data.scope, ideas: data.ideas }));
+      ideas.push(...data.ideas);
+      continue;
+    }
+    if (event.kind === CLUSTER_EVENT_KIND) {
+      const data = IdeationClusterEventSchema.parse(event.data);
+      clusters = data.clusters;
+      nextClusterNumber = data.nextClusterNumber;
+      continue;
+    }
+    throw new Error(`Unknown ideation event at line ${index + 1}: ${event.kind}`);
+  }
+  if (prompt === null)
+    throw new Error("This ideation session has no recorded pass");
+  ideas.forEach((idea, index) => {
+    if (idea.id !== `i-${index + 1}`) {
+      throw new Error(`Ideation session ids are out of order at ${idea.id}`);
+    }
+  });
+  return {
+    prompt,
+    passes,
+    ideas,
+    clusters,
+    nextClusterNumber,
+    nextIdeaNumber: ideas.length + 1
+  };
+}
+
+// src/modes/ideation/index.ts
+var DEFAULT_SEATS = 12;
+var MAX_SEATS = 24;
+var DEFAULT_IDEAS_PER_SEAT = 3;
+var MAX_IDEAS_PER_SEAT = 10;
+var MAX_SESSION_IDEAS = 2000;
+var IdeationAnswerSchema = exports_external.strictObject({
+  ideas: exports_external.array(exports_external.strictObject({ text: exports_external.string().trim().min(1) })).min(1)
+});
+function ideationAnswer(ideasPerSeat) {
+  return {
+    schema: IdeationAnswerSchema,
+    instruction: `Return exactly one JSON object of the form {"ideas":[{"text":"..."}]} holding at most ${ideasPerSeat} ideas. Each text is one short sentence. Do not rank, score or number them, and do not wrap the object in prose.`,
+    jsonSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["ideas"],
+      properties: {
+        ideas: {
+          type: "array",
+          minItems: 1,
+          maxItems: ideasPerSeat,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["text"],
+            properties: { text: { type: "string", minLength: 1 } }
+          }
+        }
+      }
+    }
+  };
+}
+function ideationPrompt(input) {
+  const lines = [];
+  if (input.scoped.length > 0)
+    lines.push(EVIDENCE_BOUNDARY_INSTRUCTION, "");
+  lines.push(`You hold one lens in a room generating options. Lens: ${input.lens.name}.`, input.lens.description, "", "The prompt:", input.prompt, "");
+  if (input.scoped.length > 0) {
+    lines.push("Ideas already recorded in the groups this pass expands:", untrustedBlock("ideas", input.scoped.map((idea) => `${idea.cluster}: ${idea.text}`).join(`
+`)), "", "Add ideas that belong inside those groups. Do not repeat one that is already there.", "");
+  }
+  lines.push(`Give at most ${input.ideasPerSeat} ideas, each one short sentence, each different from the others.`, "Do not rank, score or number them, and do not comment on any idea but your own.");
+  return lines.join(`
+`);
+}
+function expansionScope(named, prior) {
+  if (prior === null) {
+    throw new Error("--expand continues an ideation session: pass --session <id> of a recorded one");
+  }
+  const known = new Map(prior.clusters.map((cluster) => [cluster.id, cluster]));
+  const seen = new Set;
+  const chosen = named.map((id) => {
+    const cluster = known.get(id);
+    if (cluster === undefined) {
+      throw new Error(`Unknown cluster id: ${id}. This session has ${[...known.keys()].join(", ")}.`);
+    }
+    if (seen.has(id))
+      throw new Error(`Option --expand names ${id} twice`);
+    seen.add(id);
+    return cluster;
+  });
+  const owner = new Map(chosen.flatMap((cluster) => cluster.ideaIds.map((id) => [id, cluster.id])));
+  return {
+    clusters: chosen.map((cluster) => cluster.id),
+    scoped: prior.ideas.flatMap((idea) => {
+      const cluster = owner.get(idea.id);
+      return cluster === undefined ? [] : [{ cluster, text: idea.text }];
+    })
+  };
+}
+async function namedLenses(input) {
+  const personaPath = oneValue(input.flags, "personas");
+  const lenses = listValue(input.flags, "lenses");
+  if (personaPath !== undefined && lenses !== undefined) {
+    throw new Error("--personas supplies the seats itself; it cannot be combined with --lenses");
+  }
+  if (personaPath !== undefined)
+    return loadPersonaLenses(personaPath, input.context.cwd);
+  if (lenses !== undefined)
+    return lenses.map(catalogueLens);
+  return null;
+}
+function ideationOutput(state) {
+  return {
+    prompt: state.prompt,
+    passes: [...state.passes],
+    clusters: [...state.clusters],
+    raw: state.ideas.map((idea) => idea.id)
+  };
+}
+async function handle2(input) {
+  const sessions = input.sessions;
+  if (sessions === null) {
+    throw new Error("ideate keeps every idea from every pass, so it needs somewhere to keep them: pass --records-root <path>");
+  }
+  const ideasPerSeat = integerValue(input.flags, "ideas-per-seat", DEFAULT_IDEAS_PER_SEAT, 1, MAX_IDEAS_PER_SEAT);
+  const expand = listValue(input.flags, "expand");
+  const sessionId = input.options.sessionId ?? sessions.newSessionId(IDEATION_SESSION_PREFIX, input.now());
+  const opened = input.options.sessionId === undefined ? false : await sessions.exists(IDEATION_MODE, sessionId);
+  const prior = opened ? readIdeationSession(await sessions.read(IDEATION_MODE, sessionId)) : null;
+  const motion = input.options.motion?.trim();
+  const prompt = prior?.prompt ?? motion;
+  if (prompt === undefined || prompt.length === 0) {
+    throw new Error('ideate opens a room on a prompt: pass a non-blank --motion "<text>"');
+  }
+  if (prior !== null && motion !== undefined && motion !== prior.prompt) {
+    throw new Error("This session was opened on a different prompt; open a new session to ideate on another one");
+  }
+  const expansion = expand === undefined ? null : expansionScope(expand, prior);
+  const scope = expansion === null ? "all" : expansion.clusters;
+  const scoped = expansion?.scoped ?? [];
+  const named = await namedLenses(input);
+  const seatCount = integerValue(input.flags, "seats", named?.length ?? DEFAULT_SEATS, 1, MAX_SEATS);
+  const lenses = resolveSeatLenses({ seats: seatCount, named });
+  const decision = input.guard([
+    prompt,
+    ...lenses.map((lens) => lens.description),
+    ...scoped.map((idea) => idea.text)
+  ]);
+  if (decision.kind === "blocked") {
+    return {
+      kind: "blocked",
+      status: "blocked-policy",
+      message: "An ideation payload was blocked by the outbound data policy.",
+      decision
+    };
+  }
+  const registry3 = ideationRegistry(input.context.registry, parseModelOverrides(oneValue(input.flags, "models")));
+  const seats = ideationSeats({
+    families: input.options.providerFamilies,
+    lenses,
+    registry: registry3
+  });
+  const panel2 = await runPanel({ adapters: input.adapters, context: { ...input.context, registry: registry3 } }, {
+    seats,
+    prompt: (seat) => ideationPrompt({ lens: seat.lens, prompt, ideasPerSeat, scoped }),
+    answer: ideationAnswer(ideasPerSeat),
+    spend: input.spend
+  });
+  const offered = [];
+  const invalid = [];
+  for (const seat of panel2.seats) {
+    if (seat.status === "invalid")
+      invalid.push({ seat: seat.id, raw: seat.raw });
+    if (seat.status !== "ok")
+      continue;
+    for (const idea of seat.answer.ideas.slice(0, ideasPerSeat)) {
+      offered.push({ seat: seat.id, lens: seat.lens, text: idea.text });
+    }
+  }
+  const at = input.now();
+  const envelopeSeats2 = panelEnvelopeSeats(panel2.seats);
+  const derived = [];
+  const write = await sessions.appendDerived(IDEATION_MODE, sessionId, (events) => {
+    const settled = events.length === 0 ? null : readIdeationSession(events);
+    if (settled !== null && settled.prompt !== prompt) {
+      throw new Error("This session was opened on a different prompt; open a new session to ideate on another one");
+    }
+    const held = settled?.ideas.length ?? 0;
+    if (held + offered.length > MAX_SESSION_IDEAS) {
+      throw new Error(`An ideation session holds at most ${MAX_SESSION_IDEAS} ideas; this one holds ${held} and this pass would add ${offered.length}. Open a new session by leaving --session off.`);
+    }
+    let number4 = settled?.nextIdeaNumber ?? 1;
+    const ideas = offered.map((idea) => IdeaSchema.parse({ id: `i-${number4++}`, seat: idea.seat, lens: idea.lens, text: idea.text }));
+    const clustered = clusterIdeas([...settled?.ideas ?? [], ...ideas].map((idea) => ({ id: idea.id, text: idea.text })), settled === null ? undefined : { clusters: settled.clusters, nextClusterNumber: settled.nextClusterNumber });
+    const n = (settled?.passes.length ?? 0) + 1;
+    const appended = [
+      {
+        at,
+        kind: PASS_EVENT_KIND,
+        data: IdeationPassEventSchema.parse({
+          ...IdeationPassSchema.parse({ n, scope, ideas }),
+          prompt,
+          ideasPerSeat,
+          seats: envelopeSeats2,
+          invalid
+        })
+      },
+      {
+        at,
+        kind: CLUSTER_EVENT_KIND,
+        data: IdeationClusterEventSchema.parse({
+          n,
+          clusters: clustered.clusters,
+          nextClusterNumber: clustered.nextClusterNumber
+        })
+      }
+    ];
+    derived.push(IdeationOutputSchema.parse(ideationOutput(readIdeationSession([...events, ...appended]))));
+    return appended;
+  });
+  const output = derived.at(-1);
+  if (output === undefined)
+    throw new Error("The ideation pass was never derived");
+  const unanswered = seats.length - panel2.answered;
+  const degraded = unanswered === 0 ? [] : [`seats-unanswered: ${unanswered}`];
+  return {
+    kind: "result",
+    status: degraded.length === 0 ? "completed" : "degraded",
+    session: sessionId,
+    pattern: "parallel",
+    rounds: 1,
+    seats: panelEnvelopeSeats(panel2.seats),
+    output,
+    synthesis: null,
+    dissent: null,
+    unanimous: false,
+    degraded,
+    spend: panel2.spend,
+    record: {
+      session: sessions.recordPath(IDEATION_MODE, sessionId),
+      paths: write.paths
+    }
+  };
+}
+var ideation = {
+  kind: "handler",
+  name: "ideation",
+  knobs: {
+    participants: "many cheap seats, one catalogue lens or supplied persona each, families spread",
+    pattern: "parallel",
+    aggregation: "deterministic clusters labelled as the engine's grouping; never ranked",
+    tempo: "minutes",
+    records: "every idea from every pass, and the cluster labels"
+  },
+  pattern: "parallel",
+  spend: {
+    policy: "capped",
+    defaultCap: (families) => families
+  },
+  flags: {
+    value: ["seats", "lenses", "personas", "ideas-per-seat", "models", "expand"],
+    boolean: []
+  },
+  outputSchema: IdeationOutputSchema,
+  handle: handle2
+};
+
+// src/modes/second-opinion/index.ts
+var NonEmptyStringSchema8 = exports_external.string().trim().min(1);
 var SecondOpinionOutputSchema = exports_external.strictObject({
   outcome: CouncilOutcomeSchema,
   quorum: QuorumEvaluationSchema,
   panel: exports_external.array(exports_external.strictObject({
-    seat: NonEmptyStringSchema7,
+    seat: NonEmptyStringSchema8,
     family: ProviderFamilySchema,
-    lens: NonEmptyStringSchema7,
+    lens: NonEmptyStringSchema8,
     answer: exports_external.string()
   }))
 });
@@ -23631,7 +24283,8 @@ function runnerMode(mode) {
 var modes = Object.freeze({
   committee: runnerMode(committee),
   "second-opinion": runnerMode(secondOpinion),
-  advisor
+  advisor,
+  ideation
 });
 function getMode(name, registry3 = modes) {
   const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
@@ -23655,8 +24308,8 @@ var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 1200000;
 var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_default.version);
-var EXECUTABLE_PATH = resolve10(import.meta.main ? Bun.main : import.meta.path);
-var KERNEL_ROOT = resolve10(dirname3(EXECUTABLE_PATH), "..");
+var EXECUTABLE_PATH = resolve11(import.meta.main ? Bun.main : import.meta.path);
+var KERNEL_ROOT = resolve11(dirname3(EXECUTABLE_PATH), "..");
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set([
@@ -23831,8 +24484,8 @@ function resolvedRecordsRoot(parsed, environment) {
     return;
   if (value.trim().length === 0)
     throw new Error("Records root must not be blank");
-  const cwd = resolve10(environment.cwd ?? process.cwd());
-  return isAbsolute8(value) ? resolve10(value) : resolve10(cwd, value);
+  const cwd = resolve11(environment.cwd ?? process.cwd());
+  return isAbsolute9(value) ? resolve11(value) : resolve11(cwd, value);
 }
 async function configuredModelRegistry(parsed, environment) {
   const stateRoot = resolvedRecordsRoot(parsed, environment);
@@ -23992,7 +24645,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   const policyPath = oneFlag2(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath = isAbsolute8(policyPath) ? policyPath : resolve10(cwd, policyPath);
+  const absolutePath = isAbsolute9(policyPath) ? policyPath : resolve11(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath).json();
@@ -24363,10 +25016,10 @@ async function healthCommand(command, args, environment) {
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join7(resolve10(root), "general", "sessions");
+    return join7(resolve11(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join7(resolve10(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join7(resolve11(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
@@ -24440,9 +25093,9 @@ async function migrationCommand(args, environment) {
       throw new Error("migrate-general plan requires --root and --output");
     }
     const sourceRelativePath = oneFlag2(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join7(resolve10(root), sourceRelativePath)).text();
+    const sourceContent = await Bun.file(join7(resolve11(root), sourceRelativePath)).text();
     const rulesPath = oneFlag2(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve10(rulesPath)).json());
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve11(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -24450,12 +25103,12 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve10(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve11(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve10(destination),
+      output: resolve11(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
@@ -24464,7 +25117,7 @@ async function migrationCommand(args, environment) {
     const planPath = oneFlag2(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve10(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve11(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }
