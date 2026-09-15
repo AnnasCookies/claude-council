@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCliFacade } from '../../src/cli';
-import { ResultEnvelopeSchema, loadModelRegistry } from '../../src/substrate';
+import { ResultEnvelopeSchema, loadModelRegistry, type ProviderRequest } from '../../src/substrate';
 import {
   BRIEF_SESSION,
   consultantsFixture,
@@ -243,6 +243,17 @@ describe('consult: follow-up questions', () => {
       });
       expect(fixture.subscriptionCalls()).toBe(3);
       expect(fixture.meteredCalls()).toBe(2);
+      // `used` (per-transport, in the public envelope) and `reserved` (the ledger's own counter,
+      // log-only) coincide here because every seat's only path to a metered key is the fallback.
+      const briefLog = await Bun.file(
+        join(root, 'general', 'modes', 'consultants', `${BRIEF_SESSION}.jsonl`),
+      ).text();
+      const briefSpendEvent = briefLog
+        .trimEnd()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .find((line) => line.kind === 'spend');
+      expect(briefSpendEvent?.data).toMatchObject({ used: 2, reserved: 2, refused: 1 });
 
       const subscriptionBefore = fixture.subscriptionCalls();
       const meteredBefore = fixture.meteredCalls();
@@ -276,7 +287,9 @@ describe('consult: follow-up questions', () => {
       const log = await Bun.file(
         join(root, 'general', 'modes', 'consultants', `${BRIEF_SESSION}.jsonl`),
       ).text();
-      expect(log.trimEnd().split('\n').at(-1)).toContain('"command":"ask"');
+      const lastLine = log.trimEnd().split('\n').at(-1) ?? '';
+      expect(lastLine).toContain('"command":"ask"');
+      expect(JSON.parse(lastLine).data).toMatchObject({ used: 0, reserved: 0, refused: 1 });
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(cwd, { recursive: true, force: true });
@@ -340,6 +353,15 @@ describe('consult: follow-up questions', () => {
       expect(envelope.spend).toMatchObject({ cap: 6, used: 3, stoppedAtCap: false });
       expect(fixture.subscriptionCalls() - subscriptionBefore).toBe(1);
       expect(fixture.meteredCalls() - meteredBefore).toBe(1);
+      const log = await Bun.file(
+        join(root, 'general', 'modes', 'consultants', `${BRIEF_SESSION}.jsonl`),
+      ).text();
+      const askSpendEvent = log
+        .trimEnd()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .find((line) => line.kind === 'spend' && line.data.command === 'ask');
+      expect(askSpendEvent?.data).toMatchObject({ used: 1, reserved: 1, refused: 0 });
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(cwd, { recursive: true, force: true });
@@ -369,6 +391,105 @@ describe('consult: follow-up questions', () => {
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toContain('may raise the session cap, not lower it');
       expect(result.stderr).toContain('capped at 4');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('used counts a seat metered from the start; reserved does not', async () => {
+    const root = await temporaryRepository('convene-consult-api-only-');
+    const cwd = await project();
+    try {
+      const fixture = await consultantsFixture({ cwd, env: gitIdentity(root) });
+      const anthropic = fixture.environment.adapters?.anthropic;
+      if (anthropic === undefined) throw new Error('The fixture must provide an anthropic adapter');
+      // A plain seat never touches the ledger regardless of its credential path, so forcing this
+      // one to answer `api-key` reproduces exactly what `--billing api-only` does for every mode:
+      // the seat counts in `used` (per transport) without ever calling `SpendLedger.reserve()`,
+      // so `reserved` stays at zero.
+      const environment = {
+        ...fixture.environment,
+        adapters: {
+          ...fixture.environment.adapters,
+          anthropic: {
+            ...anthropic,
+            async invoke(request: ProviderRequest) {
+              const response = await anthropic.invoke(request);
+              return response.status === 'ok'
+                ? { ...response, credentialPath: 'api-key' as const }
+                : response;
+            },
+          },
+        },
+      };
+      const result = await runCliFacade(
+        [
+          'consult',
+          '--records-root',
+          root,
+          '--session',
+          BRIEF_SESSION,
+          '--lens',
+          'security',
+          '--context',
+          'src',
+          '--motion',
+          'Is this login path safe to ship?',
+        ],
+        environment,
+      );
+      // A lone lens has no second report to conflict with, so the run degrades on that (exit 4)
+      // regardless of spend — a fact this test is not about; what it checks is the spend split.
+      expect(result.exitCode).toBe(4);
+      const envelope = ResultEnvelopeSchema.parse(JSON.parse(result.stdout).envelope);
+      // One lens seats no synthesiser, so this is the whole run: one seat, counted in `used`.
+      expect(envelope.spend.used).toBe(1);
+      const log = await Bun.file(
+        join(root, 'general', 'modes', 'consultants', `${BRIEF_SESSION}.jsonl`),
+      ).text();
+      const spendEvent = log
+        .trimEnd()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .find((line) => line.kind === 'spend');
+      expect(spendEvent?.data).toMatchObject({ used: 1, reserved: 0 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('a hard-blocked secret in a persona description blocks the brief before any consultant is briefed', async () => {
+    const root = await temporaryRepository('convene-consult-persona-secret-');
+    const cwd = await project();
+    try {
+      // Assembled so no real-looking secret sits in the source tree: the guard's Anthropic-key
+      // detector matches the pattern, not these specific characters.
+      const key = ['sk-ant-api03', 'x'.repeat(20)].join('-');
+      await Bun.write(
+        join(cwd, 'leaky-personas.json'),
+        JSON.stringify([{ name: 'ux', description: `Uses ${key} to talk to the vendor.` }]),
+      );
+      const fixture = await consultantsFixture({ cwd, env: gitIdentity(root) });
+      const result = await runCliFacade(
+        [
+          'consult',
+          '--records-root',
+          root,
+          '--lens',
+          'ux',
+          '--personas',
+          join(cwd, 'leaky-personas.json'),
+          '--motion',
+          'Is this login path safe to ship?',
+        ],
+        fixture.environment,
+      );
+      expect(result.exitCode).toBe(3);
+      const error = JSON.parse(result.stderr);
+      expect(error.status).toBe('blocked-policy');
+      expect(fixture.calls()).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(cwd, { recursive: true, force: true });

@@ -58,11 +58,21 @@ export const QaEventSchema = z.strictObject({
 });
 export type QaEvent = z.infer<typeof QaEventSchema>;
 
-/** One per command, so the session cap is arithmetic over the log rather than a guess. */
+/**
+ * One per command, so the session cap is arithmetic over the log rather than a guess.
+ *
+ * `used` and `reserved` are different quantities that happen to coincide whenever a seat only
+ * ever spends by falling back through the session's ledger. `used` is `spend.used` as every other
+ * mode reports it — seats counted per transport, so it stays a true figure under `--billing
+ * api-only`, where nothing ever calls the ledger. `reserved` is the ledger's own `used` counter,
+ * which only grows when a subscription seat fails and a metered fallback is attempted: it is what
+ * the session cap actually governs, and what a follow-up's remaining-budget arithmetic must read.
+ */
 export const SpendEventSchema = z.strictObject({
   command: z.enum(['brief', 'ask']),
   cap: z.number().int().nonnegative(),
   used: z.number().int().nonnegative(),
+  reserved: z.number().int().nonnegative(),
   fallbacks: z.number().int().nonnegative(),
   refused: z.number().int().nonnegative(),
 });
@@ -96,7 +106,12 @@ export interface SessionState {
   readonly reports: readonly ReportEvent[];
   readonly conflicts: ConflictsEvent | null;
   readonly qa: readonly QaEvent[];
-  readonly spend: { readonly cap: number; readonly used: number; readonly fallbacks: number };
+  readonly spend: {
+    readonly cap: number;
+    readonly used: number;
+    readonly reserved: number;
+    readonly fallbacks: number;
+  };
 }
 
 /**
@@ -111,6 +126,7 @@ export function replaySession(events: readonly ModeSessionEvent[]): SessionState
   const qa: QaEvent[] = [];
   let cap = 0;
   let used = 0;
+  let reserved = 0;
   let fallbacks = 0;
   for (const [index, event] of events.entries()) {
     const line = index + 1;
@@ -136,6 +152,7 @@ export function replaySession(events: readonly ModeSessionEvent[]): SessionState
         // The cap is the session's, raised only by an explicit --spend-cap on a later command.
         cap = Math.max(cap, spend.cap);
         used += spend.used;
+        reserved += spend.reserved;
         fallbacks += spend.fallbacks;
         break;
       }
@@ -144,7 +161,7 @@ export function replaySession(events: readonly ModeSessionEvent[]): SessionState
     }
   }
   if (brief === null) throw new Error('This consultants session has no brief');
-  return { brief, reports, conflicts, qa, spend: { cap, used, fallbacks } };
+  return { brief, reports, conflicts, qa, spend: { cap, used, reserved, fallbacks } };
 }
 
 export function sessionOutput(state: SessionState): ConsultantsOutput {

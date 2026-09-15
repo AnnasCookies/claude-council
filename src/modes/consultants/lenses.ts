@@ -4,8 +4,7 @@ import { PanelLensSchema, roleCatalogue, type PanelLens } from '../../substrate'
 
 /**
  * A seat per lens, so a room larger than the catalogue is a different mode: `ideate` is the room
- * for many cheap voices. The bound also bounds the session's default spend cap, which is two
- * metered calls per seat.
+ * for many cheap voices.
  */
 export const MAX_CONSULTANTS = 12;
 
@@ -41,6 +40,10 @@ export const ConsultantPersonasSchema = z
   });
 
 export async function loadPersonas(path: string, cwd: string): Promise<PanelLens[]> {
+  // Deliberately not containment-checked, unlike `--context`: a personas file plausibly lives
+  // outside the working directory (`~/.config/`, a shared team directory) and never becomes
+  // evidence itself. Its strings reach the guard and the redaction backstop like any other
+  // caller-supplied text before they are ever dispatched to a provider.
   const absolute = isAbsolute(path) ? resolve(path) : resolve(cwd, path);
   let value: unknown;
   try {

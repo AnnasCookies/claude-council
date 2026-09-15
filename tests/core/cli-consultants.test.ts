@@ -146,6 +146,7 @@ describe('consult: the brief', () => {
         command: 'brief',
         cap: 6,
         used: 0,
+        reserved: 0,
         fallbacks: 0,
         refused: 0,
       });

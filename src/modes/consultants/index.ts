@@ -125,8 +125,16 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
 
   const collected = await collectContext(flagValues(input, 'context'), input.context.cwd);
   // The whole brief passes the guard before a consultant exists, so a hard-blocked secret stops
-  // the session rather than reaching whichever family was dispatched first.
-  const decision = input.guard([question, ...collected.files.map((file) => file.content)]);
+  // the session rather than reaching whichever family was dispatched first. Lens names and
+  // descriptions are included: a `--personas` file is caller-supplied text like any other, and a
+  // secret sitting in a persona's description would otherwise reach a provider inside a report
+  // prompt without ever having passed the outbound guard.
+  const decision = input.guard([
+    question,
+    ...lenses.map((lens) => lens.name),
+    ...lenses.map((lens) => lens.description),
+    ...collected.files.map((file) => file.content),
+  ]);
   if (decision.kind === 'blocked') {
     return {
       kind: 'blocked',
@@ -207,6 +215,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
   let synthesis: { by: string; text: string } | null = null;
   let synthesisSeats: EnvelopeSeat[] = [];
   let synthesisFallbacks = 0;
+  let synthesisUsed = 0;
   if (answered.length < 2) {
     // Two reports are the least that can conflict, so there is nothing for a synthesiser to read.
     const reason = `fewer than two consultants reported (${answered.length})`;
@@ -239,6 +248,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     );
     synthesisSeats = panelEnvelopeSeats(synthesisPanel.seats);
     synthesisFallbacks = synthesisPanel.spend.fallbacks;
+    synthesisUsed = synthesisPanel.spend.used;
     const synthesised = synthesisPanel.seats[0];
     if (synthesised === undefined) throw new Error('The synthesis panel returned no seat');
     if (synthesised.status === 'ok') {
@@ -261,17 +271,20 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     }
   }
 
-  // Both rounds shared one ledger, so its counters are the session's spend rather than a sum this
-  // handler has to keep in step with them by hand: the cap is a budget for metered fallbacks
-  // specifically (`withCredentialFallback` reserves from it only when a subscription seat fails
-  // and a metered fallback is attempted), not a count of every seat that happened to answer on a
-  // metered key, so `used` and `refused` both come from the ledger rather than from counting
-  // seats by transport.
+  // `used` is `spend.used` the way every mode reports it: seats counted per transport, true under
+  // `--billing api-only` too, where nothing ever reaches the ledger. `reserved` is the ledger's
+  // own counter, which only grows when a subscription seat fails and a metered fallback is
+  // attempted — the two coincide whenever every seat's only path to a metered key is that
+  // fallback, and diverge the moment one is not (a seat metered from the start counts in `used`
+  // and never touches the ledger). The session cap is a budget over `reserved`, not `used`, so a
+  // follow-up's remaining-budget arithmetic must read the log's `reserved` field, not this one.
+  const used = panel.spend.used + synthesisUsed;
   const fallbacks = panel.spend.fallbacks + synthesisFallbacks;
   await log.append('spend', {
     command: 'brief',
     cap: ledger.cap,
-    used: ledger.used,
+    used,
+    reserved: ledger.used,
     fallbacks,
     refused: ledger.refused,
   });
@@ -280,7 +293,7 @@ async function brief(input: HandlerInput, sessions: ModeSessionStore): Promise<H
     billing: input.spend.billing,
     policy: 'capped',
     cap: ledger.cap,
-    used: ledger.used,
+    used,
     fallbacks,
     refused: ledger.refused,
     stoppedAtCap: ledger.refused > 0,
@@ -403,14 +416,23 @@ async function followUp(
     );
   }
   const cap = explicitCap ?? state.spend.cap;
-  const remaining = Math.max(0, cap - state.spend.used);
+  // The budget is over reservations, not over transport-counted `used`: see the comment on the
+  // `spend` event write in `brief()`.
+  const remaining = Math.max(0, cap - state.spend.reserved);
   const log = recorder(input, sessions, session);
 
   if (remaining === 0) {
     // The cap covers the session, so an exhausted session does not quietly continue on the
     // subscription: the seat is skipped, the refusal is recorded, and the caller is told how to
     // raise the cap.
-    await log.append('spend', { command: 'ask', cap, used: 0, fallbacks: 0, refused: 1 });
+    await log.append('spend', {
+      command: 'ask',
+      cap,
+      used: 0,
+      reserved: 0,
+      fallbacks: 0,
+      refused: 1,
+    });
     const seat: EnvelopeSeat = {
       id: consultant.seat,
       family: consultant.family,
@@ -487,7 +509,8 @@ async function followUp(
   await log.append('spend', {
     command: 'ask',
     cap,
-    used: ledger.used,
+    used: panel.spend.used,
+    reserved: ledger.used,
     fallbacks: panel.spend.fallbacks,
     refused: ledger.refused,
   });
@@ -508,7 +531,7 @@ async function followUp(
       billing: input.spend.billing,
       policy: 'capped',
       cap,
-      used: state.spend.used + ledger.used,
+      used: state.spend.used + panel.spend.used,
       fallbacks: state.spend.fallbacks + panel.spend.fallbacks,
       refused: ledger.refused,
       stoppedAtCap: ledger.refused > 0,

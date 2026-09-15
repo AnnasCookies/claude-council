@@ -76,7 +76,7 @@ const events: ModeSessionEvent[] = [
     answer: 'Yes, at debug level.',
     forwarded: ['ux'],
   }),
-  event('spend', { command: 'brief', cap: 4, used: 3, fallbacks: 1, refused: 0 }),
+  event('spend', { command: 'brief', cap: 4, used: 3, reserved: 1, fallbacks: 1, refused: 0 }),
 ];
 
 describe('consultant answer contracts', () => {
@@ -203,7 +203,7 @@ describe('the consultants session log', () => {
         },
       ],
     });
-    expect(state.spend).toEqual({ cap: 4, used: 3, fallbacks: 1 });
+    expect(state.spend).toEqual({ cap: 4, used: 3, reserved: 1, fallbacks: 1 });
     expect(historyFor(state, 'security')).toEqual([
       { question: 'Does the fallback path leak the key in logs?', answer: 'Yes, at debug level.' },
     ]);
