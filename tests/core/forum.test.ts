@@ -321,7 +321,7 @@ describe('the forum mode', () => {
     expect(outcome.seats.map((seat) => seat.status)).toEqual(['ok', 'ok', 'ok']);
     expect(outcome.seats.map((seat) => seat.family)).toEqual(['anthropic', 'openai', 'xai']);
     // No `--spend-cap` was given and the CLI's own ledger assumed one round: the forum rebuilds it
-    // sized on the real round count (3 eligible families x 2 rounds), so nothing is starved.
+    // sized on the real seat and round count (3 seats x 2 rounds), so nothing is starved.
     expect(outcome.spend.cap).toBe(6);
 
     const output = forum.outputSchema.parse(outcome.output) as {
@@ -568,5 +568,81 @@ describe('the forum mode', () => {
       'security-2',
     ]);
     expect(new Set(outcome.seats.map((seat) => seat.id)).size).toBe(4);
+  });
+
+  test('the rebuilt default cap scales with --seats, not with the eligible family count', async () => {
+    // Still the fixture's 3 eligible families throughout: a cap that tracked family count instead
+    // of seat count would stay 6 here, exactly as it does for the 3-seat case above.
+    const outcome = result(
+      await forum.handle(
+        input({
+          flags: new Map([
+            ['seats', ['5']],
+            ['rounds', ['2']],
+          ]),
+        }),
+      ),
+    );
+    expect(outcome.spend.cap).toBe(10);
+  });
+
+  test('cycled lens names stay distinct even when a persona already claims a would-be cycle name', async () => {
+    await withRoot(async (root) => {
+      const personas = join(root, 'personas.json');
+      await Bun.write(
+        personas,
+        JSON.stringify([
+          { name: 'Critic', description: 'The first critic seat.' },
+          // Slugs to `critic-2`, which is exactly the name cycling would mint for a third seat
+          // repeating `Critic`.
+          { name: 'Critic 2', description: 'A persona that already claims the second slot.' },
+        ]),
+      );
+      const base = input();
+      await expect(
+        forum.handle({
+          ...base,
+          flags: new Map([
+            ['seats', ['3']],
+            ['rounds', ['1']],
+            ['personas', [personas]],
+          ]),
+          context: { ...base.context, cwd: root },
+        }),
+      ).rejects.toThrow(/Lens names collide/);
+    });
+  });
+
+  test('a persona name is scanned by the outbound guard too, not only its description', async () => {
+    await withRoot(async (root) => {
+      const personas = join(root, 'personas.json');
+      await Bun.write(
+        personas,
+        JSON.stringify([
+          { name: 'Restricted Codename', description: 'An ordinary description.' },
+          { name: 'Second seat', description: 'Also an ordinary description.' },
+        ]),
+      );
+      const adapters = {
+        anthropic: answering('anthropic'),
+        openai: answering('openai'),
+        xai: answering('xai'),
+      };
+      const base = input({ adapters });
+      const refused = await forum.handle({
+        ...base,
+        flags: new Map([
+          ['seats', ['2']],
+          ['rounds', ['1']],
+          ['personas', [personas]],
+        ]),
+        context: { ...base.context, cwd: root },
+        // Blocks on the slugged persona *name* only, never on either description, so this can only
+        // pass if the name itself reached the guard.
+        guard: (payloads) => (payloads.includes('restricted-codename') ? blocked : allowed),
+      });
+      expect(refused).toMatchObject({ kind: 'blocked', status: 'blocked-policy' });
+      expect(adapters.anthropic.calls).toHaveLength(0);
+    });
   });
 });

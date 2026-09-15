@@ -4,12 +4,19 @@ import type { PanelAnswer } from '../../substrate';
 /** Eight words is the label's whole budget; the argument belongs in `text`. */
 const MAX_POSITION_WORDS = 8;
 
-const NonEmptyStringSchema = z.string().trim().min(1);
+export const NonEmptyStringSchema = z.string().trim().min(1);
 
-const PositionLabelSchema = NonEmptyStringSchema.max(160).refine(
-  (label) => label.split(/\s+/u).filter((word) => word.length > 0).length <= MAX_POSITION_WORDS,
-  `A position label is at most ${MAX_POSITION_WORDS} words`,
-);
+const PositionLabelSchema = NonEmptyStringSchema.max(160)
+  .refine(
+    (label) => label.split(/\s+/u).filter((word) => word.length > 0).length <= MAX_POSITION_WORDS,
+    `A position label is at most ${MAX_POSITION_WORDS} words`,
+  )
+  // A punctuation-only label such as `.` or `!!` normalises to the empty string, which would merge
+  // every such seat under one meaningless position and hide a genuine move behind it.
+  .refine(
+    (label) => /[\p{L}\p{N}]/u.test(label),
+    'A position label needs at least one letter or digit',
+  );
 
 /** Motion ids are minted by the forum, never by a seat, so a reference is matched, not trusted. */
 export const ForumMotionIdSchema = z.string().regex(/^m-[1-9][0-9]{0,2}$/);

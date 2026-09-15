@@ -135,11 +135,20 @@ async function suppliedPersonas(path: string, cwd: string): Promise<PanelLens[]>
 function cycleLenses(base: readonly PanelLens[], seats: number): PanelLens[] {
   const first = base[0];
   if (first === undefined) throw new Error('A forum needs at least one lens');
-  return Array.from({ length: seats }, (_, index) => {
+  const cycled = Array.from({ length: seats }, (_, index) => {
     const lens = base[index % base.length] ?? first;
     const cycle = Math.floor(index / base.length) + 1;
     return cycle === 1 ? lens : { name: `${lens.name}-${cycle}`, description: lens.description };
   });
+  if (new Set(cycled.map((lens) => lens.name)).size !== cycled.length) {
+    // A supplied persona named e.g. `Critic 2` slugs to the very name cycling would have minted
+    // for a repeat of `Critic`; caught here with a readable message rather than left to surface as
+    // `spreadSeats`'s raw duplicate-seat-identifier schema error.
+    throw new Error(
+      'Lens names collide once seats beyond the list are numbered; rename the personas so cycling cannot mint a duplicate',
+    );
+  }
+  return cycled;
 }
 
 interface ForumRoundOutcome {
@@ -187,15 +196,16 @@ function aggregateSpend(
 
 /**
  * The CLI cannot size a handler mode's ledger correctly on its own: it builds one from
- * `--spend-cap` when given, and otherwise from `defaultCap(eligibleFamilies, 1)`, because it does
- * not know how many rounds the forum will run. A round count above one therefore under-caps a
- * ledger the CLI sized for one round, so the forum rebuilds its own — sized on the same eligible
- * roster but the real round count — whenever the caller left the cap to the default. An explicit
- * `--spend-cap` is the caller's own number and is never second-guessed: it is passed straight
- * through, ledger and all, so the cap the caller asked for is the cap that is enforced.
+ * `--spend-cap` when given, and otherwise from `defaultCap(eligibleFamilies, 1)`, because it knows
+ * neither the forum's seat count nor its round count. That default under-caps almost every forum,
+ * so the forum rebuilds its own — sized on the real seat count and round count, `forumDefaultCap`'s
+ * documented seats × rounds contract — whenever the caller left the cap to the default. An
+ * explicit `--spend-cap` is the caller's own number and is never second-guessed: it is passed
+ * straight through, ledger and all, so the cap the caller asked for is the cap that is enforced.
  */
 function resolveSpend(
   input: HandlerInput,
+  seatCount: number,
   roundCount: number,
 ): Extract<PanelSpend, { policy: 'capped' }> {
   if (input.spend.policy !== 'capped') {
@@ -205,9 +215,7 @@ function resolveSpend(
   return {
     policy: 'capped',
     billing: input.spend.billing,
-    ledger: createSpendLedger(
-      forumDefaultCap(input.options.eligibleProviderFamilies.length, roundCount),
-    ),
+    ledger: createSpendLedger(forumDefaultCap(seatCount, roundCount)),
   };
 }
 
@@ -233,9 +241,10 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
       ? catalogueLenses(oneValue(input.flags, 'lenses'))
       : await suppliedPersonas(personasPath, input.context.cwd);
   if (personasPath !== undefined) {
-    // The CLI's preflight saw the motion. A personas file is text only this mode has read, and it
-    // reaches every provider inside the prompt, so it goes through the same outbound policy.
-    const decision = input.guard(briefs.map((lens) => lens.description));
+    // The CLI's preflight saw the motion. A personas file is text only this mode has read, and
+    // both the name and the description reach every provider inside the prompt, so both go
+    // through the same outbound policy.
+    const decision = input.guard(briefs.flatMap((lens) => [lens.name, lens.description]));
     if (decision.kind === 'blocked') {
       return {
         kind: 'blocked',
@@ -260,12 +269,13 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     );
   }
 
-  const spend = resolveSpend(input, roundCount);
+  const spend = resolveSpend(input, seatCount, roundCount);
   const ledger = spend.ledger;
   const context: ProviderContext = {
     ...input.context,
-    // The whole-run budget is divided per round exactly as the council runner divides it, so a
-    // long first round cannot leave the later rounds with nothing to spend.
+    // Unlike the council runner, which recomputes the remaining budget after every round, the
+    // forum decides one fixed slice up front and gives every round that same slice, so a slow
+    // round never shrinks the time the rounds after it get.
     timeoutMs: Math.max(1, Math.floor(input.options.timeoutMs / roundCount)),
   };
   const config = { adapters: input.adapters, context };

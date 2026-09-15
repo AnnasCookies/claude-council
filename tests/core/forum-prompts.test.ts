@@ -90,6 +90,20 @@ describe('forum answer contracts', () => {
     ).toBe(true);
   });
 
+  test('a position label needs at least one letter or digit', () => {
+    // Punctuation only normalises to the empty string, which would silently merge every such seat
+    // under one meaningless position in the map instead of leaving each one unrepresented.
+    expect(
+      ForumOpeningAnswerSchema.safeParse({ position: '.', stance: 'hold', text: 't' }).success,
+    ).toBe(false);
+    expect(
+      ForumOpeningAnswerSchema.safeParse({ position: '!!', stance: 'hold', text: 't' }).success,
+    ).toBe(false);
+    expect(
+      ForumOpeningAnswerSchema.safeParse({ position: 'No.', stance: 'hold', text: 't' }).success,
+    ).toBe(true);
+  });
+
   test('the reply contract carries a stance, a reply target and motion references', () => {
     const parsed = ForumAnswerSchema.parse({
       position: 'Sidecar, with a harness hook',

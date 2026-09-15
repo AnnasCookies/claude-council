@@ -78,6 +78,16 @@ describe('the position map', () => {
     expect(buildPositionMap(undefined)).toEqual([]);
     expect(buildPositionMap(round(3))).toEqual([]);
   });
+
+  test('two seats with distinct real labels stay two entries, never merged into one', () => {
+    const map = buildPositionMap(
+      round(1, said(ALPHA, 'Keep the sidecar', 'a'), said(BETA, 'Use a harness instead', 'b')),
+    );
+    expect(map).toEqual([
+      { position: 'Keep the sidecar', holders: [ALPHA] },
+      { position: 'Use a harness instead', holders: [BETA] },
+    ]);
+  });
 });
 
 describe('who moved', () => {

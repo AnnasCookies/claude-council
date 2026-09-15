@@ -1,8 +1,11 @@
 import { z } from 'zod';
 import { MAX_ENVELOPE_ROUNDS } from '../../substrate';
-import { ForumMotionIdSchema, ForumStanceSchema, type ForumAnswer } from './answers';
-
-const NonEmptyStringSchema = z.string().trim().min(1);
+import {
+  ForumMotionIdSchema,
+  ForumStanceSchema,
+  NonEmptyStringSchema,
+  type ForumAnswer,
+} from './answers';
 
 export interface ForumSeatAnswer {
   readonly seat: string;
