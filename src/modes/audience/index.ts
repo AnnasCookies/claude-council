@@ -235,7 +235,10 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
 
   return {
     kind: 'result',
-    status: panel.answered === seats.length ? 'completed' : 'degraded',
+    // As every other handler mode derives it: any entry in `degraded` — a missing voice, a
+    // metered-only family left unseated, or records this run could not keep — is a degraded run,
+    // not just a short one.
+    status: degraded.length === 0 ? 'completed' : 'degraded',
     session,
     pattern: 'parallel',
     rounds: 1,

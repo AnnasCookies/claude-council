@@ -141,6 +141,13 @@ describe('handler-style modes', () => {
     expect(getRunnerMode('second-opinion', registry).pattern).toBe('parallel');
   });
 
+  test('an unregistering override does not name the unregistered mode as registered', () => {
+    const registry: ModeRegistry = { ...modes, audience: undefined };
+    expect(() => getMode('nope', registry)).toThrow(
+      /^Unknown mode: nope\. Registered modes: committee, second-opinion, advisor$/,
+    );
+  });
+
   test('a handler returns an outcome whose output satisfies its own schema', async () => {
     const outcome = await fixture.handle(
       input({ options: { ...input().options, sessionId: 'au-2026-09-15-0a1b2c' } }),

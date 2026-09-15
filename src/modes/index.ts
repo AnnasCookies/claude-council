@@ -67,7 +67,12 @@ export function getMode(name: string, registry: ModeRegistry = modes): ModeDefin
   const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
   const mode = known === undefined ? undefined : registry[known];
   if (mode === undefined) {
-    throw new Error(`Unknown mode: ${name}. Registered modes: ${Object.keys(registry).join(', ')}`);
+    // `Object.keys` alone would list a key an override set to `undefined` to unregister a mode:
+    // the key is still present, only its value says the mode is gone.
+    const registered = Object.entries(registry)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([entryName]) => entryName);
+    throw new Error(`Unknown mode: ${name}. Registered modes: ${registered.join(', ')}`);
   }
   return mode;
 }

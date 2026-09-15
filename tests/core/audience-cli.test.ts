@@ -145,9 +145,12 @@ describe('the audience subcommand', () => {
         ],
         harness.environment,
       );
-      expect(result.exitCode).toBe(0);
+      // No --records-root is given, so this run degrades even though every voice answered: exit 4,
+      // not 0, matches every other handler mode's rule that a non-empty `degraded` is not
+      // `completed`.
+      expect(result.exitCode).toBe(4);
       const payload = JSON.parse(result.stdout);
-      expect(payload).toMatchObject({ command: 'audience', mode: 'audience', status: 'completed' });
+      expect(payload).toMatchObject({ command: 'audience', mode: 'audience', status: 'degraded' });
       expect(payload.session).toMatch(/^au-2026-09-15-[a-f0-9]{6}$/);
       const envelope = ResultEnvelopeSchema.parse(payload.envelope);
       expect(envelope.mode).toBe('audience');
@@ -219,6 +222,8 @@ describe('the audience subcommand', () => {
         );
         expect(result.exitCode).toBe(0);
         const payload = JSON.parse(result.stdout);
+        // Every voice answered and the records root took the log: a clean run, nothing degraded.
+        expect(payload.status).toBe('completed');
         expect(payload.session).toBe('au-2026-09-15-0a1b2c');
         expect(payload.envelope.record.session).toBe(
           'general/modes/audience/au-2026-09-15-0a1b2c.jsonl',

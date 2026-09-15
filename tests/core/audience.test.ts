@@ -234,7 +234,9 @@ describe('the audience mode', () => {
       );
       expect(outcome.kind).toBe('result');
       if (outcome.kind !== 'result') throw new Error('unreachable');
-      expect(outcome.status).toBe('completed');
+      // No records root is configured in this fixture, so every voice answering still leaves the
+      // run degraded: it could not keep a record of what they said.
+      expect(outcome.status).toBe('degraded');
       expect(outcome.pattern).toBe('parallel');
       expect(outcome.rounds).toBe(1);
       expect(outcome.session).toMatch(/^au-2026-09-15-[a-f0-9]{6}$/);
@@ -462,7 +464,9 @@ describe('the audience mode', () => {
       if (outcome.kind !== 'result') throw new Error('unreachable');
       expect(outcome.seats.map((seat) => seat.family)).toEqual(['anthropic', 'anthropic']);
       expect(outcome.degraded).toContain('metered-only-families-unseated: deepseek');
-      expect(outcome.status).toBe('completed');
+      // A family this build declined to seat is a degraded run even though every seated voice
+      // answered: `degraded` says why, and a completed status would bury it.
+      expect(outcome.status).toBe('degraded');
       expect(calls.every((call) => call.seatId.startsWith('anthropic/'))).toBe(true);
 
       await expect(
@@ -553,7 +557,9 @@ describe('the audience mode', () => {
       if (outcome.kind !== 'result') throw new Error('unreachable');
       expect(outcome.record).toEqual({ session: null, paths: [] });
       expect(outcome.degraded).toContain('records-not-kept: no records root is configured');
-      expect(outcome.status).toBe('completed');
+      // Every voice answered, but the run still could not keep a record of what was said: that is
+      // a degraded run, not a completed one that merely mentions the shortfall in passing.
+      expect(outcome.status).toBe('degraded');
     });
   });
 
