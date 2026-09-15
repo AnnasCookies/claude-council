@@ -1,0 +1,157 @@
+import { randomBytes } from 'node:crypto';
+import { dirname, join, resolve } from 'node:path';
+import { z } from 'zod';
+import { scopeDirectory, withScopeWriteLock, writeTextAtomically, type RecordWrite } from './store';
+
+const TimestampSchema = z.string().datetime({ offset: true });
+const ProjectIdSchema = z
+  .string()
+  .max(128)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/, 'must be a safe storage identifier');
+
+export const ModeSessionPrefixSchema = z
+  .string()
+  .regex(/^[a-z]{1,8}$/, 'A session prefix is one to eight lower-case letters');
+export const ModeSessionIdSchema = z
+  .string()
+  .regex(
+    /^[a-z]{1,8}-\d{4}-\d{2}-\d{2}-[a-f0-9]{6}$/,
+    'A session id is <prefix>-<yyyy-mm-dd>-<six hex characters>',
+  );
+export const ModeSessionModeSchema = z
+  .string()
+  .regex(/^[a-z][a-z-]{0,31}$/, 'A mode name is lower-case letters and hyphens');
+
+/**
+ * One line of a session log. `data` is the mode's own shape; the store keeps it opaque so a
+ * corrupt or foreign line is refused on structure alone, not on a mode's semantics.
+ */
+export const ModeSessionEventSchema = z.strictObject({
+  at: TimestampSchema,
+  kind: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, 'An event kind is a lower-case slug'),
+  data: z.unknown(),
+});
+export type ModeSessionEvent = z.infer<typeof ModeSessionEventSchema>;
+
+const ModeSessionScopeSchema = z.discriminatedUnion('scope', [
+  z.strictObject({ scope: z.literal('general') }),
+  z.strictObject({ scope: z.literal('project'), projectId: ProjectIdSchema }),
+]);
+export type ModeSessionScope = z.infer<typeof ModeSessionScopeSchema>;
+
+export function newModeSessionId(prefix: string, now: string = new Date().toISOString()): string {
+  const safePrefix = ModeSessionPrefixSchema.parse(prefix);
+  const day = TimestampSchema.parse(now).slice(0, 10);
+  return ModeSessionIdSchema.parse(`${safePrefix}-${day}-${randomBytes(3).toString('hex')}`);
+}
+
+function parseEvents(text: string, path: string): ModeSessionEvent[] {
+  if (text.length === 0) return [];
+  if (!text.endsWith('\n')) {
+    throw new Error(`Torn mode session log (no trailing newline): ${path}`);
+  }
+  return text
+    .slice(0, -1)
+    .split('\n')
+    .map((line, index) => {
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch (error) {
+        throw new Error(`Invalid mode session event JSON at line ${index + 1}: ${path}`, {
+          cause: error,
+        });
+      }
+      const parsed = ModeSessionEventSchema.safeParse(value);
+      if (!parsed.success) {
+        throw new Error(`Invalid mode session event at line ${index + 1}: ${path}`, {
+          cause: parsed.error,
+        });
+      }
+      return parsed.data;
+    });
+}
+
+/**
+ * An append-only JSONL log per mode session under the records root. A session id is validated
+ * against a strict pattern before it is joined into any path, and every line is validated on
+ * the way in and on the way out.
+ */
+export class ModeSessionStore {
+  readonly root: string;
+  private readonly scope: ModeSessionScope;
+
+  private constructor(root: string, scope: ModeSessionScope) {
+    this.root = root;
+    this.scope = scope;
+  }
+
+  static open(root: string, scope: ModeSessionScope = { scope: 'general' }): ModeSessionStore {
+    return new ModeSessionStore(
+      resolve(z.string().trim().min(1).parse(root)),
+      ModeSessionScopeSchema.parse(scope),
+    );
+  }
+
+  newSessionId(prefix: string, now?: string): string {
+    return newModeSessionId(prefix, now);
+  }
+
+  private directory(mode: string): string {
+    const safeMode = ModeSessionModeSchema.parse(mode);
+    const scoped =
+      this.scope.scope === 'general'
+        ? scopeDirectory(this.root, 'general')
+        : scopeDirectory(this.root, 'project', this.scope.projectId);
+    return join(scoped, 'modes', safeMode);
+  }
+
+  absolutePath(mode: string, sessionId: string): string {
+    return join(this.directory(mode), `${ModeSessionIdSchema.parse(sessionId)}.jsonl`);
+  }
+
+  /** Records-root-relative, forward-slash form for the envelope, like `sessionRecordPath`. */
+  recordPath(mode: string, sessionId: string): string {
+    const safeMode = ModeSessionModeSchema.parse(mode);
+    const safeId = ModeSessionIdSchema.parse(sessionId);
+    const scopePart =
+      this.scope.scope === 'general' ? 'general' : `projects/${this.scope.projectId}`;
+    return `${scopePart}/modes/${safeMode}/${safeId}.jsonl`;
+  }
+
+  async exists(mode: string, sessionId: string): Promise<boolean> {
+    return Bun.file(this.absolutePath(mode, sessionId)).exists();
+  }
+
+  async read(mode: string, sessionId: string): Promise<ModeSessionEvent[]> {
+    const path = this.absolutePath(mode, sessionId);
+    const file = Bun.file(path);
+    if (!(await file.exists())) {
+      throw new Error(`Unknown mode session: ${this.recordPath(mode, sessionId)}`);
+    }
+    return parseEvents(await file.text(), path);
+  }
+
+  async append(mode: string, sessionId: string, event: ModeSessionEvent): Promise<RecordWrite> {
+    const record = ModeSessionEventSchema.parse(event);
+    const path = this.absolutePath(mode, sessionId);
+    return withScopeWriteLock(dirname(path), async () => {
+      const file = Bun.file(path);
+      const existing = (await file.exists()) ? await file.text() : '';
+      // A log that cannot be read back is not extended: appending to it would bury the corruption
+      // under valid lines and make the whole session unreadable later.
+      parseEvents(existing, path);
+      // Rewrite-and-rename rather than appendFile: a crash midway through an append leaves a torn
+      // last line that fails every later read, whereas the rename publishes the complete new log
+      // or leaves the old one untouched. The lock keeps two appends from racing the rewrite.
+      const content = `${existing}${JSON.stringify(record)}\n`;
+      await writeTextAtomically(path, content, {
+        replace: true,
+        validate: (text) => {
+          parseEvents(text, path);
+        },
+      });
+      return { paths: [path] };
+    });
+  }
+}

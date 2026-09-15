@@ -541,7 +541,8 @@ export async function writeTextAtomically(
   }
 }
 
-function scopeDirectory(root: string, scope: CouncilScope, projectId?: string): string {
+/** Shared with the mode session store so every record kind lives under the same scope tree. */
+export function scopeDirectory(root: string, scope: CouncilScope, projectId?: string): string {
   if (scope === 'general') return join(root, 'general');
   if (!projectId) throw new Error('Project records require a projectId');
   return join(root, 'projects', projectId);
@@ -898,7 +899,11 @@ async function removeCommittedFile(path: string, originalError: unknown): Promis
   }
 }
 
-async function withScopeWriteLock<T>(directory: string, operation: () => Promise<T>): Promise<T> {
+/** Shared with the mode session store so one lock discipline covers every record directory. */
+export async function withScopeWriteLock<T>(
+  directory: string,
+  operation: () => Promise<T>,
+): Promise<T> {
   await mkdir(directory, { recursive: true });
   const lockPath = join(directory, '.write.lock');
   const release = await lock(directory, {

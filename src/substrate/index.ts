@@ -37,6 +37,7 @@ export * from './providers';
 export * from './records/commit';
 export * from './records/migrate-general';
 export * from './records/minutes';
+export * from './records/mode-sessions';
 export * from './records/project-id';
 export * from './records/store';
 export * from './roles/allocator';
