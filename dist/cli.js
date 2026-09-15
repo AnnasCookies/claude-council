@@ -15849,7 +15849,7 @@ config(en_default());
 // package.json
 var package_default = {
   name: "convene",
-  version: "2026.9.6",
+  version: "2026.9.7",
   type: "module",
   engines: {
     bun: ">=1.3.14"
@@ -22613,7 +22613,13 @@ class ModeSessionStore {
     } catch (error51) {
       throw new Error(`Invalid mode session alias index JSON: ${path}`, { cause: error51 });
     }
-    return ModeSessionAliasIndexSchema.parse(value);
+    try {
+      return ModeSessionAliasIndexSchema.parse(value);
+    } catch (error51) {
+      throw new Error(`Invalid mode session alias index: ${path} must be a JSON object`, {
+        cause: error51
+      });
+    }
   }
   async lookupAlias(mode, key) {
     const safeKey = ModeSessionKeySchema.parse(key);
