@@ -1675,6 +1675,8 @@ function createSubscriptionCliAdapter(
   return adapter;
 }
 
+// The OMP profile carries the package's former name. It is a key into the user's OMP credential
+// store, so it survives the rename to convene: renaming it here would silently drop that seat.
 const ompCouncilProfile = 'claude-council';
 const ompIsolationConfig = [
   'advisor:',

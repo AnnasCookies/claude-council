@@ -4,7 +4,7 @@ Each mode is a named setting of the five knobs from `docs/vision.md`, plus its o
 its own `output` shape inside the shared result envelope, and an example invocation. The
 substrate underneath is shared and described first.
 
-`council` is the CLI name until the rename to `convene` lands in its own chore PR. Examples show the CLI form; the skill, slash
+`convene` is the CLI name since 2026-09-15; `council` is its subcommand that convenes a committee. Examples show the CLI form; the skill, slash
 command or hook in each harness wraps it and holds no logic of its own. Flags marked _new_ do not
 exist yet. Everything else in an example already runs today.
 
@@ -63,7 +63,7 @@ The example below is illustrative; the canonical field set is `ResultEnvelopeSch
     "stoppedAtCap": false
   },
   "degraded": [],
-  "record": "projects/claude-council/sessions/so-2026-09-10-….json"
+  "record": "projects/convene/sessions/so-2026-09-10-….json"
 }
 ```
 
@@ -491,8 +491,8 @@ council audience --personas ops-manager,new-starter,sceptic --draft docs/announc
 Taken with the user on 2026-09-12, after this document was accepted.
 
 1. **Name: `convene`.** Repository, CLI, plugin id and Atlas project slug. The rename is one chore
-   PR of its own, after the substrate PR, with a one-line credit to `hex/claude-council` as the
-   starting scaffold.
+   PR of its own, after the substrate PR. Amended 2026-09-15: no credit line and no upstream
+   reference anywhere but the `LICENSE` notice, which the MIT terms require. Landed as `2026.9.6`.
 2. **Extract the substrate first.** One PR moves seats, transports, policy, records and health
    under a substrate boundary and runs the committee as the first mode on top, behaviour unchanged
    and tests green. Later modes add files instead of editing the committee runner.

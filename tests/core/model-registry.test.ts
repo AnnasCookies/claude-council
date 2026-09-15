@@ -20,7 +20,7 @@ async function withRegistryOverrideText<T>(
   contents: string,
   assertion: (path: string) => Promise<T>,
 ): Promise<T> {
-  const directory = await mkdtemp(join(tmpdir(), 'claude-council-registry-'));
+  const directory = await mkdtemp(join(tmpdir(), 'convene-registry-'));
   const path = join(directory, 'models.json');
 
   try {
@@ -113,7 +113,7 @@ describe('model registry', () => {
   });
 
   test('prefers --registry equivalent input over records-root and home defaults', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'claude-council-registry-precedence-'));
+    const directory = await mkdtemp(join(tmpdir(), 'convene-registry-precedence-'));
     const recordsRoot = join(directory, 'records');
     const home = join(directory, 'home');
     const homeRegistryDirectory = join(home, '.claude', 'council');
@@ -157,7 +157,7 @@ describe('model registry', () => {
   });
 
   test('falls back to the user-level registry when the records root has no override', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'claude-council-registry-home-'));
+    const directory = await mkdtemp(join(tmpdir(), 'convene-registry-home-'));
     const recordsRoot = join(directory, 'records');
     const home = join(directory, 'home');
     const homeRegistryDirectory = join(home, '.claude', 'council');

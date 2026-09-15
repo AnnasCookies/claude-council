@@ -1373,7 +1373,7 @@ async function adjudicateCommand(
 
 function help(): CliFacadeResult {
   return output(0, {
-    name: 'claude-council',
+    name: 'convene',
     commands: [...COMMANDS],
     invocation: 'All execution is explicit; no automatic hook starts a council.',
     defaultSeatCount: DEFAULT_SEAT_COUNT,

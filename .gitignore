@@ -38,7 +38,7 @@ docs/superpowers/
 .claude-crawl/
 
 # Skill-creator iteration output
-claude-council-workspace/
+convene-workspace/
 
 # OS files
 .DS_Store

@@ -9,7 +9,7 @@ description: Use when a decision or analysis needs one blind round of independen
 
 Run the public ordinary second-opinion flow as one blind, independent round. Use it to test a proposal, diagnosis or trade-off without starting the multi-round standing-council protocol. Keep every provider seat tool-free and preserve failures, provider identity and uncertainty in the result.
 
-Follow the [evidence-pack invariant](#evidence-pack-invariant) whenever the review uses repository or web evidence. The strict source contract is defined by the [evidence schemas](../../src/evidence/schema.ts), and rendering is defined by [`normaliseEvidence`](../../src/evidence/normalise.ts).
+Follow the [evidence-pack invariant](#evidence-pack-invariant) whenever the review uses repository or web evidence. The strict source contract is defined by the [evidence schemas](../../src/substrate/evidence/schema.ts), and rendering is defined by [`normaliseEvidence`](../../src/substrate/evidence/normalise.ts).
 
 ## Public second-opinion flow
 

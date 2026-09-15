@@ -48,7 +48,7 @@ function parseOutput(result: CliFacadeResult) {
 async function withIsolatedHome<T>(
   assertion: (fixture: { directory: string; home: string }) => Promise<T>,
 ): Promise<T> {
-  const directory = await mkdtemp(join(tmpdir(), 'claude-council-version-'));
+  const directory = await mkdtemp(join(tmpdir(), 'convene-version-'));
   const home = join(directory, 'home');
   await mkdir(home, { recursive: true });
   try {
