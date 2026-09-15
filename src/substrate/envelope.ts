@@ -53,7 +53,9 @@ export const EnvelopeSeatSchema = z.strictObject({
   lens: NonEmptyStringSchema,
   transport: z.enum(['subscription', 'api']).nullable(),
   fallback: z.boolean(),
-  status: z.enum(['ok', 'skipped', 'failed', 'timed-out', 'cancelled']),
+  // `invalid` is a panel seat whose reply arrived but did not validate; its raw text stays on the
+  // record so a mis-shaped answer is evidence rather than a gap.
+  status: z.enum(['ok', 'skipped', 'failed', 'timed-out', 'cancelled', 'invalid']),
   reason: z.string().nullable(),
 });
 export type EnvelopeSeat = z.infer<typeof EnvelopeSeatSchema>;
@@ -74,13 +76,21 @@ export const EnvelopeRecordSchema = z.strictObject({
 });
 export type EnvelopeRecord = z.infer<typeof EnvelopeRecordSchema>;
 
+/**
+ * The most rounds any envelope may report. The council runner and the session record it persists
+ * keep their own, lower ceiling of three blind-plus-rebuttal-plus-refinement rounds; a handler mode
+ * that runs its own passes — a forum's rebuttals, a consultants' redraft — may report up to six,
+ * and anything beyond that is a mode that has lost count rather than a longer deliberation.
+ */
+export const MAX_ENVELOPE_ROUNDS = 6;
+
 export const ResultEnvelopeSchema = z.strictObject({
   schemaVersion: z.literal(1),
   mode: NonEmptyStringSchema,
   session: NonEmptyStringSchema,
   caller: CallerSchema,
   pattern: ExecutionPatternSchema,
-  rounds: z.number().int().min(0).max(3),
+  rounds: z.number().int().min(0).max(MAX_ENVELOPE_ROUNDS),
   seats: z.array(EnvelopeSeatSchema),
   output: z.record(z.string(), z.unknown()),
   synthesis: z.strictObject({ by: NonEmptyStringSchema, text: NonEmptyStringSchema }).nullable(),
@@ -199,19 +209,58 @@ export interface BuildEnvelopeInput {
   readonly record: EnvelopeRecord;
 }
 
-export function buildEnvelope(input: BuildEnvelopeInput): ResultEnvelope {
+/**
+ * A handler mode ran a panel or kept a note log rather than the runner, so there are no rounds
+ * to derive seats, unanimity, synthesis or dissent from: it supplies them, and the schema is the
+ * only judge of what it supplied.
+ */
+export interface HandlerEnvelopeInput {
+  readonly mode: string;
+  readonly session: string;
+  readonly caller: Caller;
+  readonly pattern: ExecutionPattern;
+  readonly rounds: number;
+  readonly seats: readonly EnvelopeSeat[];
+  readonly output: Record<string, unknown>;
+  readonly synthesis: { readonly by: string; readonly text: string } | null;
+  readonly dissent: readonly { readonly seat: string; readonly position: string }[] | null;
+  readonly unanimous: boolean;
+  readonly spend: Spend;
+  readonly degraded: readonly string[];
+  readonly record: EnvelopeRecord;
+}
+
+export function buildEnvelope(input: BuildEnvelopeInput | HandlerEnvelopeInput): ResultEnvelope {
+  if ('assignments' in input) {
+    return ResultEnvelopeSchema.parse({
+      schemaVersion: 1,
+      mode: input.mode,
+      session: input.session,
+      caller: input.caller,
+      pattern: input.pattern,
+      rounds: input.rounds.length,
+      seats: envelopeSeats({ assignments: input.assignments, rounds: input.rounds }),
+      output: input.output,
+      synthesis: null,
+      dissent: null,
+      unanimous: detectUnanimity(input.rounds),
+      spend: input.spend,
+      degraded: [...input.degraded],
+      record: input.record,
+    });
+  }
   return ResultEnvelopeSchema.parse({
     schemaVersion: 1,
     mode: input.mode,
     session: input.session,
     caller: input.caller,
     pattern: input.pattern,
-    rounds: input.rounds.length,
-    seats: envelopeSeats({ assignments: input.assignments, rounds: input.rounds }),
+    rounds: input.rounds,
+    seats: [...input.seats],
     output: input.output,
-    synthesis: null,
-    dissent: null,
-    unanimous: detectUnanimity(input.rounds),
+    synthesis: input.synthesis,
+    dissent: input.dissent === null ? null : [...input.dissent],
+    unanimous: input.unanimous,
     spend: input.spend,
     degraded: [...input.degraded],
     record: input.record,

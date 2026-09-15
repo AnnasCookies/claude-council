@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { SeatResponse } from '../../src/substrate/domain/schemas';
 import type { CouncilSeatAssignment, RoundExecution } from '../../src/substrate/execution/runner';
 import {
+  MAX_ENVELOPE_ROUNDS,
   ResultEnvelopeSchema,
   UNDECLARED_CALLER,
   buildEnvelope,
@@ -182,7 +183,13 @@ describe('result envelope', () => {
     expect(envelope.synthesis).toBeNull();
     expect(envelope.dissent).toBeNull();
     expect(ResultEnvelopeSchema.parse(envelope)).toEqual(envelope);
-    expect(() => ResultEnvelopeSchema.parse({ ...envelope, rounds: 4 })).toThrow();
+    // The runner keeps its own ceiling of three; the envelope carries a handler mode's own rounds
+    // up to MAX_ENVELOPE_ROUNDS, and refuses a mode that has lost count beyond it.
+    expect(MAX_ENVELOPE_ROUNDS).toBe(6);
+    expect(ResultEnvelopeSchema.parse({ ...envelope, rounds: MAX_ENVELOPE_ROUNDS }).rounds).toBe(6);
+    expect(() =>
+      ResultEnvelopeSchema.parse({ ...envelope, rounds: MAX_ENVELOPE_ROUNDS + 1 }),
+    ).toThrow();
     expect(() => ResultEnvelopeSchema.parse({ ...envelope, extra: true })).toThrow();
   });
 });

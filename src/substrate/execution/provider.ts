@@ -47,11 +47,25 @@ export interface ProviderContext {
   spend?: SpendLedger;
 }
 
+/**
+ * The shape a seat is asked to answer in. Absent, the seat answers in the council shape exactly
+ * as before. A panel supplies its own so a persona or triage seat returns the small JSON its mode
+ * validates: `instruction` is prepended to the prompt where the council instruction goes today,
+ * and `jsonSchema` is handed to every transport that constrains decoding. Under a caller
+ * contract the adapter returns the redacted answer text and leaves validation to the caller, so
+ * an answer that misses the schema is kept and marked rather than discarded.
+ */
+export interface AnswerContract {
+  readonly instruction: string;
+  readonly jsonSchema: Readonly<Record<string, unknown>>;
+}
+
 export interface ProviderRequest {
   context: ProviderContext;
   seatId: string;
   role: string;
   prompt: string;
+  answer?: AnswerContract;
 }
 
 export interface Availability {
@@ -118,8 +132,8 @@ const healthPrompt = 'Return the required JSON object confirming this provider r
 const grokInlineAnswerGuard =
   'IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.';
 
-function structuredPrompt(prompt: string): string {
-  return `${answerInstruction}\n\n${prompt}`;
+function structuredPrompt(prompt: string, contract: AnswerContract): string {
+  return `${contract.instruction}\n\n${prompt}`;
 }
 
 /**
@@ -127,13 +141,29 @@ function structuredPrompt(prompt: string): string {
  * markdown, headings or raw line breaks inside a string value fails that parse. Observed live at
  * `--effort max`: a ~11 KB `recommendation` failed five internal retries and the seat died with the
  * answer discarded. Plain single-paragraph strings are cheap to ask for and remove the failure
- * class; the schema keeps the shape, this keeps the content parseable.
+ * class; the schema keeps the shape, this keeps the content parseable. This half is a transport
+ * fix, so every caller gets it.
  */
 const claudeAnswerFormatGuard =
-  'Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string. Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.';
+  'Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string.';
 
-function claudeStructuredPrompt(prompt: string): string {
-  return `${answerInstruction}\n${claudeAnswerFormatGuard}\n\n${prompt}`;
+/**
+ * The length half is the council shape's alone: it names `recommendation`, which no caller contract
+ * has, and caps every array at eight entries — which would quietly truncate a mode that asks for
+ * twenty ideas or a hundred triage rows. Appended only when the request carries no caller contract.
+ */
+const councilAnswerLengthGuard =
+  'Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.';
+
+function claudeStructuredPrompt(
+  prompt: string,
+  contract: AnswerContract,
+  councilShape: boolean,
+): string {
+  const guard = councilShape
+    ? `${claudeAnswerFormatGuard} ${councilAnswerLengthGuard}`
+    : claudeAnswerFormatGuard;
+  return `${contract.instruction}\n${guard}\n\n${prompt}`;
 }
 
 /** Below this remaining budget a schema-free retry cannot finish, so the seat fails honestly instead. */
@@ -226,9 +256,21 @@ function parseAnswer(
   const diagnostic = retainDiagnostic
     ? rawAnswer
     : '[invalid structured subscription answer omitted]';
+  const text = stripOuterJsonFence(scanAndRedact(rawAnswer).redacted);
+  // A caller contract gets the text back unparsed: the panel validates it against the mode's own
+  // schema and keeps the raw answer on a miss, so a seat that answered off-shape is marked
+  // invalid rather than lost. Only the council shape is judged here.
+  if (request.answer !== undefined) {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      capture(request, family, 'invalid-structured-answer', diagnostic);
+      return undefined;
+    }
+    return trimmed;
+  }
   let value: unknown;
   try {
-    value = JSON.parse(stripOuterJsonFence(scanAndRedact(rawAnswer).redacted));
+    value = JSON.parse(text);
   } catch {
     capture(request, family, 'invalid-structured-answer', diagnostic);
     return undefined;
@@ -383,7 +425,7 @@ interface HttpDialect {
   /** Endpoint for a model. Gemini puts the model in the path, the others in the body. */
   endpoint(model: string): string;
   headers(credential: string): Record<string, string>;
-  payload(model: string, prompt: string): string;
+  payload(model: string, prompt: string, contract: AnswerContract): string;
   /**
    * Pull the responding model, the raw answer text and any usage the vendor reported. Returning
    * `undefined` means the response did not carry verifiable model identity and text, which is a
@@ -453,10 +495,10 @@ export const openAiCompatibleDialect = (endpoint: string): HttpDialect => ({
     authorization: `Bearer ${credential}`,
     'content-type': 'application/json',
   }),
-  payload: (model, prompt) =>
+  payload: (model, prompt, contract) =>
     JSON.stringify({
       model,
-      messages: [{ role: 'user', content: structuredPrompt(prompt) }],
+      messages: [{ role: 'user', content: structuredPrompt(prompt, contract) }],
       max_tokens: 32768,
     }),
   extract: (body) => {
@@ -498,13 +540,13 @@ const anthropicMessagesDialect: HttpDialect = {
     'anthropic-version': '2023-06-01',
     'content-type': 'application/json',
   }),
-  payload: (model, prompt) =>
+  payload: (model, prompt, contract) =>
     JSON.stringify({
       model,
       max_tokens: 32768,
-      messages: [{ role: 'user', content: structuredPrompt(prompt) }],
+      messages: [{ role: 'user', content: structuredPrompt(prompt, contract) }],
       output_config: {
-        format: { type: 'json_schema', schema: JSON.parse(councilAnswerJsonSchema) },
+        format: { type: 'json_schema', schema: contract.jsonSchema },
       },
     }),
   extract: (body) => {
@@ -538,9 +580,9 @@ const geminiGenerateContentDialect: HttpDialect = {
     'x-goog-api-key': credential,
     'content-type': 'application/json',
   }),
-  payload: (_model, prompt) =>
+  payload: (_model, prompt, contract) =>
     JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: structuredPrompt(prompt) }] }],
+      contents: [{ role: 'user', parts: [{ text: structuredPrompt(prompt, contract) }] }],
       generationConfig: {
         // camelCase, not the Python SDK's snake_case. The canonical REST JSON representation of
         // GenerationConfig is `{"responseMimeType": string, "responseJsonSchema": value, ...}`; the
@@ -548,7 +590,7 @@ const geminiGenerateContentDialect: HttpDialect = {
         // have silently disabled constrained decoding here rather than failing loudly.
         // `responseSchema` is deprecated in favour of `responseJsonSchema`.
         responseMimeType: 'application/json',
-        responseJsonSchema: JSON.parse(councilAnswerJsonSchema),
+        responseJsonSchema: contract.jsonSchema,
       },
     }),
   extract: (body) => {
@@ -600,13 +642,14 @@ export function createHttpAdapter(
         );
       }
 
+      const contract = answerContract(request);
       const invokeModel = (model: string) =>
         transport.request(
           {
             url: config.dialect.endpoint(model),
             method: 'POST',
             headers: config.dialect.headers(credential),
-            body: config.dialect.payload(model, request.prompt),
+            body: config.dialect.payload(model, request.prompt, contract),
           },
           defaultRetryPolicy(request.context.timeoutMs),
         );
@@ -737,13 +780,20 @@ interface SubscriptionCliAdapterConfig {
   family: Extract<ProviderFamily, 'openai' | 'xai' | 'google'>;
   executableName: string;
   requestedEffort: string;
-  request(executable: string, route: ModelRoute, prompt: string, timeoutMs: number): CliRequest;
+  request(
+    executable: string,
+    route: ModelRoute,
+    prompt: string,
+    timeoutMs: number,
+    contract: AnswerContract,
+  ): CliRequest;
   output(
     stdout: string,
     workingDirectory: string | undefined,
     stderr: string,
     prompt: string,
     requestedModel: string,
+    councilShape: boolean,
   ): SubscriptionCliParseResult;
   configurationError?: () => string | undefined;
 }
@@ -886,7 +936,7 @@ const GrokResultEventSchema = z.object({
   total_cost_usd: z.number().nonnegative().optional(),
 });
 
-const councilAnswerJsonSchema = JSON.stringify({
+const councilAnswerJsonSchema: Readonly<Record<string, unknown>> = {
   type: 'object',
   additionalProperties: false,
   required: ['recommendation', 'evidence', 'assumptions', 'risks', 'uncertainty', 'decisiveTest'],
@@ -898,7 +948,43 @@ const councilAnswerJsonSchema = JSON.stringify({
     uncertainty: { type: 'string', minLength: 1 },
     decisiveTest: { type: 'string', minLength: 1 },
   },
+};
+
+/**
+ * Freeze an object and everything reachable from it. `Object.freeze` alone leaves nested objects
+ * writable, so a shallow-frozen contract exported from the substrate can still have its
+ * `jsonSchema` rewritten by any importer.
+ */
+function deepFreeze<T extends object>(value: T): T {
+  for (const nested of Object.values(value)) {
+    if (typeof nested === 'object' && nested !== null) deepFreeze(nested);
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * The council shape every seat answered in before answer contracts existed; still the default.
+ * Nothing keys on this object's identity: whether a reply is judged against `CouncilAnswerSchema`
+ * follows from the request carrying no `answer` of its own, which is what `isCouncilShape` reads.
+ */
+export const COUNCIL_ANSWER_CONTRACT: AnswerContract = deepFreeze({
+  instruction: answerInstruction,
+  jsonSchema: councilAnswerJsonSchema,
 });
+
+function answerContract(request: ProviderRequest): AnswerContract {
+  return request.answer ?? COUNCIL_ANSWER_CONTRACT;
+}
+
+/**
+ * A request with no caller contract answers in the council shape, and that is the fact every
+ * council-only rule keys on. Derived from the request rather than compared against
+ * {@link COUNCIL_ANSWER_CONTRACT} by reference, because reference identity would silently change
+ * meaning the day a caller passes an identical contract of its own.
+ */
+function isCouncilShape(request: ProviderRequest): boolean {
+  return request.answer === undefined;
+}
 
 /**
  * Codex renders informational notices between the echoed prompt and the answer — for
@@ -932,6 +1018,7 @@ function extractCodexOutput(
   workingDirectory: string | undefined,
   stderr: string,
   expectedPrompt: string,
+  councilShape: boolean,
 ): SubscriptionCliParseResult {
   const normalised = stderr.replace(/\r\n/g, '\n');
   const userPrefix = `\nuser\n${expectedPrompt.replace(/\r\n/g, '\n')}\n`;
@@ -1012,7 +1099,9 @@ function extractCodexOutput(
     } catch {
       return parseFailure('identity-unverified', actualModel);
     }
-    if (!CouncilAnswerSchema.safeParse(value).success) {
+    // Every rendered message must be the JSON that was asked for. The council shape is checked
+    // here; a caller contract's shape is the panel's to judge, so only parseability is required.
+    if (councilShape && !CouncilAnswerSchema.safeParse(value).success) {
       return parseFailure('identity-unverified', actualModel);
     }
   }
@@ -1542,8 +1631,15 @@ function createSubscriptionCliAdapter(
         );
       }
 
+      const contract = answerContract(request);
       const result = await transport.run(
-        config.request(executable, configuredRoute, request.prompt, request.context.timeoutMs),
+        config.request(
+          executable,
+          configuredRoute,
+          request.prompt,
+          request.context.timeoutMs,
+          contract,
+        ),
       );
       if (result.status !== 'ok') {
         // A seat CLI that has run out of subscription credit exits non-zero with a usage-limit
@@ -1584,8 +1680,9 @@ function createSubscriptionCliAdapter(
         result.stdout,
         result.workingDirectory,
         result.stderr,
-        structuredPrompt(request.prompt),
+        structuredPrompt(request.prompt, contract),
         configuredRoute.primary,
+        isCouncilShape(request),
       );
       if (output.status === 'failed') {
         capture(
@@ -1721,8 +1818,8 @@ export function createOpenAiCodexAdapter(
       family: 'openai',
       executableName: 'codex',
       requestedEffort: codexReasoningEffort,
-      request: (executable, route, prompt, timeoutMs) => {
-        const councilPrompt = structuredPrompt(prompt);
+      request: (executable, route, prompt, timeoutMs, contract) => {
+        const councilPrompt = structuredPrompt(prompt, contract);
         return {
           executable,
           args: [
@@ -1788,11 +1885,12 @@ export function createOpenAiCodexAdapter(
           cwd: tmpdir(),
           files: {
             'council-prompt.txt': councilPrompt,
-            'council-answer-schema.json': councilAnswerJsonSchema,
+            'council-answer-schema.json': JSON.stringify(contract.jsonSchema),
           },
         };
       },
-      output: extractCodexOutput,
+      output: (stdout, workingDirectory, stderr, prompt, _requestedModel, councilShape) =>
+        extractCodexOutput(stdout, workingDirectory, stderr, prompt, councilShape),
     },
     transport,
     resolveExecutable,
@@ -1814,7 +1912,7 @@ export function createOpenAiSubscriptionAdapter(
       executableName: 'omp',
       requestedEffort: ompThinkingLevel,
       configurationError: profileConfigurationError,
-      request: (executable, route, prompt, timeoutMs) => ({
+      request: (executable, route, prompt, timeoutMs, contract) => ({
         executable,
         args: [
           '-p',
@@ -1844,7 +1942,7 @@ export function createOpenAiSubscriptionAdapter(
         timeoutMs,
         cwd: tmpdir(),
         files: {
-          'council-prompt.txt': structuredPrompt(prompt),
+          'council-prompt.txt': structuredPrompt(prompt, contract),
           'omp-isolation.yml': ompIsolationConfig,
         },
       }),
@@ -1890,7 +1988,7 @@ export function createGoogleSubscriptionAdapter(
       family: 'google',
       executableName: 'agy',
       requestedEffort: agyReasoningEffort,
-      request: (executable, route, prompt, timeoutMs) => ({
+      request: (executable, route, prompt, timeoutMs, contract) => ({
         executable,
         args: [
           '--sandbox',
@@ -1901,7 +1999,7 @@ export function createGoogleSubscriptionAdapter(
           '--output-format',
           'stream-json',
           '--json-schema',
-          councilAnswerJsonSchema,
+          JSON.stringify(contract.jsonSchema),
           '--model',
           route.primary,
           '--print-timeout',
@@ -1914,7 +2012,7 @@ export function createGoogleSubscriptionAdapter(
         timeoutMs,
         cwd: tmpdir(),
         files: {
-          'council-prompt.txt': structuredPrompt(prompt),
+          'council-prompt.txt': structuredPrompt(prompt, contract),
           // This seat runs with HOME remapped to the isolation directory, so agy cannot
           // reach the operator's OAuth token and exits "authentication required" — which
           // surfaces as the opaque "agy subscription CLI failed". Stage a copy beside the
@@ -2002,8 +2100,8 @@ export function createXaiSubscriptionAdapter(
       family: 'xai',
       executableName: 'grok',
       requestedEffort: grokReasoningEffort,
-      request: (executable, _route, prompt, timeoutMs) => {
-        const councilPrompt = `${grokInlineAnswerGuard}\n\n${structuredPrompt(prompt)}`;
+      request: (executable, _route, prompt, timeoutMs, contract) => {
+        const councilPrompt = `${grokInlineAnswerGuard}\n\n${structuredPrompt(prompt, contract)}`;
         const override = modelOverride()?.trim();
         return {
           executable,
@@ -2205,7 +2303,7 @@ const CREDENTIAL_FALLBACK_CODES: Readonly<Record<string, true>> = {
   'auth-missing': true,
 };
 
-function permitsCredentialFallback(response: SeatResponse): boolean {
+export function permitsCredentialFallback(response: SeatResponse): boolean {
   if (response.status === 'ok') return false;
   return CREDENTIAL_FALLBACK_CODES[response.error.code] === true;
 }
@@ -2439,7 +2537,8 @@ export function createAnthropicAdapter(
         '--tools',
         '',
       ];
-      const stdin = claudeStructuredPrompt(request.prompt);
+      const contract = answerContract(request);
+      const stdin = claudeStructuredPrompt(request.prompt, contract, isCouncilShape(request));
       // Constrain decoding to the council answer shape instead of asking for JSON in prose. The
       // prose-only form was observed failing a real motion with `invalid-structured-answer` while
       // the same seat passed the trivial health prompt, so the seat that always sits was the one
@@ -2447,7 +2546,13 @@ export function createAnthropicAdapter(
       // transport guarantee, not semantic truth, and a non-conforming answer must still fail.
       let result = await transport.run({
         executable,
-        args: [...baseArgs, '--json-schema', councilAnswerJsonSchema, '--output-format', 'json'],
+        args: [
+          ...baseArgs,
+          '--json-schema',
+          JSON.stringify(contract.jsonSchema),
+          '--output-format',
+          'json',
+        ],
         stdin,
         timeoutMs: request.context.timeoutMs,
         cwd: tmpdir(),

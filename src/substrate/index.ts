@@ -30,12 +30,14 @@ export {
 export * from './health/probe';
 export * from './models/registry';
 export * from './patterns';
+export * from './patterns/panel';
 export * from './policy/data-guard';
 export * from './policy/secrets';
 export * from './providers';
 export * from './records/commit';
 export * from './records/migrate-general';
 export * from './records/minutes';
+export * from './records/mode-sessions';
 export * from './records/project-id';
 export * from './records/store';
 export * from './roles/allocator';

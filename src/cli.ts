@@ -3,7 +3,17 @@ import { readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
 import packageManifest from '../package.json';
-import { getMode, modes, resolveModeForCommand, type ModeName } from './modes';
+import {
+  SPECIFIED_MODE_NAMES,
+  getRunnerMode,
+  isHandlerMode,
+  modes,
+  resolveModeForCommand,
+  type HandlerInput,
+  type ModeDefinition,
+  type ModeName,
+  type ModeRegistry,
+} from './modes';
 import {
   DataClassificationSchema,
   MotionImpactSchema,
@@ -34,7 +44,7 @@ import {
   type ProviderDiagnostic,
   type ProviderTransportResolution,
 } from './substrate/execution/provider';
-import { CouncilRunner } from './substrate/execution/runner';
+import { CouncilRunner, type RoundExecution } from './substrate/execution/runner';
 import { snapshot } from './substrate/health/baseline';
 import { doctor } from './substrate/health/doctor';
 import { probeRoster } from './substrate/health/probe';
@@ -46,7 +56,8 @@ import {
   type ModelRegistry,
 } from './substrate/models/registry';
 import { executePattern } from './substrate/patterns';
-import { evaluateOutbound } from './substrate/policy/data-guard';
+import type { PanelSpend } from './substrate/patterns/panel';
+import { evaluateOutbound, type PolicyDecision } from './substrate/policy/data-guard';
 import { scanAndRedact } from './substrate/policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './substrate/providers';
 import { commitRecordFiles, type RecordCommitOutcome } from './substrate/records/commit';
@@ -57,6 +68,11 @@ import {
   planGeneralMigration,
 } from './substrate/records/migrate-general';
 import { minutesDirectory, writeMinutes } from './substrate/records/minutes';
+import {
+  ModeSessionIdSchema,
+  ModeSessionStore,
+  type ModeSessionScope,
+} from './substrate/records/mode-sessions';
 import {
   CouncilStore,
   SessionRecordSchema,
@@ -171,6 +187,12 @@ const COMMANDS = [
   'run',
   'council',
   'second-opinion',
+  'advise',
+  'ideate',
+  'consult',
+  'forum',
+  'triage',
+  'audience',
   'modes',
   'result',
   'jobs',
@@ -182,6 +204,42 @@ const COMMANDS = [
   'version',
   'self-check',
 ] as const;
+
+/** Subcommand to mode for the six handler-style modes docs/modes.md specifies. */
+const HANDLER_COMMANDS = {
+  advise: 'advisor',
+  ideate: 'ideation',
+  consult: 'consultants',
+  forum: 'forum',
+  triage: 'triage',
+  audience: 'audience',
+} as const;
+type HandlerCommand = keyof typeof HANDLER_COMMANDS;
+
+/** Parsed for every handler command exactly as the run commands parse them; a mode adds its own. */
+const HANDLER_COMMON_FLAGS = new Set([
+  'billing',
+  'caller',
+  'classification',
+  'harness',
+  'help',
+  'json',
+  'motion',
+  'project-id',
+  'project-policy',
+  'providers',
+  'purpose',
+  'records-root',
+  'registry',
+  'scope',
+  'session',
+  'spend-cap',
+  'timeout-ms',
+]);
+
+function isHandlerCommand(command: string): command is HandlerCommand {
+  return Object.hasOwn(HANDLER_COMMANDS, command);
+}
 
 interface ParsedArguments {
   readonly flags: ReadonlyMap<string, readonly string[]>;
@@ -233,6 +291,8 @@ export interface CliFacadeEnvironment {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly stdin?: string;
   readonly now?: () => string;
+  /** Registered modes to use instead of the built-in registry; the seam a test fixture mode uses. */
+  readonly modes?: ModeRegistry;
 }
 
 export interface CliFacadeResult {
@@ -252,6 +312,7 @@ function output(exitCode: number, value?: unknown, error?: unknown): CliFacadeRe
 function parseArguments(
   args: readonly string[],
   allowedFlags: ReadonlySet<string>,
+  booleanFlags: ReadonlySet<string> = BOOLEAN_FLAGS,
 ): ParsedArguments {
   const flags = new Map<string, string[]>();
   const positionals: string[] = [];
@@ -267,7 +328,7 @@ function parseArguments(
     const name = argument.slice(2);
     if (!allowedFlags.has(name)) throw new Error(`Unknown option: --${name}`);
     const values = flags.get(name) ?? [];
-    if (BOOLEAN_FLAGS.has(name)) {
+    if (booleanFlags.has(name)) {
       values.push('true');
     } else {
       const value = args[index + 1];
@@ -417,6 +478,105 @@ async function commitRecords(
   });
 }
 
+interface RecordedRunInput {
+  readonly envelope: ResultEnvelope;
+  /** Mutated: every degradation found here is appended for the caller's report. */
+  readonly degraded: string[];
+  readonly recordsRoot: string;
+  readonly paths: readonly string[];
+  readonly message: string;
+  readonly minutes: {
+    readonly rounds: readonly RoundExecution[];
+    readonly motion: string;
+    readonly startedAt: string;
+    readonly completedAt: string;
+  };
+  readonly environment: CliFacadeEnvironment;
+}
+
+/**
+ * Everything after the record is on disk, shared by the runner path and the handler path so the
+ * two cannot drift. Durability is Git: the terminal record is committed in the records repository
+ * before the run reports success. A records root that is not a work tree is a degradation, not a
+ * failure — the record is still on disk — so it is named in `degraded` rather than thrown. Minutes
+ * are a convenience copy for the vault's ingest and degrade the same way. The record is already
+ * written and committed, so the documented invariant — a run that has written and committed its
+ * record never fails afterwards — holds here too: a schema failure is reported, not thrown.
+ */
+async function finaliseRecordedRun(input: RecordedRunInput): Promise<ResultEnvelope> {
+  const { envelope, degraded, environment } = input;
+  const commit = await commitRecords(input.recordsRoot, input.paths, input.message, environment);
+  if (!commit.committed) degraded.push(`records-not-committed: ${commit.reason}`);
+  const directory = minutesDirectory(
+    environment.env ?? process.env,
+    environment.cwd ?? process.cwd(),
+  );
+  let minutes: string | null = null;
+  if (directory !== null) {
+    try {
+      minutes = await writeMinutes({ directory, envelope, ...input.minutes });
+    } catch (error) {
+      degraded.push(`minutes-not-written: ${safeError(error)}`);
+    }
+  }
+  const unvalidated = {
+    ...envelope,
+    degraded: [...degraded],
+    record: {
+      session: envelope.record.session,
+      committed: commit.committed,
+      ...(commit.committed ? { commitSha: commit.sha } : {}),
+      minutes,
+    },
+  };
+  try {
+    return ResultEnvelopeSchema.parse(unvalidated);
+  } catch (error) {
+    degraded.push(`envelope-not-validated: ${safeError(error)}`);
+    return { ...unvalidated, degraded: [...degraded] };
+  }
+}
+
+function parseCaller(parsed: ParsedArguments): Caller {
+  const callerKind = oneFlag(parsed, 'caller');
+  const harness = oneFlag(parsed, 'harness')?.trim();
+  const purpose = oneFlag(parsed, 'purpose')?.trim();
+  if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
+    throw new Error('--harness and --purpose require --caller human|agent');
+  }
+  return callerKind === undefined
+    ? UNDECLARED_CALLER
+    : CallerSchema.parse({
+        kind: callerKind,
+        harness: harness ?? 'unknown',
+        declared: true,
+        ...(purpose === undefined || purpose.length === 0 ? {} : { purpose }),
+      });
+}
+
+function parseSpendCap(parsed: ParsedArguments): number | undefined {
+  return parsed.flags.has('spend-cap')
+    ? integerFlag(parsed, 'spend-cap', 0, 0, 100_000)
+    : undefined;
+}
+
+function requireProjectId(projectId: string | undefined): string {
+  if (projectId === undefined) throw new Error('Project scope requires a project id');
+  return projectId;
+}
+
+function modeRegistry(environment: CliFacadeEnvironment): ModeRegistry {
+  return environment.modes === undefined ? modes : { ...modes, ...environment.modes };
+}
+
+/** Registered modes in specified order, so the listing is stable whatever a build registers. */
+function registeredModes(registry: ModeRegistry): ModeDefinition[] {
+  return SPECIFIED_MODE_NAMES.flatMap((name) => {
+    const mode = registry[name];
+    return mode === undefined ? [] : [mode];
+  });
+}
+
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const redacted = scanAndRedact(message).redacted.replace(/\s+/g, ' ').trim();
@@ -477,6 +637,30 @@ async function loadProjectPolicyFile(
     throw new Error(`Unable to read project policy: ${safeError(error)}`);
   }
   return ProjectPolicySchema.parse(value);
+}
+
+async function resolveProjectScope(
+  parsed: ParsedArguments,
+  environment: CliFacadeEnvironment,
+  cwd: string,
+  scope: 'general' | 'project',
+  now: string,
+): Promise<{ projectId: string | undefined; policy: ProjectPolicy | undefined }> {
+  const projectPolicy = await loadProjectPolicyFile(parsed, environment, cwd);
+  if (scope === 'general' && projectPolicy !== undefined) {
+    throw new Error('Project policy requires --scope project');
+  }
+  if (scope === 'general' && oneFlag(parsed, 'project-id') !== undefined) {
+    throw new Error('Project id requires --scope project');
+  }
+  const projectIdValue = oneFlag(parsed, 'project-id') ?? projectPolicy?.projectId;
+  const projectId =
+    projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, 'Project id');
+  const policy = scope === 'project' ? projectPolicy : generalPolicy(now);
+  if (scope === 'project' && projectId !== undefined && policy?.projectId !== projectId) {
+    throw new Error('Project policy does not match --project-id');
+  }
+  return { projectId, policy };
 }
 
 function commandDefaults(command: RunOptions['command']): {
@@ -544,24 +728,8 @@ async function parseRunOptions(
         )
       : undefined;
   const significant = command === 'council' || impact === 'high' || contested;
-  const callerKind = oneFlag(parsed, 'caller');
-  const harness = oneFlag(parsed, 'harness')?.trim();
-  const purpose = oneFlag(parsed, 'purpose')?.trim();
-  if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
-    throw new Error('--harness and --purpose require --caller human|agent');
-  }
-  const caller: Caller =
-    callerKind === undefined
-      ? UNDECLARED_CALLER
-      : CallerSchema.parse({
-          kind: callerKind,
-          harness: harness ?? 'unknown',
-          declared: true,
-          ...(purpose === undefined || purpose.length === 0 ? {} : { purpose }),
-        });
-  const spendCap = parsed.flags.has('spend-cap')
-    ? integerFlag(parsed, 'spend-cap', 0, 0, 100_000)
-    : undefined;
+  const caller = parseCaller(parsed);
+  const spendCap = parseSpendCap(parsed);
   const mode: ModeName = resolveModeForCommand(command, significant);
   if (!significant && rounds !== 1) {
     throw new Error('Ordinary motions require exactly one blind round');
@@ -591,20 +759,7 @@ async function parseRunOptions(
     oneFlag(parsed, 'motion-id') ?? deterministicId('motion', command, motion, now),
     'Motion id',
   );
-  const projectPolicy = await loadProjectPolicyFile(parsed, environment, cwd);
-  if (scope === 'general' && projectPolicy !== undefined) {
-    throw new Error('Project policy requires --scope project');
-  }
-  if (scope === 'general' && oneFlag(parsed, 'project-id') !== undefined) {
-    throw new Error('Project id requires --scope project');
-  }
-  const projectIdValue = oneFlag(parsed, 'project-id') ?? projectPolicy?.projectId;
-  const projectId =
-    projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, 'Project id');
-  const policy = scope === 'project' ? projectPolicy : generalPolicy(now);
-  if (scope === 'project' && projectId !== undefined && policy?.projectId !== projectId) {
-    throw new Error('Project policy does not match --project-id');
-  }
+  const { projectId, policy } = await resolveProjectScope(parsed, environment, cwd, scope, now);
   const providerSelection = selectProviderFamilies(oneFlag(parsed, 'providers'), registry, policy);
   const domainFlags = parsed.flags.get('domain');
   const domains =
@@ -735,7 +890,7 @@ async function runCouncilCommand(
     });
   }
 
-  const mode = getMode(options.mode);
+  const mode = getRunnerMode(options.mode, modeRegistry(environment));
   const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters =
     environment.adapters ??
@@ -834,9 +989,7 @@ async function runCouncilCommand(
     degraded.push('legacy-significant-second-opinion');
   }
   if (ledger.refused > 0) degraded.push('spend-cap-reached');
-  const modeOutput = mode.outputSchema.parse(
-    mode.output({ result: execution, decisionState }),
-  ) as Record<string, unknown>;
+  const modeOutput = mode.outputSchema.parse(mode.output({ result: execution, decisionState }));
   const envelope: ResultEnvelope = buildEnvelope({
     mode: mode.name,
     session: executionOptions.runId,
@@ -865,59 +1018,22 @@ async function runCouncilCommand(
     envelope,
   );
   const records = persisted?.records;
-  // Durability is Git: the terminal record is committed in the records repository before this run
-  // reports success. A records root that is not a work tree is a degradation, not a failure — the
-  // record is still on disk — so it is named in `degraded` rather than thrown.
   let emitted: ResultEnvelope = envelope;
   if (persisted !== undefined && executionOptions.recordsRoot !== undefined) {
-    const commit = await commitRecords(
-      executionOptions.recordsRoot,
-      persisted.paths,
-      `council: record ${executionOptions.runId}`,
-      environment,
-    );
-    if (!commit.committed) degraded.push(`records-not-committed: ${commit.reason}`);
-    const directory = minutesDirectory(
-      environment.env ?? process.env,
-      environment.cwd ?? process.cwd(),
-    );
-    // Minutes are a convenience copy for the vault's ingest. The record itself is already written
-    // and, by this point, committed, so an unwritable minutes directory degrades the run in the
-    // same way an uncommittable record does rather than failing it.
-    let minutes: string | null = null;
-    if (directory !== null) {
-      try {
-        minutes = await writeMinutes({
-          directory,
-          envelope,
-          rounds: execution.rounds,
-          motion: executionOptions.motion,
-          startedAt,
-          completedAt: now,
-        });
-      } catch (error) {
-        degraded.push(`minutes-not-written: ${safeError(error)}`);
-      }
-    }
-    const unvalidated = {
-      ...envelope,
-      degraded: [...degraded],
-      record: {
-        session: envelope.record.session,
-        committed: commit.committed,
-        ...(commit.committed ? { commitSha: commit.sha } : {}),
-        minutes,
+    emitted = await finaliseRecordedRun({
+      envelope,
+      degraded,
+      recordsRoot: executionOptions.recordsRoot,
+      paths: persisted.paths,
+      message: `council: record ${executionOptions.runId}`,
+      minutes: {
+        rounds: execution.rounds,
+        motion: executionOptions.motion,
+        startedAt,
+        completedAt: now,
       },
-    };
-    // The record is already written and committed, so the documented invariant — a run that has
-    // written and committed its record never fails afterwards — has to hold here too. A schema
-    // failure at this point is a defect worth reporting, not a reason to discard a durable run.
-    try {
-      emitted = ResultEnvelopeSchema.parse(unvalidated);
-    } catch (error) {
-      degraded.push(`envelope-not-validated: ${safeError(error)}`);
-      emitted = { ...unvalidated, degraded: [...degraded] };
-    }
+      environment,
+    });
   }
   // A run can no longer fail by failing to append a resolution, because it no longer appends one.
   // Exit code 5 (`record-failure`) is retired: session write failures already throw, and adjudication
@@ -1371,10 +1487,258 @@ async function adjudicateCommand(
   });
 }
 
-function help(): CliFacadeResult {
+/**
+ * The six handler-style modes share one front door. The CLI parses the common flags exactly as
+ * the run commands do, runs the same policy preflight over the motion, hands the mode its
+ * adapters, a policy guard for the payloads only it can see, and the session store, then builds,
+ * validates, commits and renders what the mode returns. Nothing mode-specific lives here.
+ */
+async function handlerModeCommand(
+  command: HandlerCommand,
+  args: readonly string[],
+  environment: CliFacadeEnvironment,
+): Promise<CliFacadeResult> {
+  const modeName = HANDLER_COMMANDS[command];
+  const mode = modeRegistry(environment)[modeName];
+  if (mode === undefined || !isHandlerMode(mode)) {
+    throw new Error(
+      `${command} needs the ${modeName} mode, which docs/modes.md specifies but this build does not register`,
+    );
+  }
+  const parsed = parseArguments(
+    args,
+    new Set([...HANDLER_COMMON_FLAGS, ...mode.flags.value, ...mode.flags.boolean]),
+    new Set([...BOOLEAN_FLAGS, ...mode.flags.boolean]),
+  );
+  if (hasFlag(parsed, 'help')) {
+    return output(0, {
+      command,
+      mode: mode.name,
+      knobs: mode.knobs,
+      pattern: mode.pattern,
+      spend: { policy: mode.spend.policy },
+      flags: {
+        common: [...HANDLER_COMMON_FLAGS].sort(),
+        value: [...mode.flags.value],
+        boolean: [...mode.flags.boolean],
+      },
+    });
+  }
+  if (parsed.positionals.length > 0) throw new Error(`${command} accepts options only`);
+
+  const configured = await configuredModelRegistry(parsed, environment);
+  const registry = configured.registry;
+  const now = environment.now ?? (() => new Date().toISOString());
+  const startedAt = now();
+  const cwd = environment.cwd ?? process.cwd();
+  const scope = z.enum(['general', 'project']).parse(oneFlag(parsed, 'scope') ?? 'general');
+  const classification = DataClassificationSchema.parse(
+    oneFlag(parsed, 'classification') ?? 'public',
+  );
+  const caller = parseCaller(parsed);
+  const spendCap = parseSpendCap(parsed);
+  const { projectId, policy } = await resolveProjectScope(
+    parsed,
+    environment,
+    cwd,
+    scope,
+    startedAt,
+  );
+  const providerSelection = selectProviderFamilies(oneFlag(parsed, 'providers'), registry, policy);
+  const motionValue = oneFlag(parsed, 'motion')?.trim();
+  const motion = motionValue === undefined || motionValue.length === 0 ? undefined : motionValue;
+  const sessionValue = oneFlag(parsed, 'session');
+  const sessionId =
+    sessionValue === undefined ? undefined : ModeSessionIdSchema.parse(sessionValue);
+  const billingMode = effectiveBillingMode(mode.spend.policy, resolveBillingMode(parsed, policy));
+  const timeoutMs = integerFlag(parsed, 'timeout-ms', DEFAULT_TIMEOUT_MS, 1, 3_600_000);
+  const recordsRoot = configured.stateRoot;
+
+  const destinations = providerSelection.selected.map((provider) => ({
+    provider,
+    model: registry[provider].primary,
+  }));
+  // The outbound policy the run commands apply, reusable by the handler for the payloads only it
+  // reads. The policy request needs at least one payload; an empty string scans nothing.
+  const guard = (payloads: readonly string[]): PolicyDecision =>
+    evaluateOutbound({
+      runId: sessionId ?? `${command}-preflight`,
+      classification,
+      ...(policy === undefined ? {} : { policy }),
+      destinations,
+      payloads: payloads.length === 0 ? [''] : [...payloads],
+    });
+  const policyDecision = guard(motion === undefined ? [] : [motion]);
+  if (policyDecision.kind === 'blocked') {
+    return output(3, undefined, {
+      schemaVersion: SCHEMA_VERSION,
+      command,
+      mode: mode.name,
+      status: 'blocked-policy',
+      preflight: {
+        requestedProviders: providerSelection.selected,
+        selectedProviders: providerSelection.selected,
+        unavailableProviders: [],
+        eligibleProviders: providerSelection.eligible,
+        omittedEligibleProviders: providerSelection.eligible.filter(
+          (provider) => !providerSelection.selected.includes(provider),
+        ),
+        decision: policyDecision,
+      },
+    });
+  }
+  const preflight = buildPreflight({
+    policyDecision,
+    requestedProviders: providerSelection.selected,
+    selectedProviders: providerSelection.selected,
+    unavailableProviders: [],
+    eligibleProviders: providerSelection.eligible,
+  });
+
+  const adapters =
+    environment.adapters ??
+    createProviderRoster({ env: environment.env ?? process.env, billingMode });
+  const diagnostics: ProviderDiagnostic[] = [];
+  const context: ProviderContext = {
+    registry,
+    env: environment.env ?? process.env,
+    cwd,
+    timeoutMs,
+    captureDiagnostic: (diagnostic) => {
+      diagnostics.push(diagnostic);
+    },
+  };
+  const sessionScope: ModeSessionScope =
+    scope === 'general'
+      ? { scope: 'general' }
+      : { scope: 'project', projectId: requireProjectId(projectId) };
+  const sessions =
+    recordsRoot === undefined ? null : ModeSessionStore.open(recordsRoot, sessionScope);
+
+  // The handler path's answer to `--spend-cap`. A never-metered mode has no ledger to hold — the
+  // panel enforces that policy by refusing every fallback — and a capped mode gets the ledger the
+  // caller asked for. The default is sized on the eligible families rather than the selected ones
+  // or the seat count, because a handler mode builds its own seats and the CLI cannot know how many
+  // until the mode has run: eligible is the widest roster its policy allows it to draw from. The
+  // mode hands this straight to `runPanel`, so the cap the envelope reports is this ledger's rather
+  // than a number nobody consulted.
+  const spend: PanelSpend =
+    mode.spend.policy === 'never-metered'
+      ? { policy: 'never-metered' }
+      : {
+          policy: 'capped',
+          billing: billingMode,
+          ledger: createSpendLedger(
+            spendCap ?? mode.spend.defaultCap(providerSelection.eligible.length, 1),
+          ),
+        };
+
+  const input: HandlerInput = {
+    command,
+    options: {
+      caller,
+      scope,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(policy === undefined ? {} : { projectPolicy: policy }),
+      classification,
+      eligibleProviderFamilies: providerSelection.eligible,
+      providerFamilies: providerSelection.selected,
+      ...(motion === undefined ? {} : { motion }),
+      ...(sessionId === undefined ? {} : { sessionId }),
+      timeoutMs,
+      billingMode,
+      ...(recordsRoot === undefined ? {} : { recordsRoot }),
+    },
+    flags: parsed.flags,
+    positionals: parsed.positionals,
+    ...(environment.stdin === undefined ? {} : { stdin: environment.stdin }),
+    adapters,
+    context,
+    policyDecision,
+    guard,
+    sessions,
+    spend,
+    now,
+  };
+  const outcome = await mode.handle(input);
+  if (outcome.kind === 'blocked') {
+    return output(outcome.status === 'blocked-policy' ? 3 : 4, undefined, {
+      schemaVersion: SCHEMA_VERSION,
+      command,
+      mode: mode.name,
+      status: outcome.status,
+      message: outcome.message,
+      preflight,
+      ...(outcome.decision === undefined ? {} : { decision: outcome.decision }),
+    });
+  }
+  const completedAt = now();
+  const degraded: string[] = [];
+  if (!caller.declared) degraded.push('caller-undeclared');
+  if (outcome.spend.stoppedAtCap) degraded.push('spend-cap-reached');
+  degraded.push(...outcome.degraded);
+  const modeOutput = mode.outputSchema.parse(outcome.output);
+  const envelope: ResultEnvelope = buildEnvelope({
+    mode: mode.name,
+    session: outcome.session,
+    caller,
+    pattern: outcome.pattern,
+    rounds: outcome.rounds,
+    seats: outcome.seats,
+    output: modeOutput,
+    synthesis: outcome.synthesis,
+    dissent: outcome.dissent,
+    unanimous: outcome.unanimous,
+    spend: outcome.spend,
+    degraded,
+    record: { session: outcome.record.session },
+  });
+  let emitted: ResultEnvelope = envelope;
+  if (recordsRoot !== undefined && outcome.record.paths.length > 0) {
+    emitted = await finaliseRecordedRun({
+      envelope,
+      degraded,
+      recordsRoot,
+      paths: outcome.record.paths,
+      message: `${command}: record ${outcome.session}`,
+      minutes: {
+        rounds: [],
+        motion: motion ?? '(no motion: this mode takes its input from its own flags)',
+        startedAt,
+        completedAt,
+      },
+      environment,
+    });
+  }
+  const stoppedAtCap = envelope.spend.stoppedAtCap;
+  return output(outcome.status === 'completed' && !stoppedAtCap ? 0 : 4, {
+    schemaVersion: SCHEMA_VERSION,
+    command,
+    mode: mode.name,
+    status: outcome.status,
+    session: outcome.session,
+    ...(stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(envelope.spend.cap) } : {}),
+    preflight,
+    diagnostics,
+    envelope: emitted,
+  });
+}
+
+function help(environment: CliFacadeEnvironment): CliFacadeResult {
+  // Listing the six subcommands without saying which are registered advertised six commands that
+  // every build refuses; `registered` is the honest half of that listing. The runtime error keeps
+  // its own wording, because it names the mode a build would have to add.
+  const registry = modeRegistry(environment);
+  const handlerCommands = Object.fromEntries(
+    Object.entries(HANDLER_COMMANDS).map(([command, mode]) => [
+      command,
+      { mode, registered: registry[mode] !== undefined },
+    ]),
+  );
   return output(0, {
     name: 'convene',
     commands: [...COMMANDS],
+    handlerCommands,
     invocation: 'All execution is explicit; no automatic hook starts a council.',
     defaultSeatCount: DEFAULT_SEAT_COUNT,
     runOptions: {
@@ -1384,6 +1748,12 @@ function help(): CliFacadeResult {
       '--purpose <text>': 'State why the motion is being put. Requires --caller.',
       '--spend-cap <n>':
         'Bound metered fallback calls for this session. The default is seats x rounds; reaching the cap exits 4 and marks the envelope spend-cap-reached.',
+    },
+    handlerOptions: {
+      '--session <id>':
+        'Continue an existing mode session. Ids look like ad-2026-09-15-3f9a1c; a mode mints one when the flag is absent.',
+      '--motion <text>':
+        'Optional for the handler subcommands; pass --help to one of them for the flags it reads.',
     },
     councilOptions: {
       '--min-families <n>':
@@ -1413,10 +1783,13 @@ export async function runCliFacade(
   try {
     const command = argv[0];
     const args = argv.slice(1);
-    if (command === undefined || command === '--help' || command === 'help') return help();
+    if (command === undefined || command === '--help' || command === 'help') {
+      return help(environment);
+    }
     if (command === 'run' || command === 'council' || command === 'second-opinion') {
       return await runCouncilCommand(command, args, environment);
     }
+    if (isHandlerCommand(command)) return await handlerModeCommand(command, args, environment);
     if (command === 'health' || command === 'doctor') {
       return await healthCommand(command, args, environment);
     }
@@ -1429,11 +1802,12 @@ export async function runCliFacade(
       if (parsed.positionals.length > 0) throw new Error('modes accepts no positional arguments');
       return output(0, {
         schemaVersion: SCHEMA_VERSION,
-        modes: Object.values(modes).map((mode) => ({
+        modes: registeredModes(modeRegistry(environment)).map((mode) => ({
           name: mode.name,
+          kind: isHandlerMode(mode) ? 'handler' : 'runner',
           knobs: mode.knobs,
           pattern: mode.pattern,
-          defaults: mode.defaults,
+          ...(isHandlerMode(mode) ? {} : { defaults: mode.defaults }),
           spend: { policy: mode.spend.policy },
         })),
       });
