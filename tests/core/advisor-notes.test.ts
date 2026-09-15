@@ -163,4 +163,10 @@ describe('advisor notes', () => {
     expect(excerpt('abcdefghij', 5)).toBe('abcd…');
     expect(excerpt('abcde', 5)).toBe('abcde');
   });
+
+  test('excerpt cuts on code points, never inside a surrogate pair', () => {
+    const result = excerpt('abc😀fgh', 5);
+    expect(result.endsWith('…')).toBe(true);
+    expect(Buffer.from(result, 'utf8').toString('utf8')).toBe(result);
+  });
 });

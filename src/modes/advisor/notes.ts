@@ -131,7 +131,15 @@ export function cadenceDue(log: AdvisorLog, every: number): boolean {
   return (log.cadenceCalls + 1) % every === 0;
 }
 
+/**
+ * `limit` counts code points, not UTF-16 code units: slicing on code units could land inside a
+ * surrogate pair (an astral character such as an emoji) and leave a lone surrogate behind, which
+ * silently becomes U+FFFD when the log is re-encoded as UTF-8 while the schema's `max` still
+ * validates the string. Spreading the string iterates by code point, so the cut always falls on
+ * a character boundary.
+ */
 export function excerpt(text: string, limit: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
+  const codePoints = [...flat];
+  return codePoints.length <= limit ? flat : `${codePoints.slice(0, limit - 1).join('')}…`;
 }
