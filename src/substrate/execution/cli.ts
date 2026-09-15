@@ -50,7 +50,7 @@ function findPackageRoot(startDirectory: string): string {
     if (existsSync(join(candidate, 'package.json'))) return candidate;
     const parent = resolve(candidate, '..');
     if (parent === candidate) {
-      throw new Error('claude-council package root could not be resolved');
+      throw new Error('convene package root could not be resolved');
     }
     candidate = parent;
   }
@@ -194,7 +194,7 @@ export async function runIsolatedCli(request: CliRequest): Promise<CliResult> {
   }
 
   const workingDirectory = await realpath(
-    await mkdtemp(join(resolve(request.cwd), 'claude-council-cli-')),
+    await mkdtemp(join(resolve(request.cwd), 'convene-cli-')),
   );
   try {
     let args: string[];

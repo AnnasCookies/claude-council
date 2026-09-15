@@ -9,7 +9,7 @@ description: Use when a consequential or contested decision needs a chaired, mul
 
 Run the public standing-council flow for a significant motion. Keep provider seats independent and tool-free, preserve provider and model identity, enforce policy before transmission, and report quorum honestly. Treat the host as the non-voting chair: frame the motion, approve evidence, open rounds and adjudicate without manufacturing consensus.
 
-Follow the [evidence-pack invariant](#evidence-pack-invariant) whenever the motion uses repository or web evidence. The strict source contract is defined by the [evidence schemas](../../src/evidence/schema.ts), and rendering is defined by [`normaliseEvidence`](../../src/evidence/normalise.ts).
+Follow the [evidence-pack invariant](#evidence-pack-invariant) whenever the motion uses repository or web evidence. The strict source contract is defined by the [evidence schemas](../../src/substrate/evidence/schema.ts), and rendering is defined by [`normaliseEvidence`](../../src/substrate/evidence/normalise.ts).
 
 ## Public council flow
 

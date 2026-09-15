@@ -1,10 +1,23 @@
 # Changelog
 
-All notable changes to claude-council are documented here. The format follows
+All notable changes to convene are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
-## Unreleased
+## 2026.9.6
+
+### Changed
+
+- **Renamed to `convene`.** The repository is `AnnasCookies/convene`, the package and its `bin` are
+  `convene`, and the plugin id is `convene@annascookies-plugins`, so the namespaced commands are
+  `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:status` and
+  `/convene:result`. Nothing else changes: the records root `~/.claude/council`, the `COUNCIL_*`
+  variables, `providers.env`, every CLI subcommand and the OMP profile name are as before. An
+  installed machine cuts over with `claude plugin uninstall claude-council@annascookies-plugins`
+  followed by `claude plugin install convene@annascookies-plugins`, and the same pair for `omp`;
+  `bootstrap/update-council-engine.sh --apply` in dotagents does both. The CI checkout no longer
+  adds an upstream remote, and the ownership gate checks the origin, the plugin metadata and the
+  retained MIT notice only.
 
 ### Added
 

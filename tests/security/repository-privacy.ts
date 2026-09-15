@@ -136,7 +136,7 @@ function assertFixtureCoverage(): void {
     },
     {
       path: 'NOTICE',
-      content: 'Historical upstream: https://github.com/hex/claude-council',
+      content: 'Source: https://github.com/AnnasCookies/convene',
       source: 'fixture',
     },
     {

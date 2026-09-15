@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "name": "claude-council",
+      "name": "convene",
       "source": "./",
       "description": "Standing multi-model councils with scoped records and fail-closed data routing"
     }

@@ -2,12 +2,9 @@
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '../..');
-const expectedOrigin = 'AnnasCookies/claude-council';
-const expectedUpstream = 'hex/claude-council';
+const expectedOrigin = 'AnnasCookies/convene';
 
-type Remotes = { origin?: string; upstream?: string };
-type FailureCode = 'origin' | 'upstream';
-type Failure = { code: FailureCode; message: string };
+type Failure = { code: 'origin'; message: string };
 
 function invariant(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Ownership fixture failure: ${message}`);
@@ -25,71 +22,35 @@ function repositorySlug(url: string | undefined): string | null {
   return match?.[1] ?? null;
 }
 
-function validateRemotes(remotes: Remotes): Failure[] {
-  const failures: Failure[] = [];
-  const origin = repositorySlug(remotes.origin);
-  const upstream = repositorySlug(remotes.upstream);
-  if (origin !== expectedOrigin) {
-    failures.push({
+function validateOrigin(origin: string | undefined): Failure[] {
+  const slug = repositorySlug(origin);
+  if (slug === expectedOrigin) return [];
+  return [
+    {
       code: 'origin',
-      message: `origin resolved to ${origin ?? 'missing'}; expected ${expectedOrigin}`,
-    });
-  }
-  if (upstream !== expectedUpstream) {
-    failures.push({
-      code: 'upstream',
-      message: `upstream resolved to ${upstream ?? 'missing'}; expected ${expectedUpstream}`,
-    });
-  }
-  return failures;
+      message: `origin resolved to ${slug ?? 'missing'}; expected ${expectedOrigin}`,
+    },
+  ];
 }
 
 function assertFixtureCoverage(): void {
-  const validHttps = validateRemotes({
-    origin: 'https://github.com/AnnasCookies/claude-council.git',
-    upstream: 'https://github.com/hex/claude-council',
-  });
-  invariant(validHttps.length === 0, 'canonical HTTPS remotes were rejected');
-
-  const validSsh = validateRemotes({
-    origin: 'git@github.com:AnnasCookies/claude-council.git',
-    upstream: 'git@github.com:hex/claude-council.git',
-  });
-  invariant(validSsh.length === 0, 'canonical SSH remotes were rejected');
-
-  const fixtures: Array<[string, Remotes, FailureCode]> = [
-    ['missing origin', { upstream: 'https://github.com/hex/claude-council' }, 'origin'],
-    ['missing upstream', { origin: 'https://github.com/AnnasCookies/claude-council' }, 'upstream'],
-    [
-      'swapped remotes',
-      {
-        origin: 'https://github.com/hex/claude-council',
-        upstream: 'https://github.com/AnnasCookies/claude-council',
-      },
-      'origin',
-    ],
-    [
-      'foreign origin',
-      {
-        origin: 'https://github.com/example/claude-council',
-        upstream: 'https://github.com/hex/claude-council',
-      },
-      'origin',
-    ],
-    [
-      'foreign upstream',
-      {
-        origin: 'https://github.com/AnnasCookies/claude-council',
-        upstream: 'https://github.com/example/claude-council',
-      },
-      'upstream',
-    ],
+  invariant(
+    validateOrigin('https://github.com/AnnasCookies/convene.git').length === 0,
+    'canonical HTTPS origin was rejected',
+  );
+  invariant(
+    validateOrigin('git@github.com:AnnasCookies/convene.git').length === 0,
+    'canonical SSH origin was rejected',
+  );
+  // The former name is refused on purpose: a checkout still pointing at it has not been repointed.
+  const refused: Array<[string, string | undefined]> = [
+    ['missing origin', undefined],
+    ['the former name', 'https://github.com/AnnasCookies/claude-council.git'],
+    ['another owner', 'https://github.com/example/convene'],
+    ['a non-GitHub host', 'https://gitlab.com/AnnasCookies/convene'],
   ];
-  for (const [name, remotes, expectedCode] of fixtures) {
-    invariant(
-      validateRemotes(remotes).some((failure) => failure.code === expectedCode),
-      `${name} was not refused`,
-    );
+  for (const [name, origin] of refused) {
+    invariant(validateOrigin(origin).length === 1, `${name} was not refused`);
   }
 }
 
@@ -109,11 +70,11 @@ async function readIfPresent(path: string): Promise<string> {
 
 assertFixtureCoverage();
 
-const failures: string[] = validateRemotes({
-  origin: gitConfig('remote.origin.url'),
-  upstream: gitConfig('remote.upstream.url'),
-}).map((failure) => failure.message);
+const failures: string[] = validateOrigin(gitConfig('remote.origin.url')).map(
+  (failure) => failure.message,
+);
 
+// The code was received under MIT, whose terms require its copyright notice to stay with it.
 const licence = await readIfPresent('LICENSE');
 const mitClauses = [
   /^MIT License/m,
@@ -122,7 +83,9 @@ const mitClauses = [
   /THE SOFTWARE IS PROVIDED "AS IS"/,
 ];
 if (!mitClauses.every((clause) => clause.test(licence))) {
-  failures.push('LICENSE does not retain the upstream hex MIT licence and grant/disclaimer text');
+  failures.push(
+    'LICENSE does not retain the MIT notice and grant/disclaimer text the code was received under',
+  );
 }
 
 const pluginText = await readIfPresent('.claude-plugin/plugin.json');
@@ -132,34 +95,17 @@ try {
     homepage?: string;
     repository?: string;
   };
-  const ownedUrl = 'https://github.com/AnnasCookies/claude-council';
+  const ownedUrl = 'https://github.com/AnnasCookies/convene';
   if (
     plugin.author?.name !== 'AnnasCookies' ||
     plugin.author.url !== 'https://github.com/AnnasCookies' ||
     plugin.homepage !== ownedUrl ||
     plugin.repository !== ownedUrl
   ) {
-    failures.push(
-      'plugin metadata does not identify the maintained AnnasCookies/claude-council fork',
-    );
+    failures.push('plugin metadata does not identify AnnasCookies/convene');
   }
 } catch {
   failures.push('.claude-plugin/plugin.json is missing or invalid JSON');
-}
-
-const attributionCandidates = await Promise.all([
-  readIfPresent('README.md'),
-  readIfPresent('NOTICE'),
-  readIfPresent('LICENSE'),
-  readIfPresent('.claude-plugin/plugin.json'),
-  readIfPresent('package.json'),
-]);
-if (
-  !attributionCandidates.some((content) =>
-    /(?:https:\/\/)?github\.com\/hex\/claude-council(?:\.git)?\b/.test(content),
-  )
-) {
-  failures.push('public metadata has no explicit attribution to hex/claude-council');
 }
 
 if (failures.length > 0) {
@@ -169,5 +115,5 @@ if (failures.length > 0) {
 }
 
 console.log(
-  'Repository ownership gate passed: owned origin, canonical upstream and retained MIT attribution are present.',
+  'Repository ownership gate passed: owned origin, plugin metadata and the retained MIT notice are present.',
 );

@@ -1,4 +1,4 @@
-# Claude Council
+# convene
 
 An explicit standing multi-model council for consequential or contested decisions. The plugin runs independent, tool-free provider seats through one Bun/TypeScript core, applies fail-closed outbound policy before transmission, records exact provider/model identity and preserves quorum failure rather than manufacturing consensus.
 
@@ -20,9 +20,9 @@ The prebuilt `dist/cli.js` bundle is the only runtime entry point. Cached instal
 ## Install from this repository
 
 ```bash
-claude plugin marketplace add /path/to/claude-council --scope user
-claude plugin install claude-council@annascookies-plugins --scope user
-claude plugin validate /path/to/claude-council
+claude plugin marketplace add /path/to/convene --scope user
+claude plugin install convene@annascookies-plugins --scope user
+claude plugin validate /path/to/convene
 ```
 
 For development, build and verify the offline runtime:
@@ -95,7 +95,7 @@ bun --no-install dist/cli.js doctor --json
 bun --no-install dist/cli.js health --json
 ```
 
-The plugin slash commands are `/claude-council:council`, `/claude-council:second-opinion`, `/claude-council:ask`, `/claude-council:status` and `/claude-council:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
+The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 
@@ -311,6 +311,6 @@ bun test tests/containment-loader.test.ts # requires the Claude CLI
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for trust boundaries and module ownership.
 
-## Attribution
+## Licence
 
-This is the maintained `AnnasCookies/claude-council` fork of [hex/claude-council](https://github.com/hex/claude-council). The upstream MIT licence and notices are retained.
+MIT. See `LICENSE`.

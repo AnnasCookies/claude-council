@@ -1,49 +1,47 @@
-# Substrate extraction, committee as the first mode
+# Rename to convene
 
-Spec: `docs/forge/2026-09-12-substrate-extraction-brief.md` (cites `docs/vision.md`,
-`docs/modes.md`). Detailed plan: `docs/forge/2026-09-13-substrate-extraction-plan.md`.
-Branch: `refactor/substrate-extraction`, cut from the docs branch; rebase onto `main` once PR #12
-merges, before opening the PR.
+Spec: `docs/forge/2026-09-13-rename-convene-brief.md`, amended 2026-09-15: no credit line and no
+upstream references anywhere except the `LICENSE` copyright notice, which MIT requires.
+Branch: `chore/rename-convene`, cut from `main` at `c06fff9`. Companion PR in dotagents.
 
 ## Goal
 
-Committee and second opinion become registered modes on a substrate. Every run returns the
-result envelope. `/council`, `/second-opinion`, `/ask`, `/result`, `/status` behave as before.
+Repository, package, `bin`, plugin id and every user-facing string say `convene`. Behaviour of
+every command is unchanged. Records root, `COUNCIL_*`, `providers.env`, CLI subcommands and the
+OMP profile name stay. The engine ships as `2026.9.6`.
 
 ## Approach
 
-- [x] 0. Baseline: fix the two host-environment test failures (EXDEV hard link; grok on PATH).
-- [x] 1. Result envelope schema and `caller` flags; committee and second opinion return it.
-- [x] 2. Modes registry with `committee` and `second-opinion`; CLI dispatches through it.
-- [x] 3. Substrate boundary: move modules under `src/substrate/`, single public entry,
-      dependency-direction test.
-- [x] 4. Patterns: `rounds` (existing) and `parallel` (one blind round) in the substrate;
-      second opinion runs on `parallel`.
-- [x] 5. Spend: policy per mode, `--spend-cap`, `stoppedAtCap`, `never-metered` pin.
-- [x] 6. Records: commit terminal records in the records repo; `COUNCIL_MINUTES_DIR` minutes.
-- [x] 7. Docs: ARCHITECTURE.md, README.md, CHANGELOG.md, `.env.example`.
-- [x] 8. `bun run check` green on the branch; rebase onto main; open PR citing both docs.
+- [ ] 1. GitHub rename: the session was not allowed to run it, the user runs `gh repo rename`.
+- [x] 1a. Origin repointed, upstream remote dropped, branch cut from main.
+- [x] 2. Readers renamed: `package.json`, both plugin manifests, `src/cli.ts` help name,
+      `src/substrate/execution/cli.ts` root error and temp prefix; `bun install` refreshes the lock.
+- [x] 3. Gates rewritten: ownership test (origin `AnnasCookies/convene`, no upstream, LICENSE
+      notice still asserted), privacy fixture, containment loader expectations, CI workflow
+      without the upstream step, new `tests/release/naming.ts` with an explicit allow-list.
+- [x] 4. Test fixtures and temp prefixes renamed; OMP profile constant kept with a comment.
+- [x] 5. Docs: README, CHANGELOG (`2026.9.6` section), vision, modes, brief amendment, two stale
+      skill links.
+- [x] 6. Version `2026.9.6` in `package.json` and `plugin.json`; `bun run check`; rebuild `dist`.
+- [ ] 7. PR #15 open, #14 closed; CI is red on the ownership gate alone until the rename lands.
+- [x] 8. dotagents PR #110: updater with stale-plugin cutover, runtime shim and its test, health script,
+      session-notes script, wrapper test, council skill.
 
 ## Files
 
-New: `src/substrate/index.ts`, `src/substrate/envelope.ts`, `src/substrate/patterns/*`,
-`src/substrate/spend.ts`, `src/substrate/records/commit.ts`, `src/substrate/records/minutes.ts`,
-`src/modes/index.ts`, `src/modes/committee/*`, `src/modes/second-opinion/*`,
-`tests/core/dependency-direction.test.ts`, `tests/core/envelope.test.ts`,
-`tests/core/modes.test.ts`, `tests/core/spend.test.ts`, `tests/core/records-commit.test.ts`,
-`tests/core/minutes.test.ts`.
-Moved: `src/domain`, `src/evidence`, `src/execution`, `src/health`, `src/models`, `src/policy`,
-`src/providers`, `src/records`, `src/roles` under `src/substrate/`.
-Modified: `src/cli.ts`, `src/index.ts`, `commands/*.md`, `docs/ARCHITECTURE.md`, `README.md`,
-`CHANGELOG.md`, `.env.example`, `tests/core/*` import paths.
+This repo: `package.json`, `bun.lock`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`,
+`src/cli.ts`, `src/substrate/execution/cli.ts`, `src/substrate/execution/provider.ts` (comment only),
+`tests/release/repository-ownership.ts`, `tests/release/naming.ts` (new), `tests/security/repository-privacy.ts`,
+`tests/containment-loader.test.ts`, `tests/core/cli.test.ts`, `tests/core/model-registry.test.ts`,
+`tests/core/version.test.ts`, `.github/workflows/tests.yml`, `README.md`, `CHANGELOG.md`,
+`docs/vision.md`, `docs/modes.md`, `docs/forge/2026-09-13-rename-convene-brief.md`,
+`skills/council/SKILL.md`, `skills/second-opinion/SKILL.md`, `dist/cli.js`.
 
 ## Risks
 
-- Moving 10.9k lines: import churn. Mitigation: one mechanical move commit, `bun run check`
-  after it, before any behaviour change.
-- Record compatibility: the additive `envelope` field must not break old records. Mitigation:
-  fixture from an existing `~/.claude/council/general/sessions` record, loaded in a test.
-- Spend cap semantics: default must equal today's one metered retry per seat. Mitigation:
-  test that the default cap reproduces the existing `credentialFallback` behaviour.
-- Records commit runs `git` inside the records root: must never touch the product repo or push.
-  Mitigation: temp-repo test; refuse when the root is inside the current repository work tree.
+- Package-root resolution may key on the package name: read the resolver before renaming the
+  fixture, and keep the two in step.
+- CI installs with `--frozen-lockfile`: the lock must carry the new workspace name.
+- Old plugin id stays installed on every machine until the updater runs: state the one-line cutover
+  in the CHANGELOG and both PR bodies.
+- A new stray occurrence of the former name reaches `main` unnoticed: the naming gate fails closed.

@@ -130,14 +130,14 @@ describe('isolated CLI execution', () => {
 
   test('bundled execution resolves the package root rather than its parent', async () => {
     const stagingRoot = await realpath(await makeEmptyTempDirectory());
-    const packageRoot = join(stagingRoot, 'claude-council');
+    const packageRoot = join(stagingRoot, 'convene');
     const outputDirectory = join(packageRoot, 'dist');
     const externalExecutable = join(stagingRoot, basename(process.execPath));
     try {
       await mkdir(outputDirectory, { recursive: true });
       await Bun.write(
         join(packageRoot, 'package.json'),
-        JSON.stringify({ name: 'claude-council', type: 'module' }),
+        JSON.stringify({ name: 'convene', type: 'module' }),
       );
       // A hard link fails with EXDEV when the temp directory sits on a different filesystem from
       // the bun binary, which is the layout on this project's Linux rig. A copy behaves the same

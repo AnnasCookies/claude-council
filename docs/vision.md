@@ -1,9 +1,8 @@
 # Vision: the council suite
 
-The project is named **convene**. That name replaces `claude-council` for the repository, the CLI,
-the plugin id and the Atlas project slug. The rename is its own chore PR after the substrate is
-extracted, and until it lands the docs use `council` as the CLI name. Upstream `hex/claude-council`
-is credited as the starting scaffold; this is a different program.
+The project is named **convene**: the repository, the CLI, the plugin id and the Atlas project
+slug. The rename landed on 2026-09-15 as engine `2026.9.6`. The CLI subcommand that convenes a
+committee is still `council`.
 
 Written 2026-09-10 from the brainstorm on `docs/council-suite-brief.md`. Every build brief cites
 this page and `docs/modes.md`. A run that cannot map its output to a mode in `modes.md` stops and
@@ -85,7 +84,7 @@ committee runs as the first mode on it.
 - Not a data boundary. Any configured provider may receive anything a mode sends it; the secrets
   guard is the only filter. Decided 2026-09-10. A per-project provider allowlist can be added as
   policy later without changing the substrate.
-- Not a fork of `hex/claude-council` in any sense but its starting scaffold.
+- Not a fork of anything: the scaffold it started from is history, not identity.
 
 ## What done looks like
 

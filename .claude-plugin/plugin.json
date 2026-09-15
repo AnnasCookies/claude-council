@@ -1,13 +1,13 @@
 {
-  "name": "claude-council",
-  "version": "2026.9.5",
+  "name": "convene",
+  "version": "2026.9.6",
   "description": "Explicit standing multi-model councils with scoped records, fail-closed data routing, dynamic lenses and provider-family quorum",
   "author": {
     "name": "AnnasCookies",
     "url": "https://github.com/AnnasCookies"
   },
   "license": "MIT",
-  "homepage": "https://github.com/AnnasCookies/claude-council",
-  "repository": "https://github.com/AnnasCookies/claude-council",
+  "homepage": "https://github.com/AnnasCookies/convene",
+  "repository": "https://github.com/AnnasCookies/convene",
   "keywords": ["multi-model", "standing-council", "second-opinion", "data-policy", "quorum", "bun"]
 }

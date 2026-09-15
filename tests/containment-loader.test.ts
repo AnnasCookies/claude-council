@@ -45,7 +45,7 @@ async function waitForPluginLoadAndObserve(
     }
     if (
       existsSync(debugLog) &&
-      /Loaded 5 commands from plugin claude-council/.test(readFileSync(debugLog, 'utf8'))
+      /Loaded 5 commands from plugin convene/.test(readFileSync(debugLog, 'utf8'))
     ) {
       const observationDeadline = Date.now() + 2_000;
       while (!processExited && Date.now() < observationDeadline) {
@@ -70,7 +70,7 @@ afterEach(() => {
 test('[AC-SEC-001] the real Claude plugin loader makes no council provider request', async () => {
   expect(Bun.which('claude')).not.toBeNull();
 
-  const root = mkdtempSync(join(tmpdir(), 'claude-council-containment-'));
+  const root = mkdtempSync(join(tmpdir(), 'convene-containment-'));
   temporaryRoots.push(root);
   const home = join(root, 'home');
   const binDir = join(root, 'bin');
@@ -131,7 +131,7 @@ test('[AC-SEC-001] the real Claude plugin loader makes no council provider reque
   expect(exitCode).not.toBe(0);
   expect(existsSync(debugLog)).toBe(true);
   const debug = readFileSync(debugLog, 'utf8');
-  expect(debug).toMatch(/Loaded inline plugin from path: claude-council/);
-  expect(debug).toMatch(/Loaded 5 commands from plugin claude-council/);
+  expect(debug).toMatch(/Loaded inline plugin from path: convene/);
+  expect(debug).toMatch(/Loaded 5 commands from plugin convene/);
   expect(readFileSync(providerLog, 'utf8')).toBe('');
 });

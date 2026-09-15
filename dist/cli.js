@@ -15848,21 +15848,21 @@ function date4(params) {
 config(en_default());
 // package.json
 var package_default = {
-  name: "claude-council",
-  version: "2026.9.5",
+  name: "convene",
+  version: "2026.9.6",
   type: "module",
   engines: {
     bun: ">=1.3.14"
   },
   bin: {
-    "claude-council": "./dist/cli.js"
+    convene: "./dist/cli.js"
   },
   scripts: {
     build: "bun build src/cli.ts --target=bun --outfile dist/cli.js",
     test: "bun test tests/core",
     "check:types": "tsc --noEmit",
     lint: "prettier --check . && eslint .",
-    "check:release": "bun tests/security/repository-privacy.ts && bun tests/release/repository-ownership.ts",
+    "check:release": "bun tests/security/repository-privacy.ts && bun tests/release/repository-ownership.ts && bun tests/release/naming.ts",
     "check:package": "bun run build && bun --no-install dist/cli.js self-check --json",
     check: "bun run check:types && bun run lint && bun run test && bun run check:release && bun run check:package"
   },
@@ -16446,7 +16446,7 @@ function findPackageRoot(startDirectory) {
       return candidate;
     const parent = resolve(candidate, "..");
     if (parent === candidate) {
-      throw new Error("claude-council package root could not be resolved");
+      throw new Error("convene package root could not be resolved");
     }
     candidate = parent;
   }
@@ -16559,7 +16559,7 @@ async function runIsolatedCli(request) {
   if (inside(repositoryRoot, executable)) {
     return failedResult(executable, startedAt, "repository-executable", "repository-local executables are not permitted");
   }
-  const workingDirectory = await realpath(await mkdtemp(join(resolve(request.cwd), "claude-council-cli-")));
+  const workingDirectory = await realpath(await mkdtemp(join(resolve(request.cwd), "convene-cli-")));
   try {
     let args;
     try {
@@ -23353,7 +23353,7 @@ async function adjudicateCommand(args, environment) {
 }
 function help() {
   return output(0, {
-    name: "claude-council",
+    name: "convene",
     commands: [...COMMANDS],
     invocation: "All execution is explicit; no automatic hook starts a council.",
     defaultSeatCount: DEFAULT_SEAT_COUNT,
