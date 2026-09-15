@@ -141,15 +141,29 @@ function structuredPrompt(prompt: string, contract: AnswerContract): string {
  * markdown, headings or raw line breaks inside a string value fails that parse. Observed live at
  * `--effort max`: a ~11 KB `recommendation` failed five internal retries and the seat died with the
  * answer discarded. Plain single-paragraph strings are cheap to ask for and remove the failure
- * class; the schema keeps the shape, this keeps the content parseable.
+ * class; the schema keeps the shape, this keeps the content parseable. This half is a transport
+ * fix, so every caller gets it.
  */
 const claudeAnswerFormatGuard =
-  'Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string. Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.';
+  'Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string.';
 
-// The guard names `recommendation`, which only the council shape has; under a caller contract the
-// plain-prose rule is what matters and the length clause is harmlessly inapplicable.
-function claudeStructuredPrompt(prompt: string, contract: AnswerContract): string {
-  return `${contract.instruction}\n${claudeAnswerFormatGuard}\n\n${prompt}`;
+/**
+ * The length half is the council shape's alone: it names `recommendation`, which no caller contract
+ * has, and caps every array at eight entries — which would quietly truncate a mode that asks for
+ * twenty ideas or a hundred triage rows. Appended only when the request carries no caller contract.
+ */
+const councilAnswerLengthGuard =
+  'Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.';
+
+function claudeStructuredPrompt(
+  prompt: string,
+  contract: AnswerContract,
+  councilShape: boolean,
+): string {
+  const guard = councilShape
+    ? `${claudeAnswerFormatGuard} ${councilAnswerLengthGuard}`
+    : claudeAnswerFormatGuard;
+  return `${contract.instruction}\n${guard}\n\n${prompt}`;
 }
 
 /** Below this remaining budget a schema-free retry cannot finish, so the seat fails honestly instead. */
@@ -779,7 +793,7 @@ interface SubscriptionCliAdapterConfig {
     stderr: string,
     prompt: string,
     requestedModel: string,
-    contract: AnswerContract,
+    councilShape: boolean,
   ): SubscriptionCliParseResult;
   configurationError?: () => string | undefined;
 }
@@ -936,14 +950,40 @@ const councilAnswerJsonSchema: Readonly<Record<string, unknown>> = {
   },
 };
 
-/** The council shape every seat answered in before answer contracts existed; still the default. */
-export const COUNCIL_ANSWER_CONTRACT: AnswerContract = Object.freeze({
+/**
+ * Freeze an object and everything reachable from it. `Object.freeze` alone leaves nested objects
+ * writable, so a shallow-frozen contract exported from the substrate can still have its
+ * `jsonSchema` rewritten by any importer.
+ */
+function deepFreeze<T extends object>(value: T): T {
+  for (const nested of Object.values(value)) {
+    if (typeof nested === 'object' && nested !== null) deepFreeze(nested);
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * The council shape every seat answered in before answer contracts existed; still the default.
+ * Nothing keys on this object's identity: whether a reply is judged against `CouncilAnswerSchema`
+ * follows from the request carrying no `answer` of its own, which is what `isCouncilShape` reads.
+ */
+export const COUNCIL_ANSWER_CONTRACT: AnswerContract = deepFreeze({
   instruction: answerInstruction,
   jsonSchema: councilAnswerJsonSchema,
 });
 
 function answerContract(request: ProviderRequest): AnswerContract {
   return request.answer ?? COUNCIL_ANSWER_CONTRACT;
+}
+
+/**
+ * A request with no caller contract answers in the council shape, and that is the fact every
+ * council-only rule keys on. Derived from the request rather than compared against
+ * {@link COUNCIL_ANSWER_CONTRACT} by reference, because reference identity would silently change
+ * meaning the day a caller passes an identical contract of its own.
+ */
+function isCouncilShape(request: ProviderRequest): boolean {
+  return request.answer === undefined;
 }
 
 /**
@@ -978,7 +1018,7 @@ function extractCodexOutput(
   workingDirectory: string | undefined,
   stderr: string,
   expectedPrompt: string,
-  contract: AnswerContract,
+  councilShape: boolean,
 ): SubscriptionCliParseResult {
   const normalised = stderr.replace(/\r\n/g, '\n');
   const userPrefix = `\nuser\n${expectedPrompt.replace(/\r\n/g, '\n')}\n`;
@@ -1061,7 +1101,7 @@ function extractCodexOutput(
     }
     // Every rendered message must be the JSON that was asked for. The council shape is checked
     // here; a caller contract's shape is the panel's to judge, so only parseability is required.
-    if (contract === COUNCIL_ANSWER_CONTRACT && !CouncilAnswerSchema.safeParse(value).success) {
+    if (councilShape && !CouncilAnswerSchema.safeParse(value).success) {
       return parseFailure('identity-unverified', actualModel);
     }
   }
@@ -1642,7 +1682,7 @@ function createSubscriptionCliAdapter(
         result.stderr,
         structuredPrompt(request.prompt, contract),
         configuredRoute.primary,
-        contract,
+        isCouncilShape(request),
       );
       if (output.status === 'failed') {
         capture(
@@ -1849,8 +1889,8 @@ export function createOpenAiCodexAdapter(
           },
         };
       },
-      output: (stdout, workingDirectory, stderr, prompt, _requestedModel, contract) =>
-        extractCodexOutput(stdout, workingDirectory, stderr, prompt, contract),
+      output: (stdout, workingDirectory, stderr, prompt, _requestedModel, councilShape) =>
+        extractCodexOutput(stdout, workingDirectory, stderr, prompt, councilShape),
     },
     transport,
     resolveExecutable,
@@ -2498,7 +2538,7 @@ export function createAnthropicAdapter(
         '',
       ];
       const contract = answerContract(request);
-      const stdin = claudeStructuredPrompt(request.prompt, contract);
+      const stdin = claudeStructuredPrompt(request.prompt, contract, isCouncilShape(request));
       // Constrain decoding to the council answer shape instead of asking for JSON in prose. The
       // prose-only form was observed failing a real motion with `invalid-structured-answer` while
       // the same seat passed the trivial health prompt, so the seat that always sits was the one

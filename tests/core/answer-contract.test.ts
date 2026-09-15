@@ -194,6 +194,58 @@ describe('answer contracts', () => {
     expect(cli.calls[0]?.stdin.startsWith(voteContract.instruction)).toBe(true);
   });
 
+  test("the claude length guard is the council shape's alone; the prose guard is everyone's", async () => {
+    // The length half caps every array at eight entries and names `recommendation`. Applied to a
+    // caller contract it would silently truncate a mode that asks for twenty ideas; the plain-prose
+    // half is a transport fix for the claude CLI's own JSON parse and every caller needs it.
+    const claudeCli = (answer: string): FakeCli =>
+      new FakeCli({
+        status: 'ok',
+        executable: process.execPath,
+        exitCode: 0,
+        stdout: JSON.stringify({
+          result: answer,
+          modelUsage: { [registry.anthropic.primary]: {} },
+        }),
+        stderr: '',
+        durationMs: 10,
+        treeTerminated: false,
+        errorCode: null,
+      });
+    const adapter = (cli: FakeCli) =>
+      anthropicAdapter({ env: {}, cliTransport: cli, resolveExecutable: () => process.execPath });
+
+    const callerCli = claudeCli('{"vote":"no","note":"x"}');
+    await adapter(callerCli).invoke(request(context({}), voteContract));
+    const callerPrompt = callerCli.calls[0]?.stdin ?? '';
+    expect(callerPrompt).not.toContain('at most eight entries');
+    expect(callerPrompt).not.toContain('recommendation under 2500 characters');
+    expect(callerPrompt).toContain('no line breaks or tab characters inside any string');
+
+    const councilCli = claudeCli(
+      JSON.stringify({
+        recommendation: 'Ship it.',
+        evidence: ['e'],
+        assumptions: ['a'],
+        risks: ['r'],
+        uncertainty: 'low',
+        decisiveTest: 'run it',
+      }),
+    );
+    await adapter(councilCli).invoke(request(context({})));
+    const councilPrompt = councilCli.calls[0]?.stdin ?? '';
+    expect(councilPrompt).toContain('at most eight entries');
+    expect(councilPrompt).toContain('no line breaks or tab characters inside any string');
+  });
+
+  test('the council contract is frozen all the way down', () => {
+    expect(Object.isFrozen(COUNCIL_ANSWER_CONTRACT)).toBe(true);
+    expect(Object.isFrozen(COUNCIL_ANSWER_CONTRACT.jsonSchema)).toBe(true);
+    expect(Object.isFrozen(COUNCIL_ANSWER_CONTRACT.jsonSchema.properties)).toBe(true);
+    expect(() => Object.assign(COUNCIL_ANSWER_CONTRACT.jsonSchema, { type: 'array' })).toThrow();
+    expect(COUNCIL_ANSWER_CONTRACT.jsonSchema.type).toBe('object');
+  });
+
   test('permitsCredentialFallback names only the failures another credential could fix', () => {
     const failure = (code: string) =>
       ({
