@@ -35,8 +35,8 @@ the five knobs from `docs/vision.md`, its execution pattern, its defaults, its s
 it prepares a session (the committee's health preflight lives here) and the shape of its `output`
 block; the CLI seats and runs it. A handler mode declares its own flags and runs itself on the
 panel primitive, returning the envelope fields the CLI cannot know. `committee` and
-`second-opinion` are runner modes; `advisor` and `ideation` are handler modes; `docs/modes.md`
-specifies the rest.
+`second-opinion` are runner modes; `advisor`, `ideation` and `forum` are handler modes;
+`docs/modes.md` specifies the rest.
 
 The advisor owns one panel seat under `never-metered`, a bounded hold, and an append-only note
 log per harness session through `ModeSessionStore`. Its note log is committed only when `--end`
@@ -50,6 +50,11 @@ owns the JSONL event shapes, the output schema and the rebuild of a session from
 the engine's own everywhere it appears — the unclustered list is always in the output, and nothing
 in the mode scores, ranks or votes.
 
+`src/modes/forum/` runs one blind panel per round over the panel primitive: `answers.ts` holds the
+stance and motion contracts, `prompts.ts` the opening and reply prompts (every prior position
+quoted as untrusted data), `aggregate.ts` the position map, the moves and the motions, and
+`index.ts` the handler. Nothing in it rules, ranks or scores.
+
 `src/cli.ts` parses flags, resolves the mode for the command, builds the envelope, persists the
 session and prints. `tests/core/dependency-direction.test.ts` enforces that modes reach the
 substrate only through its index, that the substrate never imports a mode or the CLI, and that no
@@ -60,8 +65,10 @@ mode imports another.
 Every executed run returns one `ResultEnvelope` (`src/substrate/envelope.ts`), validated before it
 is printed or stored: mode, session, declared caller, pattern, rounds, one entry per seat with
 verified identity and the transport that answered, the mode's `output`, attributed synthesis and
-dissent (both `null` until the synthesis brief), a unanimity flag to be suspicious of, spend,
-`degraded` reasons and the record location. The same object is embedded in the session record.
+dissent (both `null` until the synthesis brief, and `null` for ever in the forum, which preserves
+every position instead of reducing them), a unanimity flag to be suspicious of, spend, `degraded`
+reasons and the record location. The same object is embedded in the session record. `rounds` runs
+from zero to six, the forum's ceiling; the council runner keeps its own ceiling of three.
 
 ## Spend
 

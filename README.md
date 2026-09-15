@@ -54,6 +54,13 @@ bun --no-install dist/cli.js second-opinion \
 # List the registered modes and their knobs
 bun --no-install dist/cli.js modes
 
+# Six seats argue a motion over three rounds; nobody rules
+bun --no-install dist/cli.js forum \
+  --records-root ~/.claude/council \
+  --seats 6 --rounds 3 \
+  --caller human --harness "Claude Code" \
+  --motion "Should the advisor live in the harness or a sidecar?"
+
 # Significant, multi-round council with contrarian quorum
 bun --no-install dist/cli.js council \
   --classification public \
@@ -107,7 +114,7 @@ bun --no-install dist/cli.js doctor --json
 bun --no-install dist/cli.js health --json
 ```
 
-The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
+The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:forum`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 
@@ -203,6 +210,37 @@ cluster order is simply the order in which each group's first idea arrived, and 
 id in arrival order — is always in the output, so a reader who distrusts the grouping can ignore
 it entirely. Clusters keep their ids across passes wherever a group is still the best home for its
 members, and a number retired by a merge is never issued again.
+
+## Forum
+
+`forum` puts a motion to many seats over several rounds and records what happened. Round one is
+blind: each seat answers with a position label of at most eight words, the argument for it and,
+optionally, a motion to record. In every later round each seat sees every prior position from every
+round, quoted as untrusted data and attributed to its seat and round, and may hold, revise or rebut.
+
+```bash
+bun --no-install dist/cli.js forum \
+  --records-root ~/.claude/council \
+  --seats 6 --rounds 3 \
+  --lenses strategist,architect,security,critic \
+  --motion "Should the advisor live in the harness or a sidecar?"
+```
+
+- `--seats <2-24>` seats are dealt round-robin over the selected families; `--rounds <1-6>` rounds.
+- `--lenses <a,b,c>` names catalogue lenses (`self-check` lists them); the default is the catalogue
+  in order. `--personas <file>` takes a JSON array of `{ "name", "description" }` instead. The two
+  are mutually exclusive, and a list shorter than the seat count is dealt round and round, the
+  repeats named `critic-2`, `critic-3`.
+- Spend is `capped` under `sub-first`, defaulting to seats × rounds metered fallback calls. Reaching
+  the cap stops the forum: the envelope reports the rounds actually run, `degraded` carries
+  `spend-cap-reached` and `rounds-not-completed`, and the ledger's `closed` event names the reason.
+- The output is `rounds` (every position, attributed), `map` (the final round's positions grouped by
+  label, with their holders), `moved` (every seat whose label changed, with the round and the reason
+  it gave) and `motions` (every motion raised, with its support and opposition). Nothing is scored,
+  ranked or decided: `synthesis`, `dissent` and `unanimous` stay empty because the forum preserves
+  every position rather than reducing them, and the output has no field for a winner or a decision.
+- Records: the full ledger, one JSONL line per event at
+  `<records-root>/<scope>/modes/forum/<session>.jsonl`, committed before the run reports success.
 
 ## Scope and project policy
 

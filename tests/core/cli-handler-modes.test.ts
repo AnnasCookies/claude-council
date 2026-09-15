@@ -591,7 +591,7 @@ describe('handler mode dispatch', () => {
       advise: { mode: 'advisor', registered: true },
       ideate: { mode: 'ideation', registered: true },
       consult: { mode: 'consultants', registered: false },
-      forum: { mode: 'forum', registered: false },
+      forum: { mode: 'forum', registered: true },
       triage: { mode: 'triage', registered: false },
       audience: { mode: 'audience', registered: false },
     });
@@ -604,7 +604,7 @@ describe('handler mode dispatch', () => {
     // that every one of them would refuse.
     const injectedHelp = JSON.parse((await runCliFacade(['help'], fixture.environment)).stdout);
     expect(injectedHelp.handlerCommands.audience).toEqual({ mode: 'audience', registered: true });
-    expect(injectedHelp.handlerCommands.forum).toEqual({ mode: 'forum', registered: false });
+    expect(injectedHelp.handlerCommands.forum).toEqual({ mode: 'forum', registered: true });
     const injected = JSON.parse((await runCliFacade(['modes'], fixture.environment)).stdout);
     expect(
       injected.modes.map((mode: { name: string; kind: string }) => [mode.name, mode.kind]),
@@ -613,6 +613,7 @@ describe('handler mode dispatch', () => {
       ['second-opinion', 'runner'],
       ['advisor', 'handler'],
       ['ideation', 'handler'],
+      ['forum', 'handler'],
       ['audience', 'handler'],
     ]);
     const builtIn = JSON.parse((await runCliFacade(['modes'])).stdout);
@@ -621,6 +622,7 @@ describe('handler mode dispatch', () => {
       'second-opinion',
       'advisor',
       'ideation',
+      'forum',
     ]);
   });
 

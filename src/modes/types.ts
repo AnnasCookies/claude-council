@@ -22,7 +22,7 @@ import type {
 } from '../substrate';
 
 /** The modes this build registers. A mode PR adds its name here when it adds its definition. */
-export const MODE_NAMES = ['committee', 'second-opinion', 'advisor', 'ideation'] as const;
+export const MODE_NAMES = ['committee', 'second-opinion', 'advisor', 'ideation', 'forum'] as const;
 export type ModeName = (typeof MODE_NAMES)[number];
 
 /**
@@ -139,6 +139,12 @@ export interface HandlerCommonOptions {
   /** After the mode's spend policy was applied: never-metered modes always see `sub-only`. */
   readonly billingMode: BillingMode;
   readonly recordsRoot?: string;
+  /**
+   * Only ever set from an explicit `--spend-cap`; the CLI cannot size a handler mode's own ledger
+   * (it does not know the mode's round count), so a mode that needs one sized correctly builds it
+   * itself from this and `HandlerInput.spend`.
+   */
+  readonly spendCap?: number;
 }
 
 export interface HandlerInput {

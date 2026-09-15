@@ -285,7 +285,11 @@ raised with support and opposition. Tempo: long. Records: the full ledger of eve
 - No ruling, ever. The forum ends by round limit, by the cap, or by you, never by consensus
   detection.
 - Every revision is attributed to a seat and a round.
-- Motions raised inside the forum are recorded with support and opposition, not decided.
+- Motions raised inside the forum are recorded with support and opposition, not decided. The forum
+  mints their ids (`m-1`, `m-2`, …) in arrival order and quotes them in later rounds, so a seat that
+  supports or opposes one names an id the forum minted and never one of its own.
+- A move is attributed to a seat **and a round**: a seat may move more than once, and two moves are
+  only told apart by the round they happened in.
 
 **Output.**
 
@@ -295,15 +299,17 @@ raised with support and opposition. Tempo: long. Records: the full ledger of eve
     { "n": 1, "positions": [{ "seat": "…", "stance": "hold", "text": "…", "inReplyTo": null }] }
   ],
   "map": [{ "position": "…", "holders": ["…"] }],
-  "moved": [{ "seat": "…", "from": "…", "to": "…", "why": "…" }],
-  "motions": [{ "by": "…", "text": "…", "support": ["…"], "opposed": ["…"] }]
+  "moved": [{ "seat": "…", "round": 2, "from": "…", "to": "…", "why": "…" }],
+  "motions": [{ "id": "m-1", "by": "…", "text": "…", "support": ["…"], "opposed": ["…"] }]
 }
 ```
 
 **Example.**
 
 ```text
-council forum --seats 6 --rounds 3 --motion "Should the advisor live in the harness or a sidecar?"   # new
+convene forum --seats 6 --rounds 3 --motion "Should the advisor live in the harness or a sidecar?"
+convene forum --seats 8 --rounds 2 --lenses strategist,architect,security,critic --motion "…"
+convene forum --seats 6 --rounds 3 --personas ./personas.json --motion "…"
 ```
 
 ## Committee

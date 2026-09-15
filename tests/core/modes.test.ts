@@ -89,25 +89,34 @@ function options(overrides: Partial<SessionOptions> = {}): SessionOptions {
 }
 
 describe('modes registry', () => {
-  test('registers committee, second opinion, the advisor and ideation', () => {
-    expect([...MODE_NAMES]).toEqual(['committee', 'second-opinion', 'advisor', 'ideation']);
+  test('registers committee, second opinion, the advisor, ideation and forum', () => {
+    expect([...MODE_NAMES]).toEqual([
+      'committee',
+      'second-opinion',
+      'advisor',
+      'ideation',
+      'forum',
+    ]);
     expect(modes.committee.pattern).toBe('rounds');
     expect(modes['second-opinion'].pattern).toBe('parallel');
     expect(modes.ideation.pattern).toBe('parallel');
+    expect(modes.forum.pattern).toBe('rounds');
     expect(modes.committee.spend.defaultCap(5, 2)).toBe(10);
     expect(modes['second-opinion'].spend.defaultCap(5, 1)).toBe(5);
+    expect(modes.forum.spend.defaultCap(6, 3)).toBe(18);
     // The registry is mixed, and each entry keeps its own type: a runner mode has `prepare` and
     // `defaults`, a handler mode has `handle`, and nothing has both.
     expect(isHandlerMode(modes.committee)).toBe(false);
     expect(isHandlerMode(modes.ideation)).toBe(true);
+    expect(isHandlerMode(modes.forum)).toBe(true);
     expect(typeof modes.ideation.handle).toBe('function');
   });
 
   test('an unknown mode fails with the whole registered list', () => {
-    // Anchored on both ends: a prefix match passed while a registered mode was missing from the
-    // listing.
-    expect(() => getMode('forum')).toThrow(
-      /^Unknown mode: forum\. Registered modes: committee, second-opinion, advisor, ideation$/,
+    // `forum` is registered now, so the example is a mode docs/modes.md specifies and this build
+    // does not carry.
+    expect(() => getMode('triage')).toThrow(
+      /^Unknown mode: triage\. Registered modes: committee, second-opinion, advisor, ideation, forum$/,
     );
   });
 
