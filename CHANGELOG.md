@@ -23,6 +23,11 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   own output, so a handler mode's minutes hold its result.
 - **Handler modes may take a session key and bare arguments** (`session: 'key'`,
   `acceptsPositionals`), and `advise` reads stdin only with `--transcript -`.
+- **A mode session derivation may publish several events at once.**
+  `ModeSessionStore.appendDerived` accepts a list as well as a single event and writes it in one
+  rewrite, so a mode whose step is more than one line — ideation's pass and the clustering over it
+  — cannot be read half-written by a concurrent call, and a derivation that throws writes none of
+  them.
 - **Ideation mode.** `convene ideate` opens a room for divergence: many cheap seats, one catalogue
   lens or supplied persona each, answering the same prompt blind and in parallel, then a
   deterministic grouping the engine labels as its own. `--seats`, `--lenses`, `--personas`,
