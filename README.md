@@ -51,6 +51,13 @@ bun --no-install dist/cli.js second-opinion \
   --spend-cap 2 \
   --motion "Drizzle or Kysely for this service?"
 
+# Many reader personas react to one draft: counts and verbatim quotes, never a rewrite
+bun --no-install dist/cli.js audience \
+  --personas ops-manager,new-starter,sceptic \
+  --draft docs/announcement.md \
+  --caller human --harness "Claude Code" \
+  --records-root ~/.claude/council
+
 # List the registered modes and their knobs
 bun --no-install dist/cli.js modes
 
@@ -129,7 +136,7 @@ bun --no-install dist/cli.js doctor --json
 bun --no-install dist/cli.js health --json
 ```
 
-The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:forum`, `/convene:triage`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
+The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:ideate`, `/convene:consult`, `/convene:forum`, `/convene:triage`, `/convene:audience`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 
@@ -345,6 +352,30 @@ bun --no-install dist/cli.js forum \
   every position rather than reducing them, and the output has no field for a winner or a decision.
 - Records: the full ledger, one JSONL line per event at
   `<records-root>/<scope>/modes/forum/<session>.jsonl`, committed before the run reports success.
+
+### Audience
+
+`audience` puts one draft in front of many cheap reader personas at once and returns what they
+said, never a rewrite. Each persona is one seat, the seats are spread over the subscription
+families in `--providers` order, and every seat answers the same four fields about the same draft:
+`clear`, `wouldAct`, `stoppedAt`, and a one- or two-sentence `quote` in that reader's own voice.
+
+- `--personas ops-manager,new-starter:Three weeks into the job,sceptic` — a comma list of `name` or
+  `name:description`, one to twenty-four entries. A description that needs a comma belongs in
+  `--personas-file <path>`, a JSON array of `{ "name": "…", "description": "…" }`.
+- `--draft <path>` — a text file of at most 256 KiB, hashed with SHA-256 over its bytes, so a
+  changed draft is a different hash and a different session.
+- `--question "…"` — what the draft is meant to do. Optional; `--motion` is used when it is absent,
+  and either is quoted to the readers as data rather than handed to them as an instruction.
+- `--records-root <path>` — where the session log is written and committed. Without it the run
+  reports `records-not-kept` in `degraded` and exits `4`, because this mode's record is its
+  product.
+
+The aggregation is counting: `tallies` holds `answered` and a yes/no pair per boolean field, and
+there is no other number in the output. Quotes are verbatim and attributed to the persona that
+produced them. Spend is `sub-only` and never falls back to a metered key, so a family whose only
+route is metered is not seated and is named in `degraded`, and a voice whose subscription could not
+answer is `skipped` — leaving `tallies.answered` below the number of personas.
 
 ## Scope and project policy
 

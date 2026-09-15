@@ -1,4 +1,5 @@
 import { advisor } from './advisor';
+import { audience } from './audience';
 import { committee } from './committee';
 import { consultants } from './consultants';
 import { forum } from './forum';
@@ -40,6 +41,7 @@ export const modes: Readonly<{
   readonly consultants: HandlerModeDefinition;
   readonly forum: HandlerModeDefinition;
   readonly triage: HandlerModeDefinition;
+  readonly audience: HandlerModeDefinition;
 }> = Object.freeze({
   committee: runnerMode(committee),
   'second-opinion': runnerMode(secondOpinion),
@@ -48,16 +50,29 @@ export const modes: Readonly<{
   consultants,
   forum,
   triage,
+  audience,
 }) satisfies Readonly<Record<ModeName, ModeDefinition>>;
 
-/** What a build can run, keyed by specified name. Tests inject one to register a fixture mode. */
-export type ModeRegistry = Readonly<Partial<Record<SpecifiedModeName, ModeDefinition>>>;
+/**
+ * What a build can run, keyed by specified name. Tests inject one to register a fixture mode.
+ * The value type includes `undefined` explicitly (rather than relying on the optional key alone)
+ * so a caller can write `{ audience: undefined }` to unregister a mode this build otherwise
+ * registers: `modeRegistry` in `src/cli.ts` spreads this override over the base `modes` registry,
+ * so an *absent* key never removes an entry the base already has — only an explicit `undefined`
+ * can, and `exactOptionalPropertyTypes` refuses that value unless the type says so.
+ */
+export type ModeRegistry = Readonly<Partial<Record<SpecifiedModeName, ModeDefinition | undefined>>>;
 
 export function getMode(name: string, registry: ModeRegistry = modes): ModeDefinition {
   const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
   const mode = known === undefined ? undefined : registry[known];
   if (mode === undefined) {
-    throw new Error(`Unknown mode: ${name}. Registered modes: ${Object.keys(registry).join(', ')}`);
+    // `Object.keys` alone would list a key an override set to `undefined` to unregister a mode:
+    // the key is still present, only its value says the mode is gone.
+    const registered = Object.entries(registry)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([entryName]) => entryName);
+    throw new Error(`Unknown mode: ${name}. Registered modes: ${registered.join(', ')}`);
   }
   return mode;
 }

@@ -572,9 +572,12 @@ describe('handler mode dispatch', () => {
 
   test('a specified mode this build does not register is refused by name', async () => {
     const fixture = await fixtureEnvironment();
+    // `{}` cannot do this: `modeRegistry` spreads the override over the base registry, so an
+    // absent key never removes an entry the base already has. An explicit `undefined` is what
+    // unregisters a mode this build otherwise registers.
     const result = await runCliFacade(['audience', '--motion', 'm'], {
       ...fixture.environment,
-      modes: {},
+      modes: { audience: undefined },
     });
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain('does not register');
@@ -593,7 +596,7 @@ describe('handler mode dispatch', () => {
       consult: { mode: 'consultants', registered: true },
       forum: { mode: 'forum', registered: true },
       triage: { mode: 'triage', registered: true },
-      audience: { mode: 'audience', registered: false },
+      audience: { mode: 'audience', registered: true },
     });
     const unknown = await runCliFacade(['bogus']);
     expect(unknown.exitCode).toBe(2);
@@ -627,6 +630,7 @@ describe('handler mode dispatch', () => {
       'consultants',
       'forum',
       'triage',
+      'audience',
     ]);
   });
 

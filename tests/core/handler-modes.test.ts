@@ -99,7 +99,7 @@ function input(overrides: Partial<HandlerInput> = {}): HandlerInput {
 }
 
 describe('handler-style modes', () => {
-  test('the specified names include the eight modes; the registered names are the seven this build carries', () => {
+  test('the specified names include the eight modes; the registered names are the eight this build carries', () => {
     expect([...SPECIFIED_MODE_NAMES]).toEqual([
       'committee',
       'second-opinion',
@@ -118,22 +118,34 @@ describe('handler-style modes', () => {
       'consultants',
       'forum',
       'triage',
+      'audience',
     ]);
   });
 
-  test('the shipped modes are runner modes and a handler mode is told apart by kind', () => {
+  test('the runner modes and the handler modes are told apart by kind', () => {
     expect(isHandlerMode(modes.committee)).toBe(false);
     expect(isHandlerMode(modes['second-opinion'])).toBe(false);
+    expect(isHandlerMode(modes.audience)).toBe(true);
     expect(isHandlerMode(fixture)).toBe(true);
     expect(getRunnerMode('committee').name).toBe('committee');
   });
 
-  test('a registry override makes a specified mode resolvable without touching the built-in one', () => {
+  test('a registry override replaces a registered mode without touching the built-in one', () => {
     const registry: ModeRegistry = { ...modes, audience: fixture };
     expect(getMode('audience', registry)).toBe(fixture);
-    expect(() => getMode('audience')).toThrow(/Unknown mode: audience.*committee, second-opinion/);
+    expect(getMode('audience')).toBe(modes.audience);
+    // `forum` is specified in docs/modes.md and not registered by this build, which is what the
+    // refusal by name is for; `audience` is registered now and can no longer stand in for it.
+    expect(() => getMode('nope')).toThrow(/Unknown mode: nope.*committee, second-opinion/);
     expect(() => getRunnerMode('audience', registry)).toThrow(/handler mode/);
     expect(getRunnerMode('second-opinion', registry).pattern).toBe('parallel');
+  });
+
+  test('an unregistering override does not name the unregistered mode as registered', () => {
+    const registry: ModeRegistry = { ...modes, audience: undefined };
+    expect(() => getMode('nope', registry)).toThrow(
+      /^Unknown mode: nope\. Registered modes: committee, second-opinion, advisor, ideation, consultants, forum, triage$/,
+    );
   });
 
   test('a handler returns an outcome whose output satisfies its own schema', async () => {

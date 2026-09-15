@@ -89,7 +89,7 @@ function options(overrides: Partial<SessionOptions> = {}): SessionOptions {
 }
 
 describe('modes registry', () => {
-  test('registers committee, second opinion, the advisor, ideation, consultants, forum and triage', () => {
+  test('registers committee, second opinion, the advisor, ideation, consultants, forum, triage and audience', () => {
     expect([...MODE_NAMES]).toEqual([
       'committee',
       'second-opinion',
@@ -98,6 +98,7 @@ describe('modes registry', () => {
       'consultants',
       'forum',
       'triage',
+      'audience',
     ]);
     expect(modes.committee.pattern).toBe('rounds');
     expect(modes['second-opinion'].pattern).toBe('parallel');
@@ -125,13 +126,17 @@ describe('modes registry', () => {
     expect(modes.triage.pattern).toBe('parallel');
     expect(modes.triage.spend.policy).toBe('never-metered');
     expect(modes.triage.spend.defaultCap(2, 1)).toBe(0);
+    expect(modes.audience.kind).toBe('handler');
+    expect(modes.audience.pattern).toBe('parallel');
+    expect(modes.audience.spend.policy).toBe('never-metered');
+    expect(modes.audience.spend.defaultCap(24, 1)).toBe(0);
   });
 
   test('an unknown mode fails with the whole registered list', () => {
-    // `consultants`, `forum` and `triage` are registered now, so the example is a mode docs/modes.md specifies
-    // and this build does not carry.
-    expect(() => getMode('audience')).toThrow(
-      /^Unknown mode: audience\. Registered modes: committee, second-opinion, advisor, ideation, consultants, forum, triage$/,
+    // Every mode docs/modes.md specifies is registered now, so the example is a name nothing
+    // specifies.
+    expect(() => getMode('nope')).toThrow(
+      /^Unknown mode: nope\. Registered modes: committee, second-opinion, advisor, ideation, consultants, forum, triage, audience$/,
     );
   });
 

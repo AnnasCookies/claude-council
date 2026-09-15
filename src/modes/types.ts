@@ -30,6 +30,7 @@ export const MODE_NAMES = [
   'consultants',
   'forum',
   'triage',
+  'audience',
 ] as const;
 export type ModeName = (typeof MODE_NAMES)[number];
 

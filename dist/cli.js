@@ -1568,7 +1568,7 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 // src/cli.ts
 import { createHash as createHash6 } from "crypto";
 import { readdir as readdir3 } from "fs/promises";
-import { dirname as dirname3, isAbsolute as isAbsolute13, join as join8, resolve as resolve15 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute15, join as join8, resolve as resolve17 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -23556,6 +23556,357 @@ var advisor = {
   handle
 };
 
+// src/modes/audience/draft.ts
+import { readFile, stat } from "fs/promises";
+import { isAbsolute as isAbsolute8, resolve as resolve10 } from "path";
+var MAX_DRAFT_BYTES = 256 * 1024;
+async function readDraft(path, cwd) {
+  const given = path.trim();
+  if (given.length === 0)
+    throw new Error("--draft needs a path");
+  const absolute = isAbsolute8(given) ? resolve10(given) : resolve10(cwd, given);
+  const stats = await stat(absolute).catch(() => null);
+  if (stats === null)
+    throw new Error(`No draft found at ${given}`);
+  if (!stats.isFile())
+    throw new Error(`The draft at ${given} is not a file`);
+  if (stats.size > MAX_DRAFT_BYTES) {
+    throw new Error(`The draft at ${given} is ${stats.size} bytes; the limit is ${MAX_DRAFT_BYTES} bytes`);
+  }
+  const bytes = new Uint8Array(await readFile(absolute));
+  const text = new TextDecoder().decode(bytes);
+  if (text.trim().length === 0)
+    throw new Error(`The draft at ${given} is empty`);
+  return { path: given, sha256: sha256Hex(bytes), text };
+}
+
+// src/modes/audience/personas.ts
+import { readFile as readFile2, stat as stat2 } from "fs/promises";
+import { isAbsolute as isAbsolute9, resolve as resolve11 } from "path";
+var MAX_PERSONAS = 24;
+var MAX_PERSONA_FILE_BYTES = 64 * 1024;
+var PersonaListSchema = exports_external.array(PanelLensSchema).min(1, "At least one persona is required").max(MAX_PERSONAS, `At most ${MAX_PERSONAS} personas are allowed`).superRefine((personas, context) => {
+  const seen = new Set;
+  for (const [index, persona] of personas.entries()) {
+    if (seen.has(persona.name)) {
+      context.addIssue({
+        code: "custom",
+        path: [index, "name"],
+        message: `Duplicate persona: ${persona.name}`
+      });
+    }
+    seen.add(persona.name);
+  }
+});
+function defaultPersonaDescription(name) {
+  return `You are the "${name}" reader of this draft. React as that reader would, in that reader's voice.`;
+}
+function parsePersonaList(value) {
+  const entries = value.split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+  if (entries.length === 0)
+    throw new Error("--personas needs at least one persona name");
+  return PersonaListSchema.parse(entries.map((entry) => {
+    const separator = entry.indexOf(":");
+    const name = (separator === -1 ? entry : entry.slice(0, separator)).trim();
+    const description = separator === -1 ? "" : entry.slice(separator + 1).trim();
+    return {
+      name,
+      description: description.length === 0 ? defaultPersonaDescription(name) : description
+    };
+  }));
+}
+function parsePersonaFile(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("--personas-file must contain a JSON array of { name, description } entries");
+  }
+  return PersonaListSchema.parse(value);
+}
+async function readPersonaFile(path, cwd) {
+  const given = path.trim();
+  if (given.length === 0)
+    throw new Error("--personas-file needs a path");
+  const absolute = isAbsolute9(given) ? resolve11(given) : resolve11(cwd, given);
+  const stats = await stat2(absolute).catch(() => null);
+  if (stats === null)
+    throw new Error(`No persona file found at ${given}`);
+  if (!stats.isFile())
+    throw new Error(`The persona file at ${given} is not a file`);
+  if (stats.size > MAX_PERSONA_FILE_BYTES) {
+    throw new Error(`The persona file at ${given} is ${stats.size} bytes; the limit is ${MAX_PERSONA_FILE_BYTES} bytes`);
+  }
+  return parsePersonaFile(await readFile2(absolute, "utf8"));
+}
+
+// src/modes/audience/reaction.ts
+var MAX_QUOTE_LENGTH = 400;
+var MAX_STOPPED_AT_LENGTH = 120;
+function truncateQuote(value) {
+  const trimmed = value.trim();
+  if (trimmed.length <= MAX_QUOTE_LENGTH)
+    return trimmed;
+  const sliced = trimmed.slice(0, MAX_QUOTE_LENGTH - 1).replace(/[\uD800-\uDBFF]$/, "");
+  return `${sliced}\u2026`;
+}
+var AudienceReactionSchema = exports_external.strictObject({
+  clear: exports_external.boolean(),
+  wouldAct: exports_external.boolean(),
+  stoppedAt: exports_external.string().trim().max(MAX_STOPPED_AT_LENGTH),
+  quote: exports_external.string().trim().min(1)
+});
+var AUDIENCE_ANSWER = Object.freeze({
+  schema: AudienceReactionSchema,
+  instruction: 'Return exactly one JSON object with these keys: clear (boolean: was the draft clear to you), wouldAct (boolean: would you do what it asks), stoppedAt (string: where you stopped reading, or "the end" if you read all of it), quote (string: one or two sentences in your own voice, at most 400 characters). Do not wrap it in prose.',
+  jsonSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["clear", "wouldAct", "stoppedAt", "quote"],
+    properties: {
+      clear: { type: "boolean" },
+      wouldAct: { type: "boolean" },
+      stoppedAt: { type: "string", maxLength: MAX_STOPPED_AT_LENGTH },
+      quote: { type: "string", minLength: 1, maxLength: MAX_QUOTE_LENGTH }
+    }
+  }
+});
+function buildReactionPrompt(input) {
+  const lines = [
+    `You are one reader in an audience, and this answer carries your view alone. ${input.persona.description}`,
+    "",
+    EVIDENCE_BOUNDARY_INSTRUCTION,
+    "",
+    "Read the draft below once, as this reader, at the pace that reader would read it. You are not editing it: do not rewrite it, do not propose wording, and speak only for yourself.",
+    ""
+  ];
+  if (input.question !== undefined) {
+    lines.push("The person who shared the draft says it is meant to do this:", "", untrustedBlock("purpose", input.question), "");
+  }
+  lines.push(untrustedBlock("draft", input.draftText), "", "Answer for yourself: was it clear, would you act on it, where did you stop reading, and one or two sentences in your own voice.");
+  return lines.join(`
+`);
+}
+
+// src/modes/audience/tally.ts
+var CountSchema = exports_external.number().int().nonnegative();
+var AudienceTalliesSchema = exports_external.strictObject({
+  answered: CountSchema,
+  clear: exports_external.strictObject({ yes: CountSchema, no: CountSchema }),
+  wouldAct: exports_external.strictObject({ yes: CountSchema, no: CountSchema })
+});
+function tallyReactions(reactions) {
+  return AudienceTalliesSchema.parse({
+    answered: reactions.length,
+    clear: {
+      yes: reactions.filter((reaction) => reaction.clear).length,
+      no: reactions.filter((reaction) => !reaction.clear).length
+    },
+    wouldAct: {
+      yes: reactions.filter((reaction) => reaction.wouldAct).length,
+      no: reactions.filter((reaction) => !reaction.wouldAct).length
+    }
+  });
+}
+
+// src/modes/audience/index.ts
+var PersonaNameSchema = PanelLensSchema.shape.name;
+var NonEmptyStringSchema7 = exports_external.string().trim().min(1);
+var AudienceOutputSchema = exports_external.strictObject({
+  draft: exports_external.strictObject({
+    path: NonEmptyStringSchema7,
+    sha256: exports_external.string().regex(/^[a-f0-9]{64}$/)
+  }),
+  personas: exports_external.array(PersonaNameSchema).min(1).max(MAX_PERSONAS),
+  reactions: exports_external.array(exports_external.strictObject({
+    persona: PersonaNameSchema,
+    seat: NonEmptyStringSchema7,
+    fields: exports_external.strictObject({
+      clear: exports_external.boolean(),
+      wouldAct: exports_external.boolean(),
+      stoppedAt: exports_external.string()
+    }),
+    quote: NonEmptyStringSchema7.max(MAX_QUOTE_LENGTH)
+  })),
+  tallies: AudienceTalliesSchema
+});
+function oneFlag2(flags, name) {
+  const values = flags.get(name);
+  if (values === undefined)
+    return;
+  if (values.length !== 1)
+    throw new Error(`Option --${name} may be provided only once`);
+  return values[0];
+}
+async function resolvePersonas(input, cwd) {
+  const list = oneFlag2(input.flags, "personas");
+  const file2 = oneFlag2(input.flags, "personas-file");
+  if (list !== undefined && file2 !== undefined) {
+    throw new Error("audience takes either --personas or --personas-file, not both");
+  }
+  if (list !== undefined)
+    return parsePersonaList(list);
+  if (file2 !== undefined)
+    return readPersonaFile(file2, cwd);
+  throw new Error("audience requires --personas <list> or --personas-file <path>");
+}
+function resolveQuestion(input) {
+  const question = oneFlag2(input.flags, "question")?.trim();
+  if (question !== undefined && question.length > 0)
+    return question;
+  const motion = input.options.motion?.trim();
+  return motion === undefined || motion.length === 0 ? undefined : motion;
+}
+function hasSubscriptionRoute(registry3, family) {
+  const route = registry3[family];
+  return [route.transport, ...route.alternateTransports ?? []].some((transport) => transport !== "http");
+}
+function resolveSeating(input) {
+  const selected = input.options.providerFamilies;
+  const families = selected.filter((family) => hasSubscriptionRoute(input.context.registry, family));
+  if (families.length === 0) {
+    throw new Error("audience runs on subscription transports only; choose --providers families with a subscription route");
+  }
+  return { families, unseated: selected.filter((family) => !families.includes(family)) };
+}
+function reactionEventData(seat) {
+  const base = { persona: seat.lens, seat: seat.id, family: seat.family, status: seat.status };
+  if (seat.status === "ok") {
+    return {
+      ...base,
+      fields: {
+        clear: seat.answer.clear,
+        wouldAct: seat.answer.wouldAct,
+        stoppedAt: seat.answer.stoppedAt
+      },
+      quote: truncateQuote(seat.answer.quote)
+    };
+  }
+  return { ...base, code: seat.code, reason: seat.reason };
+}
+async function recordReactions(input, session2, draft, seats) {
+  const sessions = input.sessions;
+  if (sessions === null)
+    return [];
+  const written = new Set;
+  const draftWrite = await sessions.append("audience", session2, {
+    at: input.now(),
+    kind: "draft",
+    data: { path: draft.path, sha256: draft.sha256 }
+  });
+  for (const path of draftWrite.paths)
+    written.add(path);
+  for (const seat of seats) {
+    const write = await sessions.append("audience", session2, {
+      at: input.now(),
+      kind: "reaction",
+      data: reactionEventData(seat)
+    });
+    for (const path of write.paths)
+      written.add(path);
+  }
+  return [...written];
+}
+async function handle2(input) {
+  const cwd = input.context.cwd;
+  const personas = await resolvePersonas(input, cwd);
+  const draftPath = oneFlag2(input.flags, "draft");
+  if (draftPath === undefined)
+    throw new Error("audience requires --draft <path>");
+  const draft = await readDraft(draftPath, cwd);
+  const question = resolveQuestion(input);
+  const decision = input.guard([
+    draft.text,
+    ...question === undefined ? [] : [question],
+    ...personas.flatMap((persona) => [persona.name, persona.description])
+  ]);
+  if (decision.kind === "blocked") {
+    return {
+      kind: "blocked",
+      status: "blocked-policy",
+      message: `The draft at ${draft.path} was refused by the outbound policy: ${decision.reasonCodes.join(", ")}`,
+      decision
+    };
+  }
+  const seating = resolveSeating(input);
+  const seats = spreadSeats(seating.families, personas, input.context.registry);
+  const session2 = input.options.sessionId ?? newModeSessionId("au", input.now());
+  if (input.options.sessionId !== undefined && input.sessions !== null && await input.sessions.exists("audience", session2)) {
+    throw new Error(`An audience session log already exists at ${input.sessions.recordPath("audience", session2)}; choose another --session id`);
+  }
+  const panel2 = await runPanel({ adapters: input.adapters, context: input.context }, {
+    seats,
+    prompt: (seat) => buildReactionPrompt({
+      persona: seat.lens,
+      draftText: draft.text,
+      ...question === undefined ? {} : { question }
+    }),
+    answer: AUDIENCE_ANSWER,
+    spend: input.spend
+  });
+  const reactions = panel2.seats.flatMap((seat) => seat.status === "ok" ? [
+    {
+      persona: seat.lens,
+      seat: seat.id,
+      fields: {
+        clear: seat.answer.clear,
+        wouldAct: seat.answer.wouldAct,
+        stoppedAt: seat.answer.stoppedAt
+      },
+      quote: truncateQuote(seat.answer.quote)
+    }
+  ] : []);
+  const output = {
+    draft: { path: draft.path, sha256: draft.sha256 },
+    personas: personas.map((persona) => persona.name),
+    reactions,
+    tallies: tallyReactions(reactions.map((reaction) => reaction.fields))
+  };
+  const paths = await recordReactions(input, session2, draft, panel2.seats);
+  const degraded = [];
+  if (seating.unseated.length > 0) {
+    degraded.push(`metered-only-families-unseated: ${seating.unseated.join(", ")}`);
+  }
+  if (panel2.answered < seats.length)
+    degraded.push("missing-voices");
+  if (input.sessions === null)
+    degraded.push("records-not-kept: no records root is configured");
+  return {
+    kind: "result",
+    status: degraded.length === 0 ? "completed" : "degraded",
+    session: session2,
+    pattern: "parallel",
+    rounds: 1,
+    seats: panelEnvelopeSeats(panel2.seats),
+    output,
+    synthesis: null,
+    dissent: null,
+    unanimous: false,
+    degraded,
+    spend: panel2.spend,
+    record: {
+      session: input.sessions === null ? null : input.sessions.recordPath("audience", session2),
+      paths
+    }
+  };
+}
+var audience = {
+  kind: "handler",
+  name: "audience",
+  knobs: {
+    participants: "many cheap seats, one supplied persona each",
+    pattern: "parallel",
+    aggregation: "counts of the structured fields, and verbatim attributed quotes",
+    tempo: "minutes",
+    records: "the reactions with the draft hash"
+  },
+  pattern: "parallel",
+  spend: { policy: "never-metered", defaultCap: () => 0 },
+  flags: { value: ["draft", "personas", "personas-file", "question"], boolean: [] },
+  outputSchema: AudienceOutputSchema,
+  handle: handle2
+};
+
 // src/modes/committee/index.ts
 var CommitteeOutputSchema = exports_external.strictObject({
   outcome: CouncilOutcomeSchema,
@@ -23615,8 +23966,8 @@ var committee = {
 };
 
 // src/modes/consultants/context.ts
-import { readdir as readdir2, realpath as realpath3, stat } from "fs/promises";
-import { isAbsolute as isAbsolute8, join as join7, relative as relative4, resolve as resolve10, sep as sep2 } from "path";
+import { readdir as readdir2, realpath as realpath3, stat as stat3 } from "fs/promises";
+import { isAbsolute as isAbsolute10, join as join7, relative as relative4, resolve as resolve12, sep as sep2 } from "path";
 var MAX_CONTEXT_FILE_BYTES = 65536;
 var MAX_DIRECTORY_FILES = 40;
 var MAX_DIRECTORY_DEPTH = 8;
@@ -23632,7 +23983,7 @@ function containmentError(absolute) {
 }
 function assertInside(cwd, absolute) {
   const relativePath = relative4(cwd, absolute);
-  if (relativePath.startsWith("..") || isAbsolute8(relativePath)) {
+  if (relativePath.startsWith("..") || isAbsolute10(relativePath)) {
     throw containmentError(absolute);
   }
   return relativePath;
@@ -23640,7 +23991,7 @@ function assertInside(cwd, absolute) {
 async function assertRealInside(cwd, absolute) {
   const [realCwd, realAbsolute] = await Promise.all([realpath3(cwd), realpath3(absolute)]);
   const relativePath = relative4(realCwd, realAbsolute);
-  if (relativePath.startsWith("..") || isAbsolute8(relativePath)) {
+  if (relativePath.startsWith("..") || isAbsolute10(relativePath)) {
     throw containmentError(absolute);
   }
 }
@@ -23711,9 +24062,9 @@ async function collectContext(paths, cwd) {
   const skipped = [];
   const seen = new Set;
   for (const path of paths) {
-    const absolute = isAbsolute8(path) ? resolve10(path) : resolve10(cwd, path);
+    const absolute = isAbsolute10(path) ? resolve12(path) : resolve12(cwd, path);
     assertInside(cwd, absolute);
-    const entry = await stat(absolute).catch((error51) => {
+    const entry = await stat3(absolute).catch((error51) => {
       throw new Error(`--context path not found: ${path}`, { cause: error51 });
     });
     await assertRealInside(cwd, absolute);
@@ -23747,7 +24098,7 @@ function renderContext(files, retrievedAt) {
 }
 
 // src/modes/consultants/lenses.ts
-import { isAbsolute as isAbsolute9, resolve as resolve11 } from "path";
+import { isAbsolute as isAbsolute11, resolve as resolve13 } from "path";
 var MAX_CONSULTANTS = 12;
 function catalogueLenses() {
   return roleCatalogue.flatMap((lens) => {
@@ -23769,7 +24120,7 @@ var ConsultantPersonasSchema = exports_external.array(PanelLensSchema).min(1).ma
   }
 });
 async function loadPersonas(path, cwd) {
-  const absolute = isAbsolute9(path) ? resolve11(path) : resolve11(cwd, path);
+  const absolute = isAbsolute11(path) ? resolve13(path) : resolve13(cwd, path);
   let value;
   try {
     value = await Bun.file(absolute).json();
@@ -23807,9 +24158,9 @@ function resolveLenses(names, personas) {
 }
 
 // src/modes/consultants/prompts.ts
-var NonEmptyStringSchema7 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema8 = exports_external.string().trim().min(1);
 var SYNTHESISER_LENS = "synthesiser";
-var ReportAnswerSchema = exports_external.strictObject({ report: NonEmptyStringSchema7 });
+var ReportAnswerSchema = exports_external.strictObject({ report: NonEmptyStringSchema8 });
 var REPORT_INSTRUCTION = "Return exactly one JSON object with this key: report (string, your findings in your own lens). Do not wrap it in prose and do not add any other key.";
 var REPORT_JSON_SCHEMA = {
   type: "object",
@@ -23825,9 +24176,9 @@ function reportAnswer() {
   };
 }
 var ConflictSchema = exports_external.strictObject({
-  between: exports_external.tuple([NonEmptyStringSchema7, NonEmptyStringSchema7]),
-  about: NonEmptyStringSchema7,
-  positions: exports_external.array(exports_external.strictObject({ lens: NonEmptyStringSchema7, holds: NonEmptyStringSchema7 }))
+  between: exports_external.tuple([NonEmptyStringSchema8, NonEmptyStringSchema8]),
+  about: NonEmptyStringSchema8,
+  positions: exports_external.array(exports_external.strictObject({ lens: NonEmptyStringSchema8, holds: NonEmptyStringSchema8 }))
 });
 var ConflictsAnswerSchema = exports_external.strictObject({ conflicts: exports_external.array(ConflictSchema) });
 var CONFLICTS_INSTRUCTION = "Return exactly one JSON object with this key: conflicts (an array). Each conflict is an object with these keys: between (an array of exactly two lens names from this session), about (string), positions (an array of objects with the keys lens and holds). Never resolve a conflict: do not recommend a resolution, do not say which lens should win, do not rank the lenses and do not add a key for any of that. Where the reports do not conflict, return an empty array. Do not wrap the object in prose.";
@@ -23895,7 +24246,7 @@ function conflictsAnswer(lenses) {
   });
   return { schema: schema2, instruction: CONFLICTS_INSTRUCTION, jsonSchema: CONFLICTS_JSON_SCHEMA };
 }
-var FollowUpAnswerSchema = exports_external.strictObject({ answer: NonEmptyStringSchema7 });
+var FollowUpAnswerSchema = exports_external.strictObject({ answer: NonEmptyStringSchema8 });
 var FOLLOW_UP_INSTRUCTION = "Return exactly one JSON object with this key: answer (string, your answer in your own lens). Do not wrap it in prose and do not add any other key.";
 var FOLLOW_UP_JSON_SCHEMA = {
   type: "object",
@@ -23973,40 +24324,40 @@ ${untrustedBlock("report", forwarded.report)}`);
 // src/modes/consultants/session.ts
 var CONSULTANTS_MODE = "consultants";
 var CONSULTANTS_SESSION_PREFIX = "cs";
-var NonEmptyStringSchema8 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema9 = exports_external.string().trim().min(1);
 var Sha256Schema2 = exports_external.string().regex(/^[a-f0-9]{64}$/);
 var BriefEventSchema = exports_external.strictObject({
-  question: NonEmptyStringSchema8,
-  context: exports_external.array(exports_external.strictObject({ locator: NonEmptyStringSchema8, sha256: Sha256Schema2 })),
+  question: NonEmptyStringSchema9,
+  context: exports_external.array(exports_external.strictObject({ locator: NonEmptyStringSchema9, sha256: Sha256Schema2 })),
   lenses: exports_external.array(PanelLensSchema).min(1),
   seats: exports_external.array(exports_external.strictObject({
-    lens: NonEmptyStringSchema8,
-    seat: NonEmptyStringSchema8,
+    lens: NonEmptyStringSchema9,
+    seat: NonEmptyStringSchema9,
     family: ProviderFamilySchema,
-    model: NonEmptyStringSchema8
+    model: NonEmptyStringSchema9
   })).min(1)
 });
 var ReportEventSchema = exports_external.strictObject({
-  lens: NonEmptyStringSchema8,
-  seat: NonEmptyStringSchema8,
+  lens: NonEmptyStringSchema9,
+  seat: NonEmptyStringSchema9,
   family: ProviderFamilySchema,
-  model: NonEmptyStringSchema8,
+  model: NonEmptyStringSchema9,
   status: exports_external.enum(["ok", "invalid", "skipped", "failed"]),
-  report: NonEmptyStringSchema8.nullable(),
+  report: NonEmptyStringSchema9.nullable(),
   reason: exports_external.string().nullable()
 });
 var ConflictsEventSchema = exports_external.strictObject({
-  by: NonEmptyStringSchema8.nullable(),
+  by: NonEmptyStringSchema9.nullable(),
   status: exports_external.enum(["ok", "invalid", "skipped", "failed", "unavailable"]),
   conflicts: exports_external.array(ConflictSchema),
   reason: exports_external.string().nullable()
 });
 var QaEventSchema = exports_external.strictObject({
-  to: NonEmptyStringSchema8,
-  seat: NonEmptyStringSchema8,
-  question: NonEmptyStringSchema8,
-  answer: NonEmptyStringSchema8,
-  forwarded: exports_external.array(NonEmptyStringSchema8)
+  to: NonEmptyStringSchema9,
+  seat: NonEmptyStringSchema9,
+  question: NonEmptyStringSchema9,
+  answer: NonEmptyStringSchema9,
+  forwarded: exports_external.array(NonEmptyStringSchema9)
 });
 var SpendEventSchema = exports_external.strictObject({
   command: exports_external.enum(["brief", "ask"]),
@@ -24018,19 +24369,19 @@ var SpendEventSchema = exports_external.strictObject({
 });
 var ConsultantsOutputSchema = exports_external.strictObject({
   brief: exports_external.strictObject({
-    question: NonEmptyStringSchema8,
-    context: exports_external.array(NonEmptyStringSchema8)
+    question: NonEmptyStringSchema9,
+    context: exports_external.array(NonEmptyStringSchema9)
   }),
   reports: exports_external.array(exports_external.strictObject({
-    lens: NonEmptyStringSchema8,
-    seat: NonEmptyStringSchema8,
-    report: NonEmptyStringSchema8
+    lens: NonEmptyStringSchema9,
+    seat: NonEmptyStringSchema9,
+    report: NonEmptyStringSchema9
   })),
   conflicts: exports_external.array(ConflictSchema),
   qa: exports_external.array(exports_external.strictObject({
-    to: NonEmptyStringSchema8,
-    question: NonEmptyStringSchema8,
-    answer: NonEmptyStringSchema8
+    to: NonEmptyStringSchema9,
+    question: NonEmptyStringSchema9,
+    answer: NonEmptyStringSchema9
   }))
 });
 function replaySession(events) {
@@ -24493,7 +24844,7 @@ async function followUp(input, sessions, ask) {
     record: { session: sessions.recordPath(CONSULTANTS_MODE, session2), paths: log.paths }
   };
 }
-async function handle2(input) {
+async function handle3(input) {
   const sessions = input.sessions;
   if (sessions === null) {
     throw new Error("consult keeps an open session, so it needs a records root: pass --records-root <path>");
@@ -24527,30 +24878,30 @@ var consultants = {
   flags: { value: ["ask", "context", "forward", "lens", "personas"], boolean: [] },
   acceptsPositionals: true,
   outputSchema: ConsultantsOutputSchema,
-  handle: handle2
+  handle: handle3
 };
 
 // src/modes/forum/index.ts
-import { isAbsolute as isAbsolute10, resolve as resolve12 } from "path";
+import { isAbsolute as isAbsolute12, resolve as resolve14 } from "path";
 
 // src/modes/forum/answers.ts
 var MAX_POSITION_WORDS = 8;
-var NonEmptyStringSchema9 = exports_external.string().trim().min(1);
-var PositionLabelSchema = NonEmptyStringSchema9.max(160).refine((label) => label.split(/\s+/u).filter((word) => word.length > 0).length <= MAX_POSITION_WORDS, `A position label is at most ${MAX_POSITION_WORDS} words`).refine((label) => /[\p{L}\p{N}]/u.test(label), "A position label needs at least one letter or digit");
+var NonEmptyStringSchema10 = exports_external.string().trim().min(1);
+var PositionLabelSchema = NonEmptyStringSchema10.max(160).refine((label) => label.split(/\s+/u).filter((word) => word.length > 0).length <= MAX_POSITION_WORDS, `A position label is at most ${MAX_POSITION_WORDS} words`).refine((label) => /[\p{L}\p{N}]/u.test(label), "A position label needs at least one letter or digit");
 var ForumMotionIdSchema = exports_external.string().regex(/^m-[1-9][0-9]{0,2}$/);
 var ForumStanceSchema = exports_external.enum(["hold", "revise", "rebut"]);
-var ForumMotionTextSchema = exports_external.strictObject({ text: NonEmptyStringSchema9.max(2000) });
+var ForumMotionTextSchema = exports_external.strictObject({ text: NonEmptyStringSchema10.max(2000) });
 var ForumOpeningAnswerSchema = exports_external.strictObject({
   position: PositionLabelSchema,
   stance: exports_external.literal("hold"),
-  text: NonEmptyStringSchema9.max(20000),
+  text: NonEmptyStringSchema10.max(20000),
   motion: ForumMotionTextSchema.optional()
 });
 var ForumAnswerSchema = exports_external.strictObject({
   position: PositionLabelSchema,
   stance: ForumStanceSchema,
-  text: NonEmptyStringSchema9.max(20000),
-  inReplyTo: NonEmptyStringSchema9.max(200).nullable(),
+  text: NonEmptyStringSchema10.max(20000),
+  inReplyTo: NonEmptyStringSchema10.max(200).nullable(),
   motion: ForumMotionTextSchema.optional(),
   supports: exports_external.array(ForumMotionIdSchema).max(64).optional(),
   opposes: exports_external.array(ForumMotionIdSchema).max(64).optional()
@@ -24609,29 +24960,29 @@ var ForumOutputSchema = exports_external.strictObject({
   rounds: exports_external.array(exports_external.strictObject({
     n: exports_external.number().int().min(1).max(MAX_ENVELOPE_ROUNDS),
     positions: exports_external.array(exports_external.strictObject({
-      seat: NonEmptyStringSchema9,
+      seat: NonEmptyStringSchema10,
       stance: ForumStanceSchema,
-      text: NonEmptyStringSchema9,
-      inReplyTo: NonEmptyStringSchema9.nullable()
+      text: NonEmptyStringSchema10,
+      inReplyTo: NonEmptyStringSchema10.nullable()
     }))
   })),
   map: exports_external.array(exports_external.strictObject({
-    position: NonEmptyStringSchema9,
-    holders: exports_external.array(NonEmptyStringSchema9).min(1)
+    position: NonEmptyStringSchema10,
+    holders: exports_external.array(NonEmptyStringSchema10).min(1)
   })),
   moved: exports_external.array(exports_external.strictObject({
-    seat: NonEmptyStringSchema9,
+    seat: NonEmptyStringSchema10,
     round: exports_external.number().int().min(2).max(MAX_ENVELOPE_ROUNDS),
-    from: NonEmptyStringSchema9,
-    to: NonEmptyStringSchema9,
-    why: NonEmptyStringSchema9
+    from: NonEmptyStringSchema10,
+    to: NonEmptyStringSchema10,
+    why: NonEmptyStringSchema10
   })),
   motions: exports_external.array(exports_external.strictObject({
     id: ForumMotionIdSchema,
-    by: NonEmptyStringSchema9,
-    text: NonEmptyStringSchema9,
-    support: exports_external.array(NonEmptyStringSchema9),
-    opposed: exports_external.array(NonEmptyStringSchema9)
+    by: NonEmptyStringSchema10,
+    text: NonEmptyStringSchema10,
+    support: exports_external.array(NonEmptyStringSchema10),
+    opposed: exports_external.array(NonEmptyStringSchema10)
   }))
 });
 function normalisePosition(label) {
@@ -24849,7 +25200,7 @@ var SuppliedPersonasSchema = exports_external.array(exports_external.strictObjec
   description: exports_external.string().trim().min(1).max(2000)
 })).min(1).max(MAX_SEATS);
 async function suppliedPersonas(path, cwd) {
-  const absolute = isAbsolute10(path) ? path : resolve12(cwd, path);
+  const absolute = isAbsolute12(path) ? path : resolve14(cwd, path);
   let value;
   try {
     value = await Bun.file(absolute).json();
@@ -24911,7 +25262,7 @@ function resolveSpend(input, seatCount, roundCount) {
     ledger: createSpendLedger(forumDefaultCap(seatCount, roundCount))
   };
 }
-async function handle3(input) {
+async function handle4(input) {
   const motion = input.options.motion;
   if (motion === undefined) {
     throw new Error('forum requires --motion "<the motion the forum argues>"');
@@ -25059,7 +25410,7 @@ var forum = {
   spend: { policy: "capped", defaultCap: forumDefaultCap },
   flags: { value: ["seats", "rounds", "lenses", "personas"], boolean: [] },
   outputSchema: ForumOutputSchema,
-  handle: handle3
+  handle: handle4
 };
 
 // src/modes/flags.ts
@@ -25286,7 +25637,7 @@ function clusterIdeas(ideas, previous) {
 }
 
 // src/modes/ideation/seats.ts
-import { isAbsolute as isAbsolute11, resolve as resolve13 } from "path";
+import { isAbsolute as isAbsolute13, resolve as resolve15 } from "path";
 var LensNameSchema2 = exports_external.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "A lens name is lower-case letters, digits and hyphens");
 function lensSlug2(name) {
   const slug = name.trim().toLowerCase().replace(/['\u2019]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -25319,7 +25670,7 @@ function assertDistinct(lenses) {
   return lenses;
 }
 async function loadPersonaLenses(path, cwd) {
-  const absolute = isAbsolute11(path) ? resolve13(path) : resolve13(cwd, path);
+  const absolute = isAbsolute13(path) ? resolve15(path) : resolve15(cwd, path);
   let value;
   try {
     value = await Bun.file(absolute).json();
@@ -25391,12 +25742,12 @@ var IDEATION_MODE = "ideation";
 var IDEATION_SESSION_PREFIX = "id";
 var PASS_EVENT_KIND = "pass";
 var CLUSTER_EVENT_KIND = "cluster";
-var NonEmptyStringSchema10 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema11 = exports_external.string().trim().min(1);
 var IdeaSchema = exports_external.strictObject({
   id: IdeaIdSchema,
-  seat: NonEmptyStringSchema10,
-  lens: NonEmptyStringSchema10,
-  text: NonEmptyStringSchema10
+  seat: NonEmptyStringSchema11,
+  lens: NonEmptyStringSchema11,
+  text: NonEmptyStringSchema11
 });
 var PassScopeSchema = exports_external.union([exports_external.literal("all"), exports_external.array(ClusterIdSchema).min(1)]);
 var IdeationPassSchema = exports_external.strictObject({
@@ -25405,7 +25756,7 @@ var IdeationPassSchema = exports_external.strictObject({
   ideas: exports_external.array(IdeaSchema)
 });
 var IdeationOutputSchema = exports_external.strictObject({
-  prompt: NonEmptyStringSchema10,
+  prompt: NonEmptyStringSchema11,
   passes: exports_external.array(IdeationPassSchema).min(1),
   clusters: exports_external.array(ClusterSchema),
   raw: exports_external.array(IdeaIdSchema)
@@ -25413,10 +25764,10 @@ var IdeationOutputSchema = exports_external.strictObject({
 var IdeationPassEventSchema = exports_external.strictObject({
   n: exports_external.number().int().min(1),
   scope: PassScopeSchema,
-  prompt: NonEmptyStringSchema10,
+  prompt: NonEmptyStringSchema11,
   ideasPerSeat: exports_external.number().int().min(1),
   seats: exports_external.array(EnvelopeSeatSchema),
-  invalid: exports_external.array(exports_external.strictObject({ seat: NonEmptyStringSchema10, raw: exports_external.string() })),
+  invalid: exports_external.array(exports_external.strictObject({ seat: NonEmptyStringSchema11, raw: exports_external.string() })),
   ideas: exports_external.array(IdeaSchema)
 });
 var IdeationClusterEventSchema = exports_external.strictObject({
@@ -25561,7 +25912,7 @@ function ideationOutput(state) {
     raw: state.ideas.map((idea) => idea.id)
   };
 }
-async function handle4(input) {
+async function handle5(input) {
   const sessions = input.sessions;
   if (sessions === null) {
     throw new Error("ideate keeps every idea from every pass, so it needs somewhere to keep them: pass --records-root <path>");
@@ -25706,18 +26057,18 @@ var ideation = {
     boolean: []
   },
   outputSchema: IdeationOutputSchema,
-  handle: handle4
+  handle: handle5
 };
 
 // src/modes/second-opinion/index.ts
-var NonEmptyStringSchema11 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema12 = exports_external.string().trim().min(1);
 var SecondOpinionOutputSchema = exports_external.strictObject({
   outcome: CouncilOutcomeSchema,
   quorum: QuorumEvaluationSchema,
   panel: exports_external.array(exports_external.strictObject({
-    seat: NonEmptyStringSchema11,
+    seat: NonEmptyStringSchema12,
     family: ProviderFamilySchema,
-    lens: NonEmptyStringSchema11,
+    lens: NonEmptyStringSchema12,
     answer: exports_external.string()
   }))
 });
@@ -25752,7 +26103,7 @@ var secondOpinion = {
 };
 
 // src/modes/triage/index.ts
-import { isAbsolute as isAbsolute12, resolve as resolve14 } from "path";
+import { isAbsolute as isAbsolute14, resolve as resolve16 } from "path";
 
 // src/modes/triage/items.ts
 var TriageItemSchema = exports_external.strictObject({
@@ -25900,24 +26251,24 @@ function routeItem(verdicts) {
 }
 
 // src/modes/triage/index.ts
-var NonEmptyStringSchema12 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema13 = exports_external.string().trim().min(1);
 var TriageUnprocessedReasonSchema = exports_external.enum(["policy", "no-seat", "no-verdict"]);
 var TriageOutputSchema = exports_external.strictObject({
-  schema: NonEmptyStringSchema12,
+  schema: NonEmptyStringSchema13,
   items: exports_external.array(exports_external.strictObject({
-    id: NonEmptyStringSchema12,
+    id: NonEmptyStringSchema13,
     verdicts: exports_external.array(exports_external.strictObject({
-      seat: NonEmptyStringSchema12,
-      class: NonEmptyStringSchema12,
-      severity: NonEmptyStringSchema12,
-      route: NonEmptyStringSchema12,
+      seat: NonEmptyStringSchema13,
+      class: NonEmptyStringSchema13,
+      severity: NonEmptyStringSchema13,
+      route: NonEmptyStringSchema13,
       confidence: exports_external.number().min(0).max(1),
-      reason: NonEmptyStringSchema12
+      reason: NonEmptyStringSchema13
     })).min(1),
     agreed: exports_external.boolean(),
-    route: NonEmptyStringSchema12
+    route: NonEmptyStringSchema13
   })),
-  unprocessed: exports_external.array(exports_external.strictObject({ id: NonEmptyStringSchema12, reason: TriageUnprocessedReasonSchema }))
+  unprocessed: exports_external.array(exports_external.strictObject({ id: NonEmptyStringSchema13, reason: TriageUnprocessedReasonSchema }))
 });
 var DEFAULT_SCHEMA_NAME = "pr-comment";
 var DEFAULT_SEATS3 = 1;
@@ -25947,7 +26298,7 @@ function integerFlag2(input, name, fallback, minimum, maximum) {
   return value;
 }
 function absolutePath(value, cwd) {
-  return isAbsolute12(value) ? resolve14(value) : resolve14(cwd, value);
+  return isAbsolute14(value) ? resolve16(value) : resolve16(cwd, value);
 }
 async function resolveDeclaredSchema(input) {
   const name = flagValue(input, "schema");
@@ -26299,13 +26650,15 @@ var modes = Object.freeze({
   ideation,
   consultants,
   forum,
-  triage
+  triage,
+  audience
 });
 function getMode(name, registry3 = modes) {
   const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
   const mode = known === undefined ? undefined : registry3[known];
   if (mode === undefined) {
-    throw new Error(`Unknown mode: ${name}. Registered modes: ${Object.keys(registry3).join(", ")}`);
+    const registered = Object.entries(registry3).filter(([, entry]) => entry !== undefined).map(([entryName]) => entryName);
+    throw new Error(`Unknown mode: ${name}. Registered modes: ${registered.join(", ")}`);
   }
   return mode;
 }
@@ -26323,8 +26676,8 @@ var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 1200000;
 var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_default.version);
-var EXECUTABLE_PATH = resolve15(import.meta.main ? Bun.main : import.meta.path);
-var KERNEL_ROOT = resolve15(dirname3(EXECUTABLE_PATH), "..");
+var EXECUTABLE_PATH = resolve17(import.meta.main ? Bun.main : import.meta.path);
+var KERNEL_ROOT = resolve17(dirname3(EXECUTABLE_PATH), "..");
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set([
@@ -26472,7 +26825,7 @@ function parseArguments(args, allowedFlags, booleanFlags = BOOLEAN_FLAGS) {
   }
   return { flags, positionals };
 }
-function oneFlag2(parsed, name) {
+function oneFlag3(parsed, name) {
   const values = parsed.flags.get(name);
   if (values === undefined)
     return;
@@ -26484,7 +26837,7 @@ function hasFlag(parsed, name) {
   return parsed.flags.has(name);
 }
 function integerFlag3(parsed, name, fallback, minimum, maximum) {
-  const raw = oneFlag2(parsed, name);
+  const raw = oneFlag3(parsed, name);
   if (raw === undefined)
     return fallback;
   const parsedValue = Number(raw);
@@ -26494,17 +26847,17 @@ function integerFlag3(parsed, name, fallback, minimum, maximum) {
   return parsedValue;
 }
 function resolvedRecordsRoot(parsed, environment) {
-  const value = oneFlag2(parsed, "records-root") ?? environment.recordsRoot;
+  const value = oneFlag3(parsed, "records-root") ?? environment.recordsRoot;
   if (value === undefined)
     return;
   if (value.trim().length === 0)
     throw new Error("Records root must not be blank");
-  const cwd = resolve15(environment.cwd ?? process.cwd());
-  return isAbsolute13(value) ? resolve15(value) : resolve15(cwd, value);
+  const cwd = resolve17(environment.cwd ?? process.cwd());
+  return isAbsolute15(value) ? resolve17(value) : resolve17(cwd, value);
 }
 async function configuredModelRegistry(parsed, environment) {
   const stateRoot = resolvedRecordsRoot(parsed, environment);
-  const explicitOverride = oneFlag2(parsed, "registry");
+  const explicitOverride = oneFlag3(parsed, "registry");
   if (explicitOverride !== undefined || environment.registry === undefined) {
     const loaded = await resolveModelRegistry({
       ...explicitOverride === undefined ? {} : { overridePath: explicitOverride },
@@ -26599,9 +26952,9 @@ async function finaliseRecordedRun(input) {
   }
 }
 function parseCaller(parsed) {
-  const callerKind = oneFlag2(parsed, "caller");
-  const harness = oneFlag2(parsed, "harness")?.trim();
-  const purpose = oneFlag2(parsed, "purpose")?.trim();
+  const callerKind = oneFlag3(parsed, "caller");
+  const harness = oneFlag3(parsed, "harness")?.trim();
+  const purpose = oneFlag3(parsed, "purpose")?.trim();
   if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
     throw new Error("--harness and --purpose require --caller human|agent");
   }
@@ -26657,10 +27010,10 @@ function generalPolicy(now) {
   });
 }
 async function loadProjectPolicyFile(parsed, environment, cwd) {
-  const policyPath = oneFlag2(parsed, "project-policy");
+  const policyPath = oneFlag3(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath2 = isAbsolute13(policyPath) ? policyPath : resolve15(cwd, policyPath);
+  const absolutePath2 = isAbsolute15(policyPath) ? policyPath : resolve17(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath2).json();
@@ -26674,10 +27027,10 @@ async function resolveProjectScope(parsed, environment, cwd, scope, now) {
   if (scope === "general" && projectPolicy !== undefined) {
     throw new Error("Project policy requires --scope project");
   }
-  if (scope === "general" && oneFlag2(parsed, "project-id") !== undefined) {
+  if (scope === "general" && oneFlag3(parsed, "project-id") !== undefined) {
     throw new Error("Project id requires --scope project");
   }
-  const projectIdValue = oneFlag2(parsed, "project-id") ?? projectPolicy?.projectId;
+  const projectIdValue = oneFlag3(parsed, "project-id") ?? projectPolicy?.projectId;
   const projectId = projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, "Project id");
   const policy = scope === "project" ? projectPolicy : generalPolicy(now);
   if (scope === "project" && projectId !== undefined && policy?.projectId !== projectId) {
@@ -26689,13 +27042,13 @@ function commandDefaults(command) {
   return command === "council" ? modes.committee.defaults : modes["second-opinion"].defaults;
 }
 function resolveBillingMode(parsed, policy) {
-  const flag = oneFlag2(parsed, "billing");
+  const flag = oneFlag3(parsed, "billing");
   if (flag !== undefined)
     return BillingModeSchema.parse(flag);
   return policy?.billingMode ?? DEFAULT_BILLING_MODE;
 }
 function reportBillingMode(parsed) {
-  const flag = oneFlag2(parsed, "billing");
+  const flag = oneFlag3(parsed, "billing");
   return flag === undefined ? DEFAULT_BILLING_MODE : BillingModeSchema.parse(flag);
 }
 async function parseRunOptions(command, parsed, environment, registry3, recordsRoot) {
@@ -26704,12 +27057,12 @@ async function parseRunOptions(command, parsed, environment, registry3, recordsR
   const now = (environment.now ?? (() => new Date().toISOString()))();
   const cwd = environment.cwd ?? process.cwd();
   const defaults = commandDefaults(command);
-  const scope = exports_external.enum(["general", "project"]).parse(oneFlag2(parsed, "scope") ?? "general");
-  const classification2 = DataClassificationSchema.parse(oneFlag2(parsed, "classification") ?? "public");
-  const motion = (oneFlag2(parsed, "motion") ?? environment.stdin ?? "").trim();
+  const scope = exports_external.enum(["general", "project"]).parse(oneFlag3(parsed, "scope") ?? "general");
+  const classification2 = DataClassificationSchema.parse(oneFlag3(parsed, "classification") ?? "public");
+  const motion = (oneFlag3(parsed, "motion") ?? environment.stdin ?? "").trim();
   if (motion.length === 0)
     throw new Error("A non-blank motion is required");
-  const impact = MotionImpactSchema.parse(oneFlag2(parsed, "impact") ?? defaults.impact);
+  const impact = MotionImpactSchema.parse(oneFlag3(parsed, "impact") ?? defaults.impact);
   const contested = hasFlag(parsed, "contested") || defaults.contested;
   const rounds = integerFlag3(parsed, "rounds", defaults.rounds, 1, 3);
   const minimumFamilies = command === "council" && parsed.flags.has("min-families") ? integerFlag3(parsed, "min-families", DEFAULT_COUNCIL_MINIMUM_FAMILIES, REDUCED_COUNCIL_MINIMUM_FAMILIES, ProviderFamilySchema.options.length) : undefined;
@@ -26723,7 +27076,7 @@ async function parseRunOptions(command, parsed, environment, registry3, recordsR
   if (significant && rounds < 2) {
     throw new Error("Significant motions require a rebuttal round");
   }
-  const refinementQuestion = oneFlag2(parsed, "refinement-question")?.trim();
+  const refinementQuestion = oneFlag3(parsed, "refinement-question")?.trim();
   if (rounds === 3 && !refinementQuestion) {
     throw new Error("Three-round execution requires --refinement-question");
   }
@@ -26734,10 +27087,10 @@ async function parseRunOptions(command, parsed, environment, registry3, recordsR
     materialDisagreement: true,
     question: refinementQuestion
   });
-  const runId = safeStorageId(oneFlag2(parsed, "run-id") ?? deterministicId("run", command, motion, now), "Run id");
-  const motionId = safeStorageId(oneFlag2(parsed, "motion-id") ?? deterministicId("motion", command, motion, now), "Motion id");
+  const runId = safeStorageId(oneFlag3(parsed, "run-id") ?? deterministicId("run", command, motion, now), "Run id");
+  const motionId = safeStorageId(oneFlag3(parsed, "motion-id") ?? deterministicId("motion", command, motion, now), "Motion id");
   const { projectId, policy } = await resolveProjectScope(parsed, environment, cwd, scope, now);
-  const providerSelection = selectProviderFamilies(oneFlag2(parsed, "providers"), registry3, policy);
+  const providerSelection = selectProviderFamilies(oneFlag3(parsed, "providers"), registry3, policy);
   const domainFlags = parsed.flags.get("domain");
   const domains = domainFlags === undefined ? inferMotionDomains(motion) : domainFlags.flatMap((value) => value.split(",")).map((domain2) => domain2.trim()).filter((domain2) => domain2.length > 0);
   const uniqueDomains = [...new Set(domains.map((domain2) => domain2.toLowerCase()))];
@@ -27031,20 +27384,20 @@ async function healthCommand(command, args, environment) {
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join8(resolve15(root), "general", "sessions");
+    return join8(resolve17(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join8(resolve15(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join8(resolve17(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
   if (parsed.positionals.length > 0)
     throw new Error(`${command} accepts options only`);
-  const root = oneFlag2(parsed, "records-root");
+  const root = oneFlag3(parsed, "records-root");
   if (root === undefined)
     throw new Error(`${command} requires --records-root`);
-  const scope = exports_external.enum(["general", "project"]).parse(oneFlag2(parsed, "scope") ?? "general");
-  const sessionsDirectory = recordsDirectory(root, scope, oneFlag2(parsed, "project-id"));
+  const scope = exports_external.enum(["general", "project"]).parse(oneFlag3(parsed, "scope") ?? "general");
+  const sessionsDirectory = recordsDirectory(root, scope, oneFlag3(parsed, "project-id"));
   if (command === "jobs") {
     let names;
     try {
@@ -27059,7 +27412,7 @@ async function storedSessionCommand(command, args) {
     sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     return output(0, { schemaVersion: SCHEMA_VERSION, sessions });
   }
-  const runIdValue = oneFlag2(parsed, "run-id");
+  const runIdValue = oneFlag3(parsed, "run-id");
   if (runIdValue === undefined)
     throw new Error(`${command} requires --run-id`);
   const runId = safeStorageId(runIdValue, "Run id");
@@ -27080,7 +27433,7 @@ async function storedSessionCommand(command, args) {
     });
   }
   const store2 = CouncilStore.open(root);
-  const states = await store2.readDecisionStates(scope, scope === "project" ? safeStorageId(oneFlag2(parsed, "project-id"), "Project id") : undefined);
+  const states = await store2.readDecisionStates(scope, scope === "project" ? safeStorageId(oneFlag3(parsed, "project-id"), "Project id") : undefined);
   const current = states.find((candidate) => candidate.runId === runId);
   return output(0, {
     schemaVersion: SCHEMA_VERSION,
@@ -27102,15 +27455,15 @@ async function migrationCommand(args, environment) {
   }
   const action = parsed.positionals[0];
   if (action === "plan") {
-    const root = oneFlag2(parsed, "root");
-    const destination = oneFlag2(parsed, "output");
+    const root = oneFlag3(parsed, "root");
+    const destination = oneFlag3(parsed, "output");
     if (root === undefined || destination === undefined) {
       throw new Error("migrate-general plan requires --root and --output");
     }
-    const sourceRelativePath = oneFlag2(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join8(resolve15(root), sourceRelativePath)).text();
-    const rulesPath = oneFlag2(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve15(rulesPath)).json());
+    const sourceRelativePath = oneFlag3(parsed, "source") ?? "general/ledger.md";
+    const sourceContent = await Bun.file(join8(resolve17(root), sourceRelativePath)).text();
+    const rulesPath = oneFlag3(parsed, "rules");
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve17(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -27118,21 +27471,21 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve15(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve17(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve15(destination),
+      output: resolve17(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
   }
   if (action === "apply") {
-    const planPath = oneFlag2(parsed, "plan");
+    const planPath = oneFlag3(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve15(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve17(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }
@@ -27150,11 +27503,11 @@ async function adjudicateCommand(args, environment) {
       optional: ["--scope", "--project-id", "--followed-seats", "--set-aside-seats"]
     });
   }
-  const recordsRoot = oneFlag2(parsed, "records-root");
+  const recordsRoot = oneFlag3(parsed, "records-root");
   if (recordsRoot === undefined)
     throw new Error("adjudicate requires --records-root");
-  const scope = CouncilScopeSchema.parse(oneFlag2(parsed, "scope") ?? "general");
-  const projectIdValue = oneFlag2(parsed, "project-id");
+  const scope = CouncilScopeSchema.parse(oneFlag3(parsed, "scope") ?? "general");
+  const projectIdValue = oneFlag3(parsed, "project-id");
   if (scope === "general" && projectIdValue !== undefined) {
     throw new Error("Project id requires --scope project");
   }
@@ -27162,13 +27515,13 @@ async function adjudicateCommand(args, environment) {
     throw new Error("Project scope requires --project-id");
   }
   const projectId = projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, "Project id");
-  const runIdValue = oneFlag2(parsed, "run-id");
+  const runIdValue = oneFlag3(parsed, "run-id");
   if (runIdValue === undefined)
     throw new Error("adjudicate requires --run-id");
   const runId = safeStorageId(runIdValue, "Run id");
-  const decision = oneFlag2(parsed, "decision");
-  const rationale = oneFlag2(parsed, "rationale");
-  const authorisedBy = oneFlag2(parsed, "authorised-by");
+  const decision = oneFlag3(parsed, "decision");
+  const rationale = oneFlag3(parsed, "rationale");
+  const authorisedBy = oneFlag3(parsed, "authorised-by");
   if (decision === undefined || rationale === undefined || authorisedBy === undefined) {
     throw new Error("adjudicate requires --decision, --rationale and --authorised-by");
   }
@@ -27199,7 +27552,7 @@ async function adjudicateCommand(args, environment) {
   const title = decision.replace(/[\r\n]+/g, " ").trim().slice(0, 200);
   const written = [];
   if (state.status === "degraded") {
-    const acceptanceRationale = oneFlag2(parsed, "acceptance-rationale");
+    const acceptanceRationale = oneFlag3(parsed, "acceptance-rationale");
     if (!hasFlag(parsed, "accept-degraded") || acceptanceRationale === undefined) {
       throw new Error(`Run ${runId} is degraded; ruling on it requires --accept-degraded and --acceptance-rationale`);
     }
@@ -27213,7 +27566,7 @@ async function adjudicateCommand(args, environment) {
     };
     written.push(...(await store2.appendChairAcceptance(scope === "general" ? { ...acceptanceBase, scope: "general" } : { ...acceptanceBase, scope: "project", projectId })).paths);
   }
-  const rulingId = safeStorageId(oneFlag2(parsed, "ruling-id") ?? deterministicId("ruling", "adjudicate", runId, now), "Ruling id");
+  const rulingId = safeStorageId(oneFlag3(parsed, "ruling-id") ?? deterministicId("ruling", "adjudicate", runId, now), "Ruling id");
   const rulingBase = {
     rulingId,
     runId,
@@ -27228,7 +27581,7 @@ async function adjudicateCommand(args, environment) {
     createdAt: now
   };
   written.push(...(await store2.appendChairRuling(scope === "general" ? { ...rulingBase, scope: "general" } : { ...rulingBase, scope: "project", projectId })).paths);
-  const resolutionId = safeStorageId(oneFlag2(parsed, "resolution-id") ?? deterministicId("resolution", "adjudicate", runId, now), "Resolution id");
+  const resolutionId = safeStorageId(oneFlag3(parsed, "resolution-id") ?? deterministicId("resolution", "adjudicate", runId, now), "Resolution id");
   const resolutionBase = {
     resolutionId,
     runId,
@@ -27284,15 +27637,15 @@ async function handlerModeCommand(command, args, environment) {
   const now = environment.now ?? (() => new Date().toISOString());
   const startedAt = now();
   const cwd = environment.cwd ?? process.cwd();
-  const scope = exports_external.enum(["general", "project"]).parse(oneFlag2(parsed, "scope") ?? "general");
-  const classification2 = DataClassificationSchema.parse(oneFlag2(parsed, "classification") ?? "public");
+  const scope = exports_external.enum(["general", "project"]).parse(oneFlag3(parsed, "scope") ?? "general");
+  const classification2 = DataClassificationSchema.parse(oneFlag3(parsed, "classification") ?? "public");
   const caller = parseCaller(parsed);
   const spendCap = parseSpendCap(parsed);
   const { projectId, policy } = await resolveProjectScope(parsed, environment, cwd, scope, startedAt);
-  const providerSelection = selectProviderFamilies(oneFlag2(parsed, "providers"), registry3, policy);
-  const motionValue = oneFlag2(parsed, "motion")?.trim();
+  const providerSelection = selectProviderFamilies(oneFlag3(parsed, "providers"), registry3, policy);
+  const motionValue = oneFlag3(parsed, "motion")?.trim();
   const motion = motionValue === undefined || motionValue.length === 0 ? undefined : motionValue;
-  const sessionValue = oneFlag2(parsed, "session")?.trim();
+  const sessionValue = oneFlag3(parsed, "session")?.trim();
   const sessionKey = mode.session === "key" && sessionValue !== undefined && sessionValue.length > 0 ? sessionValue : undefined;
   const sessionId = sessionValue === undefined || mode.session === "key" ? undefined : ModeSessionIdSchema.parse(sessionValue);
   const billingMode = effectiveBillingMode(mode.spend.policy, resolveBillingMode(parsed, policy));
