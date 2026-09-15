@@ -1568,7 +1568,7 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 // src/cli.ts
 import { createHash as createHash5 } from "crypto";
 import { readdir as readdir2 } from "fs/promises";
-import { dirname as dirname2, isAbsolute as isAbsolute7, join as join6, resolve as resolve8 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute7, join as join7, resolve as resolve9 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -16829,14 +16829,14 @@ var defaultRetryPolicy = (timeoutMs) => ({
 var answerInstruction = `Return exactly one JSON object with these keys: recommendation (string), evidence (string array), assumptions (string array), risks (string array), uncertainty (string), decisiveTest (string). Do not wrap it in prose.`;
 var healthPrompt = "Return the required JSON object confirming this provider route is available.";
 var grokInlineAnswerGuard = "IMPORTANT: Respond with your complete answer as plain text directly in this conversation. Do NOT use any tools. Do NOT write, create, or edit any files. Do NOT create artifacts, reports, or documents. Do NOT reference external files. Provide your entire response inline as text.";
-function structuredPrompt(prompt) {
-  return `${answerInstruction}
+function structuredPrompt(prompt, contract) {
+  return `${contract.instruction}
 
 ${prompt}`;
 }
 var claudeAnswerFormatGuard = "Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string. Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.";
-function claudeStructuredPrompt(prompt) {
-  return `${answerInstruction}
+function claudeStructuredPrompt(prompt, contract) {
+  return `${contract.instruction}
 ${claudeAnswerFormatGuard}
 
 ${prompt}`;
@@ -16895,9 +16895,18 @@ function serialiseUnknown(value) {
 }
 function parseAnswer(request, family, rawAnswer, retainDiagnostic = true) {
   const diagnostic = retainDiagnostic ? rawAnswer : "[invalid structured subscription answer omitted]";
+  const text = stripOuterJsonFence(scanAndRedact(rawAnswer).redacted);
+  if (request.answer !== undefined) {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      capture(request, family, "invalid-structured-answer", diagnostic);
+      return;
+    }
+    return trimmed;
+  }
   let value;
   try {
-    value = JSON.parse(stripOuterJsonFence(scanAndRedact(rawAnswer).redacted));
+    value = JSON.parse(text);
   } catch {
     capture(request, family, "invalid-structured-answer", diagnostic);
     return;
@@ -17012,9 +17021,9 @@ var openAiCompatibleDialect = (endpoint) => ({
     authorization: `Bearer ${credential}`,
     "content-type": "application/json"
   }),
-  payload: (model, prompt) => JSON.stringify({
+  payload: (model, prompt, contract) => JSON.stringify({
     model,
-    messages: [{ role: "user", content: structuredPrompt(prompt) }],
+    messages: [{ role: "user", content: structuredPrompt(prompt, contract) }],
     max_tokens: 32768
   }),
   extract: (body) => {
@@ -17039,12 +17048,12 @@ var anthropicMessagesDialect = {
     "anthropic-version": "2023-06-01",
     "content-type": "application/json"
   }),
-  payload: (model, prompt) => JSON.stringify({
+  payload: (model, prompt, contract) => JSON.stringify({
     model,
     max_tokens: 32768,
-    messages: [{ role: "user", content: structuredPrompt(prompt) }],
+    messages: [{ role: "user", content: structuredPrompt(prompt, contract) }],
     output_config: {
-      format: { type: "json_schema", schema: JSON.parse(councilAnswerJsonSchema) }
+      format: { type: "json_schema", schema: contract.jsonSchema }
     }
   }),
   extract: (body) => {
@@ -17068,11 +17077,11 @@ var geminiGenerateContentDialect = {
     "x-goog-api-key": credential,
     "content-type": "application/json"
   }),
-  payload: (_model, prompt) => JSON.stringify({
-    contents: [{ role: "user", parts: [{ text: structuredPrompt(prompt) }] }],
+  payload: (_model, prompt, contract) => JSON.stringify({
+    contents: [{ role: "user", parts: [{ text: structuredPrompt(prompt, contract) }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseJsonSchema: JSON.parse(councilAnswerJsonSchema)
+      responseJsonSchema: contract.jsonSchema
     }
   }),
   extract: (body) => {
@@ -17109,11 +17118,12 @@ function createHttpAdapter(config2, transport = nativeHttpTransport) {
       if (!credential) {
         return seatError(request, config2.family, configuredRoute.primary, "skipped", "missing-credential", `missing ${config2.credential}`, 0);
       }
+      const contract = answerContract(request);
       const invokeModel = (model2) => transport.request({
         url: config2.dialect.endpoint(model2),
         method: "POST",
         headers: config2.dialect.headers(credential),
-        body: config2.dialect.payload(model2, request.prompt)
+        body: config2.dialect.payload(model2, request.prompt, contract)
       }, defaultRetryPolicy(request.context.timeoutMs));
       let model = configuredRoute.primary;
       let providerResult = await invokeModel(model);
@@ -17267,7 +17277,7 @@ var GrokResultEventSchema = exports_external.object({
   session_id: exports_external.string().min(1),
   total_cost_usd: exports_external.number().nonnegative().optional()
 });
-var councilAnswerJsonSchema = JSON.stringify({
+var councilAnswerJsonSchema = {
   type: "object",
   additionalProperties: false,
   required: ["recommendation", "evidence", "assumptions", "risks", "uncertainty", "decisiveTest"],
@@ -17279,7 +17289,14 @@ var councilAnswerJsonSchema = JSON.stringify({
     uncertainty: { type: "string", minLength: 1 },
     decisiveTest: { type: "string", minLength: 1 }
   }
+};
+var COUNCIL_ANSWER_CONTRACT = Object.freeze({
+  instruction: answerInstruction,
+  jsonSchema: councilAnswerJsonSchema
 });
+function answerContract(request) {
+  return request.answer ?? COUNCIL_ANSWER_CONTRACT;
+}
 function skipBenignNotices(renderedMessages) {
   const benignNotice = /^(?:warning|note|notice|info): [^\n]*$/i;
   const lines = renderedMessages.split(`
@@ -17294,7 +17311,7 @@ function skipBenignNotices(renderedMessages) {
 function parseFailure(code, actualModel) {
   return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
 }
-function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt) {
+function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt, contract) {
   const normalised = stderr.replace(/\r\n/g, `
 `);
   const userPrefix = `
@@ -17359,7 +17376,7 @@ ${answerMarker}`).map((value) => value.trim());
     } catch {
       return parseFailure("identity-unverified", actualModel);
     }
-    if (!CouncilAnswerSchema.safeParse(value).success) {
+    if (contract === COUNCIL_ANSWER_CONTRACT && !CouncilAnswerSchema.safeParse(value).success) {
       return parseFailure("identity-unverified", actualModel);
     }
   }
@@ -17599,7 +17616,8 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
       if (!isAbsolute2(executable)) {
         return seatError(request, config2.family, configuredRoute.primary, "skipped", "unsafe-transport", `${config2.executableName} executable is not absolute`, 0);
       }
-      const result = await transport.run(config2.request(executable, configuredRoute, request.prompt, request.context.timeoutMs));
+      const contract = answerContract(request);
+      const result = await transport.run(config2.request(executable, configuredRoute, request.prompt, request.context.timeoutMs, contract));
       if (result.status !== "ok") {
         const quota = quotaExhaustion(result.stderr);
         if (quota !== undefined) {
@@ -17609,7 +17627,7 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
         capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
       }
-      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt), configuredRoute.primary);
+      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt, contract), configuredRoute.primary, contract);
       if (output.status === "failed") {
         capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
@@ -17665,8 +17683,8 @@ function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecuta
     family: "openai",
     executableName: "codex",
     requestedEffort: codexReasoningEffort,
-    request: (executable, route, prompt, timeoutMs) => {
-      const councilPrompt = structuredPrompt(prompt);
+    request: (executable, route, prompt, timeoutMs, contract) => {
+      const councilPrompt = structuredPrompt(prompt, contract);
       return {
         executable,
         args: [
@@ -17727,11 +17745,11 @@ function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecuta
         cwd: tmpdir(),
         files: {
           "council-prompt.txt": councilPrompt,
-          "council-answer-schema.json": councilAnswerJsonSchema
+          "council-answer-schema.json": JSON.stringify(contract.jsonSchema)
         }
       };
     },
-    output: extractCodexOutput
+    output: (stdout, workingDirectory, stderr, prompt, _requestedModel, contract) => extractCodexOutput(stdout, workingDirectory, stderr, prompt, contract)
   }, transport, resolveExecutable);
 }
 function executableOnPath(name, env) {
@@ -17754,7 +17772,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
     family: "google",
     executableName: "agy",
     requestedEffort: agyReasoningEffort,
-    request: (executable, route, prompt, timeoutMs) => ({
+    request: (executable, route, prompt, timeoutMs, contract) => ({
       executable,
       args: [
         "--sandbox",
@@ -17765,7 +17783,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
         "--output-format",
         "stream-json",
         "--json-schema",
-        councilAnswerJsonSchema,
+        JSON.stringify(contract.jsonSchema),
         "--model",
         route.primary,
         "--print-timeout",
@@ -17777,7 +17795,7 @@ function createGoogleSubscriptionAdapter(transport = nativeCliTransport, resolve
       timeoutMs,
       cwd: tmpdir(),
       files: {
-        "council-prompt.txt": structuredPrompt(prompt),
+        "council-prompt.txt": structuredPrompt(prompt, contract),
         ...stagedAgyCredential(),
         ".gemini/antigravity-cli/settings.json": (workingDirectory) => JSON.stringify({
           enableTelemetry: false,
@@ -17825,10 +17843,10 @@ function createXaiSubscriptionAdapter(transport = nativeCliTransport, resolveExe
     family: "xai",
     executableName: "grok",
     requestedEffort: grokReasoningEffort,
-    request: (executable, _route, prompt, timeoutMs) => {
+    request: (executable, _route, prompt, timeoutMs, contract) => {
       const councilPrompt = `${grokInlineAnswerGuard}
 
-${structuredPrompt(prompt)}`;
+${structuredPrompt(prompt, contract)}`;
       const override = modelOverride()?.trim();
       return {
         executable,
@@ -18071,10 +18089,17 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
         "--tools",
         ""
       ];
-      const stdin = claudeStructuredPrompt(request.prompt);
+      const contract = answerContract(request);
+      const stdin = claudeStructuredPrompt(request.prompt, contract);
       let result = await transport.run({
         executable,
-        args: [...baseArgs, "--json-schema", councilAnswerJsonSchema, "--output-format", "json"],
+        args: [
+          ...baseArgs,
+          "--json-schema",
+          JSON.stringify(contract.jsonSchema),
+          "--output-format",
+          "json"
+        ],
         stdin,
         timeoutMs: request.context.timeoutMs,
         cwd: tmpdir()
@@ -18237,7 +18262,7 @@ var EnvelopeSeatSchema = exports_external.strictObject({
   lens: NonEmptyStringSchema2,
   transport: exports_external.enum(["subscription", "api"]).nullable(),
   fallback: exports_external.boolean(),
-  status: exports_external.enum(["ok", "skipped", "failed", "timed-out", "cancelled"]),
+  status: exports_external.enum(["ok", "skipped", "failed", "timed-out", "cancelled", "invalid"]),
   reason: exports_external.string().nullable()
 });
 var EnvelopeRecordSchema = exports_external.strictObject({
@@ -18319,18 +18344,36 @@ function spendFromRounds(rounds, input) {
   };
 }
 function buildEnvelope(input) {
+  if ("assignments" in input) {
+    return ResultEnvelopeSchema.parse({
+      schemaVersion: 1,
+      mode: input.mode,
+      session: input.session,
+      caller: input.caller,
+      pattern: input.pattern,
+      rounds: input.rounds.length,
+      seats: envelopeSeats({ assignments: input.assignments, rounds: input.rounds }),
+      output: input.output,
+      synthesis: null,
+      dissent: null,
+      unanimous: detectUnanimity(input.rounds),
+      spend: input.spend,
+      degraded: [...input.degraded],
+      record: input.record
+    });
+  }
   return ResultEnvelopeSchema.parse({
     schemaVersion: 1,
     mode: input.mode,
     session: input.session,
     caller: input.caller,
     pattern: input.pattern,
-    rounds: input.rounds.length,
-    seats: envelopeSeats({ assignments: input.assignments, rounds: input.rounds }),
+    rounds: input.rounds,
+    seats: [...input.seats],
     output: input.output,
-    synthesis: null,
-    dissent: null,
-    unanimous: detectUnanimity(input.rounds),
+    synthesis: input.synthesis,
+    dissent: input.dissent === null ? null : [...input.dissent],
+    unanimous: input.unanimous,
     spend: input.spend,
     degraded: [...input.degraded],
     record: input.record
@@ -19620,6 +19663,32 @@ async function executePattern(pattern, runner, input) {
       return executeStreaming();
   }
 }
+// src/substrate/patterns/panel.ts
+var LensNameSchema = exports_external.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "A lens name is 1 to 64 characters of letters, digits, dot, underscore or hyphen");
+var PanelLensSchema = exports_external.strictObject({
+  name: LensNameSchema,
+  description: exports_external.string().trim().min(1)
+});
+var PanelSeatSpecSchema = exports_external.strictObject({
+  id: exports_external.string().min(1),
+  family: ProviderFamilySchema,
+  model: exports_external.string().min(1),
+  lens: PanelLensSchema
+});
+var PanelSeatSpecsSchema = exports_external.array(PanelSeatSpecSchema).min(1).superRefine((seats, context) => {
+  const seen = new Set;
+  for (const [index, seat] of seats.entries()) {
+    if (seen.has(seat.id)) {
+      context.addIssue({
+        code: "custom",
+        path: [index, "id"],
+        message: `Duplicate seat identifier: ${seat.id}`
+      });
+    }
+    seen.add(seat.id);
+  }
+});
+var UntrustedTagSchema = exports_external.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
 // src/substrate/policy/data-guard.ts
 import { createHash as createHash3 } from "crypto";
 var NonEmptyStringSchema3 = exports_external.string().min(1);
@@ -22153,19 +22222,125 @@ async function writeMinutes(input) {
   await writeTextAtomically(path, renderMinutes(input), { replace: false });
   return path;
 }
+// src/substrate/records/mode-sessions.ts
+import { randomBytes } from "crypto";
+import { dirname as dirname2, join as join6, resolve as resolve8 } from "path";
+var TimestampSchema7 = exports_external.string().datetime({ offset: true });
+var ProjectIdSchema = exports_external.string().max(128).regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/, "must be a safe storage identifier");
+var ModeSessionPrefixSchema = exports_external.string().regex(/^[a-z]{1,8}$/, "A session prefix is one to eight lower-case letters");
+var ModeSessionIdSchema = exports_external.string().regex(/^[a-z]{1,8}-\d{4}-\d{2}-\d{2}-[a-f0-9]{6}$/, "A session id is <prefix>-<yyyy-mm-dd>-<six hex characters>");
+var ModeSessionModeSchema = exports_external.string().regex(/^[a-z][a-z-]{0,31}$/, "A mode name is lower-case letters and hyphens");
+var ModeSessionEventSchema = exports_external.strictObject({
+  at: TimestampSchema7,
+  kind: exports_external.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "An event kind is a lower-case slug"),
+  data: exports_external.unknown()
+});
+var ModeSessionScopeSchema = exports_external.discriminatedUnion("scope", [
+  exports_external.strictObject({ scope: exports_external.literal("general") }),
+  exports_external.strictObject({ scope: exports_external.literal("project"), projectId: ProjectIdSchema })
+]);
+function newModeSessionId(prefix, now = new Date().toISOString()) {
+  const safePrefix = ModeSessionPrefixSchema.parse(prefix);
+  const day = TimestampSchema7.parse(now).slice(0, 10);
+  return ModeSessionIdSchema.parse(`${safePrefix}-${day}-${randomBytes(3).toString("hex")}`);
+}
+function parseEvents(text, path) {
+  if (text.length === 0)
+    return [];
+  if (!text.endsWith(`
+`)) {
+    throw new Error(`Torn mode session log (no trailing newline): ${path}`);
+  }
+  return text.slice(0, -1).split(`
+`).map((line, index) => {
+    let value;
+    try {
+      value = JSON.parse(line);
+    } catch (error51) {
+      throw new Error(`Invalid mode session event JSON at line ${index + 1}: ${path}`, {
+        cause: error51
+      });
+    }
+    const parsed = ModeSessionEventSchema.safeParse(value);
+    if (!parsed.success) {
+      throw new Error(`Invalid mode session event at line ${index + 1}: ${path}`, {
+        cause: parsed.error
+      });
+    }
+    return parsed.data;
+  });
+}
+
+class ModeSessionStore {
+  root;
+  scope;
+  constructor(root, scope) {
+    this.root = root;
+    this.scope = scope;
+  }
+  static open(root, scope = { scope: "general" }) {
+    return new ModeSessionStore(resolve8(exports_external.string().trim().min(1).parse(root)), ModeSessionScopeSchema.parse(scope));
+  }
+  newSessionId(prefix, now) {
+    return newModeSessionId(prefix, now);
+  }
+  directory(mode) {
+    const safeMode = ModeSessionModeSchema.parse(mode);
+    const scoped = this.scope.scope === "general" ? scopeDirectory(this.root, "general") : scopeDirectory(this.root, "project", this.scope.projectId);
+    return join6(scoped, "modes", safeMode);
+  }
+  absolutePath(mode, sessionId) {
+    return join6(this.directory(mode), `${ModeSessionIdSchema.parse(sessionId)}.jsonl`);
+  }
+  recordPath(mode, sessionId) {
+    const safeMode = ModeSessionModeSchema.parse(mode);
+    const safeId = ModeSessionIdSchema.parse(sessionId);
+    const scopePart = this.scope.scope === "general" ? "general" : `projects/${this.scope.projectId}`;
+    return `${scopePart}/modes/${safeMode}/${safeId}.jsonl`;
+  }
+  async exists(mode, sessionId) {
+    return Bun.file(this.absolutePath(mode, sessionId)).exists();
+  }
+  async read(mode, sessionId) {
+    const path = this.absolutePath(mode, sessionId);
+    const file2 = Bun.file(path);
+    if (!await file2.exists()) {
+      throw new Error(`Unknown mode session: ${this.recordPath(mode, sessionId)}`);
+    }
+    return parseEvents(await file2.text(), path);
+  }
+  async append(mode, sessionId, event) {
+    const record2 = ModeSessionEventSchema.parse(event);
+    const path = this.absolutePath(mode, sessionId);
+    return withScopeWriteLock(dirname2(path), async () => {
+      const file2 = Bun.file(path);
+      const existing = await file2.exists() ? await file2.text() : "";
+      parseEvents(existing, path);
+      const content = `${existing}${JSON.stringify(record2)}
+`;
+      await writeTextAtomically(path, content, {
+        replace: true,
+        validate: (text) => {
+          parseEvents(text, path);
+        }
+      });
+      return { paths: [path] };
+    });
+  }
+}
 // src/substrate/records/project-id.ts
 var NonEmptyStringSchema6 = exports_external.string().trim().min(1);
-var ProjectIdSchema = exports_external.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?-[a-f0-9]{12}$/);
+var ProjectIdSchema2 = exports_external.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?-[a-f0-9]{12}$/);
 var RemoteProjectIdentitySchema = exports_external.strictObject({
   source: exports_external.literal("remote"),
-  projectId: ProjectIdSchema,
+  projectId: ProjectIdSchema2,
   displayName: NonEmptyStringSchema6,
   root: NonEmptyStringSchema6,
   canonicalRemote: NonEmptyStringSchema6
 });
 var PathProjectIdentitySchema = exports_external.strictObject({
   source: exports_external.literal("path"),
-  projectId: ProjectIdSchema,
+  projectId: ProjectIdSchema2,
   displayName: NonEmptyStringSchema6,
   root: NonEmptyStringSchema6
 });
@@ -22451,7 +22626,7 @@ var secondOpinion = {
   },
   output({ result }) {
     const first = result.rounds[0];
-    const panel = first === undefined ? [] : first.responses.flatMap((response) => response.status === "ok" ? [
+    const panel2 = first === undefined ? [] : first.responses.flatMap((response) => response.status === "ok" ? [
       {
         seat: response.seatId,
         family: response.provider,
@@ -22459,24 +22634,46 @@ var secondOpinion = {
         answer: response.answer
       }
     ] : []);
-    return { outcome: result.outcome, quorum: result.quorum, panel };
+    return { outcome: result.outcome, quorum: result.quorum, panel: panel2 };
   }
 };
 
 // src/modes/types.ts
-var MODE_NAMES = ["committee", "second-opinion"];
+var SPECIFIED_MODE_NAMES = [
+  "committee",
+  "second-opinion",
+  "advisor",
+  "ideation",
+  "consultants",
+  "forum",
+  "triage",
+  "audience"
+];
+function isHandlerMode(mode) {
+  return mode.kind === "handler";
+}
 
 // src/modes/index.ts
-var modes = Object.freeze({
-  committee,
-  "second-opinion": secondOpinion
-});
-function getMode(name) {
-  const mode = modes[name];
-  if (mode === undefined) {
-    throw new Error(`Unknown mode: ${name}. Registered modes: ${MODE_NAMES.join(", ")}`);
+function runnerMode(mode) {
+  if (isHandlerMode(mode)) {
+    throw new TypeError(`Mode ${mode.name} is a handler mode, not a runner mode`);
   }
   return mode;
+}
+var modes = Object.freeze({
+  committee: runnerMode(committee),
+  "second-opinion": runnerMode(secondOpinion)
+});
+function getMode(name, registry3 = modes) {
+  const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
+  const mode = known === undefined ? undefined : registry3[known];
+  if (mode === undefined) {
+    throw new Error(`Unknown mode: ${name}. Registered modes: ${Object.keys(registry3).join(", ")}`);
+  }
+  return mode;
+}
+function getRunnerMode(name, registry3 = modes) {
+  return runnerMode(getMode(name, registry3));
 }
 function resolveModeForCommand(command, significant) {
   if (command === "council")
@@ -22489,8 +22686,8 @@ var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 1200000;
 var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_default.version);
-var EXECUTABLE_PATH = resolve8(import.meta.main ? Bun.main : import.meta.path);
-var KERNEL_ROOT = resolve8(dirname2(EXECUTABLE_PATH), "..");
+var EXECUTABLE_PATH = resolve9(import.meta.main ? Bun.main : import.meta.path);
+var KERNEL_ROOT = resolve9(dirname3(EXECUTABLE_PATH), "..");
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set([
@@ -22553,6 +22750,12 @@ var COMMANDS = [
   "run",
   "council",
   "second-opinion",
+  "advise",
+  "ideate",
+  "consult",
+  "forum",
+  "triage",
+  "audience",
   "modes",
   "result",
   "jobs",
@@ -22564,6 +22767,36 @@ var COMMANDS = [
   "version",
   "self-check"
 ];
+var HANDLER_COMMANDS = {
+  advise: "advisor",
+  ideate: "ideation",
+  consult: "consultants",
+  forum: "forum",
+  triage: "triage",
+  audience: "audience"
+};
+var HANDLER_COMMON_FLAGS = new Set([
+  "billing",
+  "caller",
+  "classification",
+  "harness",
+  "help",
+  "json",
+  "motion",
+  "project-id",
+  "project-policy",
+  "providers",
+  "purpose",
+  "records-root",
+  "registry",
+  "scope",
+  "session",
+  "spend-cap",
+  "timeout-ms"
+]);
+function isHandlerCommand(command) {
+  return Object.hasOwn(HANDLER_COMMANDS, command);
+}
 function output(exitCode, value, error51) {
   return {
     exitCode,
@@ -22573,7 +22806,7 @@ function output(exitCode, value, error51) {
 `
   };
 }
-function parseArguments(args, allowedFlags) {
+function parseArguments(args, allowedFlags, booleanFlags = BOOLEAN_FLAGS) {
   const flags = new Map;
   const positionals = [];
   for (let index = 0;index < args.length; index += 1) {
@@ -22588,7 +22821,7 @@ function parseArguments(args, allowedFlags) {
     if (!allowedFlags.has(name))
       throw new Error(`Unknown option: --${name}`);
     const values = flags.get(name) ?? [];
-    if (BOOLEAN_FLAGS.has(name)) {
+    if (booleanFlags.has(name)) {
       values.push("true");
     } else {
       const value = args[index + 1];
@@ -22629,8 +22862,8 @@ function resolvedRecordsRoot(parsed, environment) {
     return;
   if (value.trim().length === 0)
     throw new Error("Records root must not be blank");
-  const cwd = resolve8(environment.cwd ?? process.cwd());
-  return isAbsolute7(value) ? resolve8(value) : resolve8(cwd, value);
+  const cwd = resolve9(environment.cwd ?? process.cwd());
+  return isAbsolute7(value) ? resolve9(value) : resolve9(cwd, value);
 }
 async function configuredModelRegistry(parsed, environment) {
   const stateRoot = resolvedRecordsRoot(parsed, environment);
@@ -22697,6 +22930,68 @@ async function commitRecords(root, paths, message, environment) {
     env: environment.env ?? process.env
   });
 }
+async function finaliseRecordedRun(input) {
+  const { envelope: envelope2, degraded, environment } = input;
+  const commit2 = await commitRecords(input.recordsRoot, input.paths, input.message, environment);
+  if (!commit2.committed)
+    degraded.push(`records-not-committed: ${commit2.reason}`);
+  const directory = minutesDirectory(environment.env ?? process.env, environment.cwd ?? process.cwd());
+  let minutes2 = null;
+  if (directory !== null) {
+    try {
+      minutes2 = await writeMinutes({ directory, envelope: envelope2, ...input.minutes });
+    } catch (error51) {
+      degraded.push(`minutes-not-written: ${safeError(error51)}`);
+    }
+  }
+  const unvalidated = {
+    ...envelope2,
+    degraded: [...degraded],
+    record: {
+      session: envelope2.record.session,
+      committed: commit2.committed,
+      ...commit2.committed ? { commitSha: commit2.sha } : {},
+      minutes: minutes2
+    }
+  };
+  try {
+    return ResultEnvelopeSchema.parse(unvalidated);
+  } catch (error51) {
+    degraded.push(`envelope-not-validated: ${safeError(error51)}`);
+    return { ...unvalidated, degraded: [...degraded] };
+  }
+}
+function parseCaller(parsed) {
+  const callerKind = oneFlag(parsed, "caller");
+  const harness = oneFlag(parsed, "harness")?.trim();
+  const purpose = oneFlag(parsed, "purpose")?.trim();
+  if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
+    throw new Error("--harness and --purpose require --caller human|agent");
+  }
+  return callerKind === undefined ? UNDECLARED_CALLER : CallerSchema.parse({
+    kind: callerKind,
+    harness: harness ?? "unknown",
+    declared: true,
+    ...purpose === undefined || purpose.length === 0 ? {} : { purpose }
+  });
+}
+function parseSpendCap(parsed) {
+  return parsed.flags.has("spend-cap") ? integerFlag(parsed, "spend-cap", 0, 0, 1e5) : undefined;
+}
+function requireProjectId(projectId) {
+  if (projectId === undefined)
+    throw new Error("Project scope requires a project id");
+  return projectId;
+}
+function modeRegistry(environment) {
+  return environment.modes === undefined ? modes : { ...modes, ...environment.modes };
+}
+function registeredModes(registry3) {
+  return SPECIFIED_MODE_NAMES.flatMap((name) => {
+    const mode = registry3[name];
+    return mode === undefined ? [] : [mode];
+  });
+}
 function safeError(error51) {
   const message = error51 instanceof Error ? error51.message : String(error51);
   const redacted2 = scanAndRedact(message).redacted.replace(/\s+/g, " ").trim();
@@ -22728,7 +23023,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   const policyPath = oneFlag(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath = isAbsolute7(policyPath) ? policyPath : resolve8(cwd, policyPath);
+  const absolutePath = isAbsolute7(policyPath) ? policyPath : resolve9(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath).json();
@@ -22736,6 +23031,22 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
     throw new Error(`Unable to read project policy: ${safeError(error51)}`);
   }
   return ProjectPolicySchema.parse(value);
+}
+async function resolveProjectScope(parsed, environment, cwd, scope, now) {
+  const projectPolicy = await loadProjectPolicyFile(parsed, environment, cwd);
+  if (scope === "general" && projectPolicy !== undefined) {
+    throw new Error("Project policy requires --scope project");
+  }
+  if (scope === "general" && oneFlag(parsed, "project-id") !== undefined) {
+    throw new Error("Project id requires --scope project");
+  }
+  const projectIdValue = oneFlag(parsed, "project-id") ?? projectPolicy?.projectId;
+  const projectId = projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, "Project id");
+  const policy = scope === "project" ? projectPolicy : generalPolicy(now);
+  if (scope === "project" && projectId !== undefined && policy?.projectId !== projectId) {
+    throw new Error("Project policy does not match --project-id");
+  }
+  return { projectId, policy };
 }
 function commandDefaults(command) {
   return command === "council" ? modes.committee.defaults : modes["second-opinion"].defaults;
@@ -22766,19 +23077,8 @@ async function parseRunOptions(command, parsed, environment, registry3, recordsR
   const rounds = integerFlag(parsed, "rounds", defaults.rounds, 1, 3);
   const minimumFamilies = command === "council" && parsed.flags.has("min-families") ? integerFlag(parsed, "min-families", DEFAULT_COUNCIL_MINIMUM_FAMILIES, REDUCED_COUNCIL_MINIMUM_FAMILIES, ProviderFamilySchema.options.length) : undefined;
   const significant = command === "council" || impact === "high" || contested;
-  const callerKind = oneFlag(parsed, "caller");
-  const harness = oneFlag(parsed, "harness")?.trim();
-  const purpose = oneFlag(parsed, "purpose")?.trim();
-  if (callerKind === undefined && (harness !== undefined || purpose !== undefined)) {
-    throw new Error("--harness and --purpose require --caller human|agent");
-  }
-  const caller = callerKind === undefined ? UNDECLARED_CALLER : CallerSchema.parse({
-    kind: callerKind,
-    harness: harness ?? "unknown",
-    declared: true,
-    ...purpose === undefined || purpose.length === 0 ? {} : { purpose }
-  });
-  const spendCap = parsed.flags.has("spend-cap") ? integerFlag(parsed, "spend-cap", 0, 0, 1e5) : undefined;
+  const caller = parseCaller(parsed);
+  const spendCap = parseSpendCap(parsed);
   const mode = resolveModeForCommand(command, significant);
   if (!significant && rounds !== 1) {
     throw new Error("Ordinary motions require exactly one blind round");
@@ -22799,19 +23099,7 @@ async function parseRunOptions(command, parsed, environment, registry3, recordsR
   });
   const runId = safeStorageId(oneFlag(parsed, "run-id") ?? deterministicId("run", command, motion, now), "Run id");
   const motionId = safeStorageId(oneFlag(parsed, "motion-id") ?? deterministicId("motion", command, motion, now), "Motion id");
-  const projectPolicy = await loadProjectPolicyFile(parsed, environment, cwd);
-  if (scope === "general" && projectPolicy !== undefined) {
-    throw new Error("Project policy requires --scope project");
-  }
-  if (scope === "general" && oneFlag(parsed, "project-id") !== undefined) {
-    throw new Error("Project id requires --scope project");
-  }
-  const projectIdValue = oneFlag(parsed, "project-id") ?? projectPolicy?.projectId;
-  const projectId = projectIdValue === undefined ? undefined : safeStorageId(projectIdValue, "Project id");
-  const policy = scope === "project" ? projectPolicy : generalPolicy(now);
-  if (scope === "project" && projectId !== undefined && policy?.projectId !== projectId) {
-    throw new Error("Project policy does not match --project-id");
-  }
+  const { projectId, policy } = await resolveProjectScope(parsed, environment, cwd, scope, now);
   const providerSelection = selectProviderFamilies(oneFlag(parsed, "providers"), registry3, policy);
   const domainFlags = parsed.flags.get("domain");
   const domains = domainFlags === undefined ? inferMotionDomains(motion) : domainFlags.flatMap((value) => value.split(",")).map((domain2) => domain2.trim()).filter((domain2) => domain2.length > 0);
@@ -22901,7 +23189,7 @@ async function runCouncilCommand(command, args, environment) {
       })
     });
   }
-  const mode = getMode(options.mode);
+  const mode = getRunnerMode(options.mode);
   const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters = environment.adapters ?? createProviderRoster({
     env: environment.env ?? process.env,
@@ -22999,41 +23287,20 @@ async function runCouncilCommand(command, args, environment) {
   const records = persisted?.records;
   let emitted = envelope2;
   if (persisted !== undefined && executionOptions.recordsRoot !== undefined) {
-    const commit2 = await commitRecords(executionOptions.recordsRoot, persisted.paths, `council: record ${executionOptions.runId}`, environment);
-    if (!commit2.committed)
-      degraded.push(`records-not-committed: ${commit2.reason}`);
-    const directory = minutesDirectory(environment.env ?? process.env, environment.cwd ?? process.cwd());
-    let minutes2 = null;
-    if (directory !== null) {
-      try {
-        minutes2 = await writeMinutes({
-          directory,
-          envelope: envelope2,
-          rounds: execution.rounds,
-          motion: executionOptions.motion,
-          startedAt,
-          completedAt: now
-        });
-      } catch (error51) {
-        degraded.push(`minutes-not-written: ${safeError(error51)}`);
-      }
-    }
-    const unvalidated = {
-      ...envelope2,
-      degraded: [...degraded],
-      record: {
-        session: envelope2.record.session,
-        committed: commit2.committed,
-        ...commit2.committed ? { commitSha: commit2.sha } : {},
-        minutes: minutes2
-      }
-    };
-    try {
-      emitted = ResultEnvelopeSchema.parse(unvalidated);
-    } catch (error51) {
-      degraded.push(`envelope-not-validated: ${safeError(error51)}`);
-      emitted = { ...unvalidated, degraded: [...degraded] };
-    }
+    emitted = await finaliseRecordedRun({
+      envelope: envelope2,
+      degraded,
+      recordsRoot: executionOptions.recordsRoot,
+      paths: persisted.paths,
+      message: `council: record ${executionOptions.runId}`,
+      minutes: {
+        rounds: execution.rounds,
+        motion: executionOptions.motion,
+        startedAt,
+        completedAt: now
+      },
+      environment
+    });
   }
   const stoppedAtCap = envelope2.spend.stoppedAtCap;
   return output(status === "completed" && !stoppedAtCap ? 0 : 4, {
@@ -23127,10 +23394,10 @@ async function healthCommand(command, args, environment) {
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join6(resolve8(root), "general", "sessions");
+    return join7(resolve9(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join6(resolve8(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join7(resolve9(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
@@ -23151,7 +23418,7 @@ async function storedSessionCommand(command, args) {
         return output(0, { schemaVersion: SCHEMA_VERSION, sessions: [] });
       throw error51;
     }
-    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join6(sessionsDirectory, name)).json())));
+    const sessions = await Promise.all(names.map(async (name) => SessionRecordSchema.parse(await Bun.file(join7(sessionsDirectory, name)).json())));
     sessions.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     return output(0, { schemaVersion: SCHEMA_VERSION, sessions });
   }
@@ -23161,7 +23428,7 @@ async function storedSessionCommand(command, args) {
   const runId = safeStorageId(runIdValue, "Run id");
   let session2;
   try {
-    session2 = SessionRecordSchema.parse(await Bun.file(join6(sessionsDirectory, `${runId}.json`)).json());
+    session2 = SessionRecordSchema.parse(await Bun.file(join7(sessionsDirectory, `${runId}.json`)).json());
   } catch (error51) {
     const code = error51.code;
     if (code === "ENOENT")
@@ -23204,9 +23471,9 @@ async function migrationCommand(args, environment) {
       throw new Error("migrate-general plan requires --root and --output");
     }
     const sourceRelativePath = oneFlag(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join6(resolve8(root), sourceRelativePath)).text();
+    const sourceContent = await Bun.file(join7(resolve9(root), sourceRelativePath)).text();
     const rulesPath = oneFlag(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve8(rulesPath)).json());
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve9(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -23214,12 +23481,12 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve8(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve9(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve8(destination),
+      output: resolve9(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
@@ -23228,7 +23495,7 @@ async function migrationCommand(args, environment) {
     const planPath = oneFlag(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve8(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve9(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }
@@ -23351,10 +23618,193 @@ async function adjudicateCommand(args, environment) {
     records: commit2.committed ? { committed: true, commitSha: commit2.sha } : { committed: false, reason: commit2.reason }
   });
 }
+async function handlerModeCommand(command, args, environment) {
+  const modeName = HANDLER_COMMANDS[command];
+  const mode = modeRegistry(environment)[modeName];
+  if (mode === undefined || !isHandlerMode(mode)) {
+    throw new Error(`${command} needs the ${modeName} mode, which docs/modes.md specifies but this build does not register`);
+  }
+  const parsed = parseArguments(args, new Set([...HANDLER_COMMON_FLAGS, ...mode.flags.value, ...mode.flags.boolean]), new Set([...BOOLEAN_FLAGS, ...mode.flags.boolean]));
+  if (hasFlag(parsed, "help")) {
+    return output(0, {
+      command,
+      mode: mode.name,
+      knobs: mode.knobs,
+      pattern: mode.pattern,
+      spend: { policy: mode.spend.policy },
+      flags: {
+        common: [...HANDLER_COMMON_FLAGS].sort(),
+        value: [...mode.flags.value],
+        boolean: [...mode.flags.boolean]
+      }
+    });
+  }
+  if (parsed.positionals.length > 0)
+    throw new Error(`${command} accepts options only`);
+  const configured = await configuredModelRegistry(parsed, environment);
+  const registry3 = configured.registry;
+  const now = environment.now ?? (() => new Date().toISOString());
+  const startedAt = now();
+  const cwd = environment.cwd ?? process.cwd();
+  const scope = exports_external.enum(["general", "project"]).parse(oneFlag(parsed, "scope") ?? "general");
+  const classification2 = DataClassificationSchema.parse(oneFlag(parsed, "classification") ?? "public");
+  const caller = parseCaller(parsed);
+  const spendCap = parseSpendCap(parsed);
+  const { projectId, policy } = await resolveProjectScope(parsed, environment, cwd, scope, startedAt);
+  const providerSelection = selectProviderFamilies(oneFlag(parsed, "providers"), registry3, policy);
+  const motionValue = oneFlag(parsed, "motion")?.trim();
+  const motion = motionValue === undefined || motionValue.length === 0 ? undefined : motionValue;
+  const sessionValue = oneFlag(parsed, "session");
+  const sessionId = sessionValue === undefined ? undefined : ModeSessionIdSchema.parse(sessionValue);
+  const billingMode = effectiveBillingMode(mode.spend.policy, resolveBillingMode(parsed, policy));
+  const timeoutMs = integerFlag(parsed, "timeout-ms", DEFAULT_TIMEOUT_MS, 1, 3600000);
+  const recordsRoot = configured.stateRoot;
+  const destinations = providerSelection.selected.map((provider2) => ({
+    provider: provider2,
+    model: registry3[provider2].primary
+  }));
+  const guard = (payloads) => evaluateOutbound({
+    runId: sessionId ?? `${command}-preflight`,
+    classification: classification2,
+    ...policy === undefined ? {} : { policy },
+    destinations,
+    payloads: payloads.length === 0 ? [""] : [...payloads]
+  });
+  const policyDecision = guard(motion === undefined ? [] : [motion]);
+  if (policyDecision.kind === "blocked") {
+    return output(3, undefined, {
+      schemaVersion: SCHEMA_VERSION,
+      command,
+      mode: mode.name,
+      status: "blocked-policy",
+      preflight: {
+        requestedProviders: providerSelection.selected,
+        selectedProviders: providerSelection.selected,
+        unavailableProviders: [],
+        eligibleProviders: providerSelection.eligible,
+        omittedEligibleProviders: providerSelection.eligible.filter((provider2) => !providerSelection.selected.includes(provider2)),
+        decision: policyDecision
+      }
+    });
+  }
+  const preflight = buildPreflight({
+    policyDecision,
+    requestedProviders: providerSelection.selected,
+    selectedProviders: providerSelection.selected,
+    unavailableProviders: [],
+    eligibleProviders: providerSelection.eligible
+  });
+  const adapters = environment.adapters ?? createProviderRoster({ env: environment.env ?? process.env, billingMode });
+  const diagnostics = [];
+  const context = {
+    registry: registry3,
+    env: environment.env ?? process.env,
+    cwd,
+    timeoutMs,
+    captureDiagnostic: (diagnostic) => {
+      diagnostics.push(diagnostic);
+    }
+  };
+  const sessionScope = scope === "general" ? { scope: "general" } : { scope: "project", projectId: requireProjectId(projectId) };
+  const sessions = recordsRoot === undefined ? null : ModeSessionStore.open(recordsRoot, sessionScope);
+  const input = {
+    command,
+    options: {
+      caller,
+      scope,
+      ...projectId === undefined ? {} : { projectId },
+      ...policy === undefined ? {} : { projectPolicy: policy },
+      classification: classification2,
+      eligibleProviderFamilies: providerSelection.eligible,
+      providerFamilies: providerSelection.selected,
+      ...motion === undefined ? {} : { motion },
+      ...sessionId === undefined ? {} : { sessionId },
+      timeoutMs,
+      billingMode,
+      ...spendCap === undefined ? {} : { spendCap },
+      ...recordsRoot === undefined ? {} : { recordsRoot }
+    },
+    flags: parsed.flags,
+    positionals: parsed.positionals,
+    ...environment.stdin === undefined ? {} : { stdin: environment.stdin },
+    adapters,
+    context,
+    policyDecision,
+    guard,
+    sessions,
+    spend: mode.spend.policy,
+    now
+  };
+  const outcome = await mode.handle(input);
+  if (outcome.kind === "blocked") {
+    return output(outcome.status === "blocked-policy" ? 3 : 4, undefined, {
+      schemaVersion: SCHEMA_VERSION,
+      command,
+      mode: mode.name,
+      status: outcome.status,
+      message: outcome.message,
+      preflight,
+      ...outcome.decision === undefined ? {} : { decision: outcome.decision }
+    });
+  }
+  const completedAt = now();
+  const degraded = [];
+  if (!caller.declared)
+    degraded.push("caller-undeclared");
+  if (outcome.spend.stoppedAtCap)
+    degraded.push("spend-cap-reached");
+  degraded.push(...outcome.degraded);
+  const modeOutput = mode.outputSchema.parse(outcome.output);
+  const envelope2 = buildEnvelope({
+    mode: mode.name,
+    session: outcome.session,
+    caller,
+    pattern: outcome.pattern,
+    rounds: outcome.rounds,
+    seats: outcome.seats,
+    output: modeOutput,
+    synthesis: outcome.synthesis,
+    dissent: outcome.dissent,
+    unanimous: outcome.unanimous,
+    spend: outcome.spend,
+    degraded,
+    record: { session: outcome.record.session }
+  });
+  let emitted = envelope2;
+  if (recordsRoot !== undefined && outcome.record.paths.length > 0) {
+    emitted = await finaliseRecordedRun({
+      envelope: envelope2,
+      degraded,
+      recordsRoot,
+      paths: outcome.record.paths,
+      message: `${command}: record ${outcome.session}`,
+      minutes: {
+        rounds: [],
+        motion: motion ?? "(no motion: this mode takes its input from its own flags)",
+        startedAt,
+        completedAt
+      },
+      environment
+    });
+  }
+  const stoppedAtCap = envelope2.spend.stoppedAtCap;
+  return output(outcome.status === "completed" && !stoppedAtCap ? 0 : 4, {
+    schemaVersion: SCHEMA_VERSION,
+    command,
+    mode: mode.name,
+    status: outcome.status,
+    session: outcome.session,
+    ...stoppedAtCap ? { spendWarning: spendCapExhaustedMessage(envelope2.spend.cap) } : {},
+    preflight,
+    diagnostics,
+    envelope: emitted
+  });
+}
 function help() {
   return output(0, {
     name: "convene",
     commands: [...COMMANDS],
+    handlerCommands: HANDLER_COMMANDS,
     invocation: "All execution is explicit; no automatic hook starts a council.",
     defaultSeatCount: DEFAULT_SEAT_COUNT,
     runOptions: {
@@ -23362,6 +23812,10 @@ function help() {
       "--harness <name>": "Name the harness the caller is running in. Requires --caller.",
       "--purpose <text>": "State why the motion is being put. Requires --caller.",
       "--spend-cap <n>": "Bound metered fallback calls for this session. The default is seats x rounds; reaching the cap exits 4 and marks the envelope spend-cap-reached."
+    },
+    handlerOptions: {
+      "--session <id>": "Continue an existing mode session. Ids look like ad-2026-09-15-3f9a1c; a mode mints one when the flag is absent.",
+      "--motion <text>": "Optional for the handler subcommands; pass --help to one of them for the flags it reads."
     },
     councilOptions: {
       "--min-families <n>": "Explicit council family floor from 3 to 6. The standing floor is 4; the ordinary front door auto-reduces only when exactly 3 configured, reachable families remain, and marks that run as weaker."
@@ -23388,6 +23842,8 @@ async function runCliFacade(argv, environment = {}) {
     if (command === "run" || command === "council" || command === "second-opinion") {
       return await runCouncilCommand(command, args, environment);
     }
+    if (isHandlerCommand(command))
+      return await handlerModeCommand(command, args, environment);
     if (command === "health" || command === "doctor") {
       return await healthCommand(command, args, environment);
     }
@@ -23402,11 +23858,12 @@ async function runCliFacade(argv, environment = {}) {
         throw new Error("modes accepts no positional arguments");
       return output(0, {
         schemaVersion: SCHEMA_VERSION,
-        modes: Object.values(modes).map((mode) => ({
+        modes: registeredModes(modeRegistry(environment)).map((mode) => ({
           name: mode.name,
+          kind: isHandlerMode(mode) ? "handler" : "runner",
           knobs: mode.knobs,
           pattern: mode.pattern,
-          defaults: mode.defaults,
+          ...isHandlerMode(mode) ? {} : { defaults: mode.defaults },
           spend: { policy: mode.spend.policy }
         }))
       });
