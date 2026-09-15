@@ -1568,7 +1568,7 @@ var require_proper_lockfile = __commonJS((exports, module) => {
 // src/cli.ts
 import { createHash as createHash5 } from "crypto";
 import { readdir as readdir2 } from "fs/promises";
-import { dirname as dirname3, isAbsolute as isAbsolute9, join as join7, resolve as resolve11 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute10, join as join7, resolve as resolve12 } from "path";
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -23569,7 +23569,279 @@ var committee = {
   }
 };
 
-// src/modes/flags.ts
+// src/modes/forum/index.ts
+import { isAbsolute as isAbsolute8, resolve as resolve10 } from "path";
+
+// src/modes/forum/answers.ts
+var MAX_POSITION_WORDS = 8;
+var NonEmptyStringSchema7 = exports_external.string().trim().min(1);
+var PositionLabelSchema = NonEmptyStringSchema7.max(160).refine((label) => label.split(/\s+/u).filter((word) => word.length > 0).length <= MAX_POSITION_WORDS, `A position label is at most ${MAX_POSITION_WORDS} words`).refine((label) => /[\p{L}\p{N}]/u.test(label), "A position label needs at least one letter or digit");
+var ForumMotionIdSchema = exports_external.string().regex(/^m-[1-9][0-9]{0,2}$/);
+var ForumStanceSchema = exports_external.enum(["hold", "revise", "rebut"]);
+var ForumMotionTextSchema = exports_external.strictObject({ text: NonEmptyStringSchema7.max(2000) });
+var ForumOpeningAnswerSchema = exports_external.strictObject({
+  position: PositionLabelSchema,
+  stance: exports_external.literal("hold"),
+  text: NonEmptyStringSchema7.max(20000),
+  motion: ForumMotionTextSchema.optional()
+});
+var ForumAnswerSchema = exports_external.strictObject({
+  position: PositionLabelSchema,
+  stance: ForumStanceSchema,
+  text: NonEmptyStringSchema7.max(20000),
+  inReplyTo: NonEmptyStringSchema7.max(200).nullable(),
+  motion: ForumMotionTextSchema.optional(),
+  supports: exports_external.array(ForumMotionIdSchema).max(64).optional(),
+  opposes: exports_external.array(ForumMotionIdSchema).max(64).optional()
+});
+function openingAsAnswer(value) {
+  return {
+    position: value.position,
+    stance: value.stance,
+    text: value.text,
+    inReplyTo: null,
+    ...value.motion === undefined ? {} : { motion: value.motion }
+  };
+}
+var MOTION_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["text"],
+  properties: { text: { type: "string", minLength: 1 } }
+};
+var forumOpeningAnswer = {
+  schema: ForumOpeningAnswerSchema,
+  instruction: 'Return exactly one JSON object with these keys: position (a label of at most eight words naming the position you hold), stance (exactly "hold"), text (your argument as one or more plain sentences, no markdown), and optionally motion ({ "text": "\u2026" }) to put a motion before the forum. Do not wrap it in prose.',
+  jsonSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["position", "stance", "text"],
+    properties: {
+      position: { type: "string", minLength: 1, maxLength: 160 },
+      stance: { type: "string", enum: ["hold"] },
+      text: { type: "string", minLength: 1 },
+      motion: MOTION_JSON_SCHEMA
+    }
+  }
+};
+var forumReplyAnswer = {
+  schema: ForumAnswerSchema,
+  instruction: 'Return exactly one JSON object with these keys: position (a label of at most eight words naming the position you now hold), stance ("hold", "revise" or "rebut"), text (your argument as one or more plain sentences, no markdown), inReplyTo (the seat id you are answering, or null), and optionally motion ({ "text": "\u2026" }), supports (a list of motion ids) and opposes (a list of motion ids). Do not wrap it in prose.',
+  jsonSchema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["position", "stance", "text", "inReplyTo"],
+    properties: {
+      position: { type: "string", minLength: 1, maxLength: 160 },
+      stance: { type: "string", enum: ["hold", "revise", "rebut"] },
+      text: { type: "string", minLength: 1 },
+      inReplyTo: { type: ["string", "null"] },
+      motion: MOTION_JSON_SCHEMA,
+      supports: { type: "array", items: { type: "string" } },
+      opposes: { type: "array", items: { type: "string" } }
+    }
+  }
+};
+
+// src/modes/forum/aggregate.ts
+var ForumOutputSchema = exports_external.strictObject({
+  rounds: exports_external.array(exports_external.strictObject({
+    n: exports_external.number().int().min(1).max(MAX_ENVELOPE_ROUNDS),
+    positions: exports_external.array(exports_external.strictObject({
+      seat: NonEmptyStringSchema7,
+      stance: ForumStanceSchema,
+      text: NonEmptyStringSchema7,
+      inReplyTo: NonEmptyStringSchema7.nullable()
+    }))
+  })),
+  map: exports_external.array(exports_external.strictObject({
+    position: NonEmptyStringSchema7,
+    holders: exports_external.array(NonEmptyStringSchema7).min(1)
+  })),
+  moved: exports_external.array(exports_external.strictObject({
+    seat: NonEmptyStringSchema7,
+    round: exports_external.number().int().min(2).max(MAX_ENVELOPE_ROUNDS),
+    from: NonEmptyStringSchema7,
+    to: NonEmptyStringSchema7,
+    why: NonEmptyStringSchema7
+  })),
+  motions: exports_external.array(exports_external.strictObject({
+    id: ForumMotionIdSchema,
+    by: NonEmptyStringSchema7,
+    text: NonEmptyStringSchema7,
+    support: exports_external.array(NonEmptyStringSchema7),
+    opposed: exports_external.array(NonEmptyStringSchema7)
+  }))
+});
+function normalisePosition(label) {
+  return label.toLowerCase().replace(/\s+/gu, " ").trim().replace(/[.,;:!?]+$/u, "").trim();
+}
+function buildPositionMap(round) {
+  const entries = new Map;
+  for (const { seat, answer } of round?.answers ?? []) {
+    const key = normalisePosition(answer.position);
+    const existing = entries.get(key);
+    if (existing === undefined) {
+      entries.set(key, { position: answer.position, holders: [seat] });
+    } else if (!existing.holders.includes(seat)) {
+      existing.holders.push(seat);
+    }
+  }
+  return [...entries.values()];
+}
+function buildMoved(rounds) {
+  const moved = [];
+  const previousLabel = new Map;
+  for (const round of rounds) {
+    for (const { seat, answer } of round.answers) {
+      const previous = previousLabel.get(seat);
+      if (previous !== undefined && normalisePosition(previous) !== normalisePosition(answer.position)) {
+        moved.push({
+          seat,
+          round: round.n,
+          from: previous,
+          to: answer.position,
+          why: answer.text
+        });
+      }
+      previousLabel.set(seat, answer.position);
+    }
+  }
+  return moved;
+}
+function raisedMotions(rounds) {
+  const raised = [];
+  for (const round of rounds) {
+    for (const { seat, answer } of round.answers) {
+      if (answer.motion === undefined)
+        continue;
+      raised.push({
+        id: `m-${raised.length + 1}`,
+        by: seat,
+        round: round.n,
+        text: answer.motion.text
+      });
+    }
+  }
+  return raised;
+}
+function collectMotions(rounds) {
+  const raised = raisedMotions(rounds);
+  const byId = new Map(raised.map((motion) => [motion.id, motion]));
+  const support = new Map;
+  const opposed = new Map;
+  function record2(table, id, seat, round) {
+    const motion = byId.get(id);
+    if (motion === undefined || motion.round >= round)
+      return;
+    const seats = table.get(id) ?? [];
+    if (!seats.includes(seat))
+      seats.push(seat);
+    table.set(id, seats);
+  }
+  for (const round of rounds) {
+    for (const { seat, answer } of round.answers) {
+      for (const id of answer.supports ?? [])
+        record2(support, id, seat, round.n);
+      for (const id of answer.opposes ?? [])
+        record2(opposed, id, seat, round.n);
+    }
+  }
+  return raised.map((motion) => ({
+    id: motion.id,
+    by: motion.by,
+    text: motion.text,
+    support: support.get(motion.id) ?? [],
+    opposed: opposed.get(motion.id) ?? []
+  }));
+}
+function aggregateForum(input) {
+  const sat = new Set(input.seats);
+  const rounds = input.rounds.map((round) => ({
+    n: round.n,
+    positions: round.answers.map(({ seat, answer }) => ({
+      seat,
+      stance: answer.stance,
+      text: answer.text,
+      inReplyTo: answer.inReplyTo !== null && sat.has(answer.inReplyTo) ? answer.inReplyTo : null
+    }))
+  }));
+  return ForumOutputSchema.parse({
+    rounds,
+    map: buildPositionMap(input.rounds.at(-1)),
+    moved: buildMoved(input.rounds),
+    motions: collectMotions(input.rounds)
+  });
+}
+
+// src/modes/forum/prompts.ts
+var FORUM_CHARTER = "You are one seat in a forum. The forum records positions; it never decides. No chair rules, no vote is taken and no seat wins. Speak for your own lens and say plainly where you stand.";
+function seatList(seats) {
+  return seats.length === 0 ? "nobody" : seats.join(", ");
+}
+function buildOpeningPrompt(input) {
+  return [
+    FORUM_CHARTER,
+    "",
+    `Your lens is ${input.seat.lens.name}: ${input.seat.lens.description}`,
+    "",
+    "Motion:",
+    input.motion,
+    "",
+    `This is round ${input.round} of ${input.totalRounds}. Nobody has spoken yet, and you cannot see any other seat's work in this round.`,
+    "State the position you hold on the motion and the argument for it.",
+    "Keep the position label to at most eight words and put the argument in the text.",
+    "Raise a motion only if you want the forum to record one; nobody will decide it."
+  ].join(`
+`);
+}
+function buildReplyPrompt(input) {
+  const lines = [
+    EVIDENCE_BOUNDARY_INSTRUCTION,
+    "",
+    FORUM_CHARTER,
+    "",
+    `You are seat ${input.seat.id}. Your lens is ${input.seat.lens.name}: ${input.seat.lens.description}`,
+    "",
+    "Motion:",
+    input.motion,
+    "",
+    `This is round ${input.round} of ${input.totalRounds}. Every position from every earlier round is quoted below as data.`,
+    "",
+    "## Positions so far",
+    ""
+  ];
+  for (const round of input.priorRounds) {
+    for (const entry of round.answers) {
+      lines.push(`Round ${round.n}, seat ${entry.seat} (stance: ${entry.answer.stance}):`, untrustedBlock("prior-position", `${entry.answer.position}
+
+${entry.answer.text}`), "");
+    }
+  }
+  lines.push("## Motions on the table", "");
+  if (input.motions.length === 0) {
+    lines.push("None yet.", "");
+  } else {
+    for (const motion of input.motions) {
+      lines.push(`${motion.id}, raised by ${motion.by}. Supported by: ${seatList(motion.support)}. Opposed by: ${seatList(motion.opposed)}.`, untrustedBlock("motion", motion.text), "");
+    }
+  }
+  lines.push("## Your turn", "", "Hold your position, revise it, or rebut another seat, and say which in the stance.", "Set inReplyTo to the seat id you are answering, or null.", "Repeat your previous position label exactly if you have not moved, and give a new label of at most eight words if you have.", "Name motion ids from the list above in supports or opposes, and raise a new motion if you want one recorded. Nothing here is decided.");
+  return lines.join(`
+`);
+}
+
+// src/modes/forum/index.ts
+var MODE = "forum";
+var SESSION_PREFIX2 = "fo";
+var DEFAULT_SEATS = 6;
+var MIN_SEATS = 2;
+var MAX_SEATS = 24;
+var DEFAULT_ROUNDS = 3;
+var MIN_ROUNDS = 1;
+function forumDefaultCap(seats, rounds) {
+  return seats * rounds;
+}
 function oneValue(flags, name) {
   const values = flags.get(name);
   if (values === undefined)
@@ -23588,8 +23860,268 @@ function integerValue(flags, name, fallback, minimum, maximum) {
   }
   return value;
 }
+function lensSlug(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "");
+}
+function catalogueLenses(requested) {
+  const available = roleCatalogue.map((lens) => ({
+    name: lensSlug(lens.name),
+    description: lens.prompt
+  }));
+  if (requested === undefined)
+    return available;
+  const names = [
+    ...new Set(requested.split(",").map((name) => lensSlug(name.trim())).filter((name) => name.length > 0))
+  ];
+  if (names.length === 0)
+    throw new Error("Option --lenses needs at least one lens name");
+  return names.map((name) => {
+    const lens = available.find((candidate) => candidate.name === name);
+    if (lens === undefined) {
+      throw new Error(`Unknown lens: ${name}. Catalogue lenses: ${available.map((entry) => entry.name).join(", ")}`);
+    }
+    return lens;
+  });
+}
+var SuppliedPersonasSchema = exports_external.array(exports_external.strictObject({
+  name: exports_external.string().trim().min(1).max(64),
+  description: exports_external.string().trim().min(1).max(2000)
+})).min(1).max(MAX_SEATS);
+async function suppliedPersonas(path, cwd) {
+  const absolute = isAbsolute8(path) ? path : resolve10(cwd, path);
+  let value;
+  try {
+    value = await Bun.file(absolute).json();
+  } catch (error51) {
+    throw new Error(`Unable to read the personas file: ${error51 instanceof Error ? error51.message : String(error51)}`);
+  }
+  const lenses = SuppliedPersonasSchema.parse(value).map((persona) => ({
+    name: lensSlug(persona.name),
+    description: persona.description
+  }));
+  if (new Set(lenses.map((lens) => lens.name)).size !== lenses.length) {
+    throw new Error("Persona names must stay distinct once they are slugged into lens names");
+  }
+  return lenses;
+}
+function cycleLenses(base, seats) {
+  const first = base[0];
+  if (first === undefined)
+    throw new Error("A forum needs at least one lens");
+  const cycled = Array.from({ length: seats }, (_, index) => {
+    const lens = base[index % base.length] ?? first;
+    const cycle = Math.floor(index / base.length) + 1;
+    return cycle === 1 ? lens : { name: `${lens.name}-${cycle}`, description: lens.description };
+  });
+  if (new Set(cycled.map((lens) => lens.name)).size !== cycled.length) {
+    throw new Error("Lens names collide once seats beyond the list are numbered; rename the personas so cycling cannot mint a duplicate");
+  }
+  return cycled;
+}
+function collectRound(n, panel2, widen) {
+  const answers = panel2.seats.flatMap((seat) => seat.status === "ok" ? [{ seat: seat.id, answer: widen(seat.answer) }] : []);
+  return {
+    record: { n, answers },
+    seats: panel2.seats,
+    spend: panel2.spend,
+    answered: panel2.answered
+  };
+}
+function aggregateSpend(perRound, ledger, billing) {
+  return {
+    billing,
+    policy: "capped",
+    cap: ledger.cap,
+    used: perRound.reduce((total, spend2) => total + spend2.used, 0),
+    fallbacks: perRound.reduce((total, spend2) => total + spend2.fallbacks, 0),
+    refused: ledger.refused,
+    stoppedAtCap: ledger.refused > 0
+  };
+}
+function resolveSpend(input, seatCount, roundCount) {
+  if (input.spend.policy !== "capped") {
+    throw new Error("forum is a capped mode; it cannot run under a never-metered spend policy");
+  }
+  if (input.options.spendCap !== undefined)
+    return input.spend;
+  return {
+    policy: "capped",
+    billing: input.spend.billing,
+    ledger: createSpendLedger(forumDefaultCap(seatCount, roundCount))
+  };
+}
+async function handle2(input) {
+  const motion = input.options.motion;
+  if (motion === undefined) {
+    throw new Error('forum requires --motion "<the motion the forum argues>"');
+  }
+  if (input.flags.has("lenses") && input.flags.has("personas")) {
+    throw new Error("Use --lenses or --personas, not both: a seat carries one brief");
+  }
+  const seatCount = integerValue(input.flags, "seats", DEFAULT_SEATS, MIN_SEATS, MAX_SEATS);
+  const roundCount = integerValue(input.flags, "rounds", DEFAULT_ROUNDS, MIN_ROUNDS, MAX_ENVELOPE_ROUNDS);
+  const personasPath = oneValue(input.flags, "personas");
+  const briefs = personasPath === undefined ? catalogueLenses(oneValue(input.flags, "lenses")) : await suppliedPersonas(personasPath, input.context.cwd);
+  if (personasPath !== undefined) {
+    const decision = input.guard(briefs.flatMap((lens) => [lens.name, lens.description]));
+    if (decision.kind === "blocked") {
+      return {
+        kind: "blocked",
+        status: "blocked-policy",
+        message: "The supplied personas were refused by the outbound data policy.",
+        decision
+      };
+    }
+  }
+  const seats = spreadSeats(input.options.providerFamilies, cycleLenses(briefs, seatCount), input.context.registry);
+  const session2 = input.options.sessionId ?? newModeSessionId(SESSION_PREFIX2, input.now());
+  if (input.sessions !== null && await input.sessions.exists(MODE, session2)) {
+    throw new Error(`A forum session log already exists at ${input.sessions.recordPath(MODE, session2)}; choose another --session id`);
+  }
+  const spend2 = resolveSpend(input, seatCount, roundCount);
+  const ledger = spend2.ledger;
+  const context = {
+    ...input.context,
+    timeoutMs: Math.max(1, Math.floor(input.options.timeoutMs / roundCount))
+  };
+  const config2 = { adapters: input.adapters, context };
+  const paths = new Set;
+  const append = async (kind, data) => {
+    if (input.sessions === null)
+      return;
+    const write = await input.sessions.append(MODE, session2, { at: input.now(), kind, data });
+    for (const path of write.paths)
+      paths.add(path);
+  };
+  await append("opened", {
+    motion,
+    rounds: roundCount,
+    cap: ledger.cap,
+    billing: input.options.billingMode,
+    seats: seats.map((seat) => ({
+      id: seat.id,
+      family: seat.family,
+      model: seat.model,
+      lens: seat.lens.name
+    }))
+  });
+  const rounds = [];
+  const perRoundSpend = [];
+  let lastSeats = [];
+  let missingAnswers = false;
+  let stopped = "round-limit";
+  for (let n = 1;n <= roundCount; n += 1) {
+    let round;
+    if (n === 1) {
+      const panel2 = await runPanel(config2, {
+        seats,
+        prompt: (seat) => buildOpeningPrompt({ seat, motion, round: n, totalRounds: roundCount }),
+        answer: forumOpeningAnswer,
+        spend: spend2
+      });
+      round = collectRound(n, panel2, openingAsAnswer);
+    } else {
+      const motions = collectMotions(rounds);
+      const priorRounds = [...rounds];
+      const panel2 = await runPanel(config2, {
+        seats,
+        prompt: (seat) => buildReplyPrompt({
+          seat,
+          motion,
+          round: n,
+          totalRounds: roundCount,
+          priorRounds,
+          motions
+        }),
+        answer: forumReplyAnswer,
+        spend: spend2
+      });
+      round = collectRound(n, panel2, (answer) => answer);
+    }
+    rounds.push(round.record);
+    perRoundSpend.push(round.spend);
+    lastSeats = round.seats;
+    if (round.answered < seats.length)
+      missingAnswers = true;
+    await append("round", { n, seats: round.seats, answers: round.record.answers });
+    if (round.spend.stoppedAtCap) {
+      stopped = "spend-cap";
+      break;
+    }
+    if (n === 1 && round.record.answers.length === 0) {
+      stopped = "no-opening-positions";
+      break;
+    }
+  }
+  await append("closed", { rounds: rounds.length, reason: stopped });
+  const degraded = [];
+  if (rounds.length < roundCount) {
+    degraded.push(`rounds-not-completed: ran ${rounds.length} of ${roundCount}`);
+  }
+  if (stopped === "no-opening-positions")
+    degraded.push("no-opening-positions");
+  if (missingAnswers)
+    degraded.push("seat-answers-missing");
+  if (input.sessions === null) {
+    degraded.push("records-not-kept: no records root is configured");
+  }
+  return {
+    kind: "result",
+    status: degraded.length === 0 ? "completed" : "degraded",
+    session: session2,
+    pattern: "rounds",
+    rounds: rounds.length,
+    seats: panelEnvelopeSeats(lastSeats),
+    output: aggregateForum({ seats: seats.map((seat) => seat.id), rounds }),
+    synthesis: null,
+    dissent: null,
+    unanimous: false,
+    degraded,
+    spend: aggregateSpend(perRoundSpend, ledger, input.options.billingMode),
+    record: {
+      session: input.sessions === null ? null : input.sessions.recordPath(MODE, session2),
+      paths: [...paths]
+    }
+  };
+}
+var forum = {
+  kind: "handler",
+  name: "forum",
+  knobs: {
+    participants: "many seats across families and lenses; no quorum, no chair",
+    pattern: "rounds",
+    aggregation: "position map, who moved and why, motions with support and opposition",
+    tempo: "long",
+    records: "the full ledger of every round"
+  },
+  pattern: "rounds",
+  spend: { policy: "capped", defaultCap: forumDefaultCap },
+  flags: { value: ["seats", "rounds", "lenses", "personas"], boolean: [] },
+  outputSchema: ForumOutputSchema,
+  handle: handle2
+};
+
+// src/modes/flags.ts
+function oneValue2(flags, name) {
+  const values = flags.get(name);
+  if (values === undefined)
+    return;
+  if (values.length !== 1)
+    throw new Error(`Option --${name} may be provided only once`);
+  return values[0];
+}
+function integerValue2(flags, name, fallback, minimum, maximum) {
+  const raw = oneValue2(flags, name);
+  if (raw === undefined)
+    return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`Option --${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
 function listValue(flags, name) {
-  const raw = oneValue(flags, name);
+  const raw = oneValue2(flags, name);
   if (raw === undefined)
     return;
   const items = raw.split(",").map((item) => item.trim()).filter((item) => item.length > 0);
@@ -23793,9 +24325,9 @@ function clusterIdeas(ideas, previous) {
 }
 
 // src/modes/ideation/seats.ts
-import { isAbsolute as isAbsolute8, resolve as resolve10 } from "path";
+import { isAbsolute as isAbsolute9, resolve as resolve11 } from "path";
 var LensNameSchema2 = exports_external.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "A lens name is lower-case letters, digits and hyphens");
-function lensSlug(name) {
+function lensSlug2(name) {
   const slug = name.trim().toLowerCase().replace(/['\u2019]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const parsed = LensNameSchema2.safeParse(slug);
   if (!parsed.success) {
@@ -23803,9 +24335,9 @@ function lensSlug(name) {
   }
   return parsed.data;
 }
-var CATALOGUE_LENSES = Object.freeze(roleCatalogue.map((lens) => Object.freeze(PanelLensSchema.parse({ name: lensSlug(lens.name), description: lens.prompt }))));
+var CATALOGUE_LENSES = Object.freeze(roleCatalogue.map((lens) => Object.freeze(PanelLensSchema.parse({ name: lensSlug2(lens.name), description: lens.prompt }))));
 function catalogueLens(name) {
-  const slug = lensSlug(name);
+  const slug = lensSlug2(name);
   const lens = CATALOGUE_LENSES.find((candidate) => candidate.name === slug);
   if (lens === undefined) {
     throw new Error(`Unknown lens: ${name.slice(0, 40)}. The catalogue holds ${CATALOGUE_LENSES.map((candidate) => candidate.name).join(", ")}.`);
@@ -23826,14 +24358,14 @@ function assertDistinct(lenses) {
   return lenses;
 }
 async function loadPersonaLenses(path, cwd) {
-  const absolute = isAbsolute8(path) ? resolve10(path) : resolve10(cwd, path);
+  const absolute = isAbsolute9(path) ? resolve11(path) : resolve11(cwd, path);
   let value;
   try {
     value = await Bun.file(absolute).json();
   } catch (error51) {
     throw new Error(`Unable to read the persona list: ${absolute}`, { cause: error51 });
   }
-  const lenses = PersonaFileSchema.parse(value).map((persona) => PanelLensSchema.parse({ name: lensSlug(persona.name), description: persona.description }));
+  const lenses = PersonaFileSchema.parse(value).map((persona) => PanelLensSchema.parse({ name: lensSlug2(persona.name), description: persona.description }));
   assertDistinct(lenses);
   return lenses;
 }
@@ -23898,12 +24430,12 @@ var IDEATION_MODE = "ideation";
 var IDEATION_SESSION_PREFIX = "id";
 var PASS_EVENT_KIND = "pass";
 var CLUSTER_EVENT_KIND = "cluster";
-var NonEmptyStringSchema7 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema8 = exports_external.string().trim().min(1);
 var IdeaSchema = exports_external.strictObject({
   id: IdeaIdSchema,
-  seat: NonEmptyStringSchema7,
-  lens: NonEmptyStringSchema7,
-  text: NonEmptyStringSchema7
+  seat: NonEmptyStringSchema8,
+  lens: NonEmptyStringSchema8,
+  text: NonEmptyStringSchema8
 });
 var PassScopeSchema = exports_external.union([exports_external.literal("all"), exports_external.array(ClusterIdSchema).min(1)]);
 var IdeationPassSchema = exports_external.strictObject({
@@ -23912,7 +24444,7 @@ var IdeationPassSchema = exports_external.strictObject({
   ideas: exports_external.array(IdeaSchema)
 });
 var IdeationOutputSchema = exports_external.strictObject({
-  prompt: NonEmptyStringSchema7,
+  prompt: NonEmptyStringSchema8,
   passes: exports_external.array(IdeationPassSchema).min(1),
   clusters: exports_external.array(ClusterSchema),
   raw: exports_external.array(IdeaIdSchema)
@@ -23920,10 +24452,10 @@ var IdeationOutputSchema = exports_external.strictObject({
 var IdeationPassEventSchema = exports_external.strictObject({
   n: exports_external.number().int().min(1),
   scope: PassScopeSchema,
-  prompt: NonEmptyStringSchema7,
+  prompt: NonEmptyStringSchema8,
   ideasPerSeat: exports_external.number().int().min(1),
   seats: exports_external.array(EnvelopeSeatSchema),
-  invalid: exports_external.array(exports_external.strictObject({ seat: NonEmptyStringSchema7, raw: exports_external.string() })),
+  invalid: exports_external.array(exports_external.strictObject({ seat: NonEmptyStringSchema8, raw: exports_external.string() })),
   ideas: exports_external.array(IdeaSchema)
 });
 var IdeationClusterEventSchema = exports_external.strictObject({
@@ -23978,8 +24510,8 @@ function readIdeationSession(events) {
 }
 
 // src/modes/ideation/index.ts
-var DEFAULT_SEATS = 12;
-var MAX_SEATS = 24;
+var DEFAULT_SEATS2 = 12;
+var MAX_SEATS2 = 24;
 var DEFAULT_IDEAS_PER_SEAT = 3;
 var MAX_IDEAS_PER_SEAT = 10;
 var MAX_SESSION_IDEAS = 2000;
@@ -24049,7 +24581,7 @@ function expansionScope(named, prior) {
   };
 }
 async function namedLenses(input) {
-  const personaPath = oneValue(input.flags, "personas");
+  const personaPath = oneValue2(input.flags, "personas");
   const lenses = listValue(input.flags, "lenses");
   if (personaPath !== undefined && lenses !== undefined) {
     throw new Error("--personas supplies the seats itself; it cannot be combined with --lenses");
@@ -24068,12 +24600,12 @@ function ideationOutput(state) {
     raw: state.ideas.map((idea) => idea.id)
   };
 }
-async function handle2(input) {
+async function handle3(input) {
   const sessions = input.sessions;
   if (sessions === null) {
     throw new Error("ideate keeps every idea from every pass, so it needs somewhere to keep them: pass --records-root <path>");
   }
-  const ideasPerSeat = integerValue(input.flags, "ideas-per-seat", DEFAULT_IDEAS_PER_SEAT, 1, MAX_IDEAS_PER_SEAT);
+  const ideasPerSeat = integerValue2(input.flags, "ideas-per-seat", DEFAULT_IDEAS_PER_SEAT, 1, MAX_IDEAS_PER_SEAT);
   const expand = listValue(input.flags, "expand");
   const sessionId = input.options.sessionId ?? sessions.newSessionId(IDEATION_SESSION_PREFIX, input.now());
   const opened = input.options.sessionId === undefined ? false : await sessions.exists(IDEATION_MODE, sessionId);
@@ -24090,7 +24622,7 @@ async function handle2(input) {
   const scope = expansion === null ? "all" : expansion.clusters;
   const scoped = expansion?.scoped ?? [];
   const named = await namedLenses(input);
-  const seatCount = integerValue(input.flags, "seats", named?.length ?? DEFAULT_SEATS, 1, MAX_SEATS);
+  const seatCount = integerValue2(input.flags, "seats", named?.length ?? DEFAULT_SEATS2, 1, MAX_SEATS2);
   const lenses = resolveSeatLenses({ seats: seatCount, named });
   const decision = input.guard([
     prompt,
@@ -24105,7 +24637,7 @@ async function handle2(input) {
       decision
     };
   }
-  const registry3 = ideationRegistry(input.context.registry, parseModelOverrides(oneValue(input.flags, "models")));
+  const registry3 = ideationRegistry(input.context.registry, parseModelOverrides(oneValue2(input.flags, "models")));
   const seats = ideationSeats({
     families: input.options.providerFamilies,
     lenses,
@@ -24213,18 +24745,18 @@ var ideation = {
     boolean: []
   },
   outputSchema: IdeationOutputSchema,
-  handle: handle2
+  handle: handle3
 };
 
 // src/modes/second-opinion/index.ts
-var NonEmptyStringSchema8 = exports_external.string().trim().min(1);
+var NonEmptyStringSchema9 = exports_external.string().trim().min(1);
 var SecondOpinionOutputSchema = exports_external.strictObject({
   outcome: CouncilOutcomeSchema,
   quorum: QuorumEvaluationSchema,
   panel: exports_external.array(exports_external.strictObject({
-    seat: NonEmptyStringSchema8,
+    seat: NonEmptyStringSchema9,
     family: ProviderFamilySchema,
-    lens: NonEmptyStringSchema8,
+    lens: NonEmptyStringSchema9,
     answer: exports_external.string()
   }))
 });
@@ -24284,7 +24816,8 @@ var modes = Object.freeze({
   committee: runnerMode(committee),
   "second-opinion": runnerMode(secondOpinion),
   advisor,
-  ideation
+  ideation,
+  forum
 });
 function getMode(name, registry3 = modes) {
   const known = SPECIFIED_MODE_NAMES.find((candidate) => candidate === name);
@@ -24308,8 +24841,8 @@ var ADAPTER_CONTRACT_VERSION = 1;
 var SCHEMA_VERSION = 1;
 var DEFAULT_TIMEOUT_MS = 1200000;
 var PACKAGE_VERSION = exports_external.string().trim().min(1).parse(package_default.version);
-var EXECUTABLE_PATH = resolve11(import.meta.main ? Bun.main : import.meta.path);
-var KERNEL_ROOT = resolve11(dirname3(EXECUTABLE_PATH), "..");
+var EXECUTABLE_PATH = resolve12(import.meta.main ? Bun.main : import.meta.path);
+var KERNEL_ROOT = resolve12(dirname3(EXECUTABLE_PATH), "..");
 var INSTALLER_PROVENANCE_VALUE_SCHEMA = exports_external.string().trim().min(1).max(2048).refine((value) => !/[\r\n]/.test(value), "must be a single line");
 var SAFE_STORAGE_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 var BOOLEAN_FLAGS = new Set([
@@ -24484,8 +25017,8 @@ function resolvedRecordsRoot(parsed, environment) {
     return;
   if (value.trim().length === 0)
     throw new Error("Records root must not be blank");
-  const cwd = resolve11(environment.cwd ?? process.cwd());
-  return isAbsolute9(value) ? resolve11(value) : resolve11(cwd, value);
+  const cwd = resolve12(environment.cwd ?? process.cwd());
+  return isAbsolute10(value) ? resolve12(value) : resolve12(cwd, value);
 }
 async function configuredModelRegistry(parsed, environment) {
   const stateRoot = resolvedRecordsRoot(parsed, environment);
@@ -24645,7 +25178,7 @@ async function loadProjectPolicyFile(parsed, environment, cwd) {
   const policyPath = oneFlag2(parsed, "project-policy");
   if (policyPath === undefined)
     return environment.projectPolicy;
-  const absolutePath = isAbsolute9(policyPath) ? policyPath : resolve11(cwd, policyPath);
+  const absolutePath = isAbsolute10(policyPath) ? policyPath : resolve12(cwd, policyPath);
   let value;
   try {
     value = await Bun.file(absolutePath).json();
@@ -25016,10 +25549,10 @@ async function healthCommand(command, args, environment) {
 }
 function recordsDirectory(root, scope, projectId) {
   if (scope === "general")
-    return join7(resolve11(root), "general", "sessions");
+    return join7(resolve12(root), "general", "sessions");
   if (projectId === undefined)
     throw new Error("Project records require --project-id");
-  return join7(resolve11(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
+  return join7(resolve12(root), "projects", safeStorageId(projectId, "Project id"), "sessions");
 }
 async function storedSessionCommand(command, args) {
   const parsed = parseArguments(args, new Set(["help", "json", "project-id", "records-root", "run-id", "scope"]));
@@ -25093,9 +25626,9 @@ async function migrationCommand(args, environment) {
       throw new Error("migrate-general plan requires --root and --output");
     }
     const sourceRelativePath = oneFlag2(parsed, "source") ?? "general/ledger.md";
-    const sourceContent = await Bun.file(join7(resolve11(root), sourceRelativePath)).text();
+    const sourceContent = await Bun.file(join7(resolve12(root), sourceRelativePath)).text();
     const rulesPath = oneFlag2(parsed, "rules");
-    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve11(rulesPath)).json());
+    const rules = rulesPath === undefined ? [] : exports_external.array(MigrationRuleSchema).parse(await Bun.file(resolve12(rulesPath)).json());
     const plan = planGeneralMigration({
       root,
       sourceRelativePath,
@@ -25103,12 +25636,12 @@ async function migrationCommand(args, environment) {
       plannedAt: (environment.now ?? (() => new Date().toISOString()))(),
       rules
     });
-    await writeTextAtomically(resolve11(destination), `${JSON.stringify(plan, null, 2)}
+    await writeTextAtomically(resolve12(destination), `${JSON.stringify(plan, null, 2)}
 `);
     return output(0, {
       schemaVersion: SCHEMA_VERSION,
       status: "planned",
-      output: resolve11(destination),
+      output: resolve12(destination),
       planSha256: plan.planSha256,
       counts: plan.counts
     });
@@ -25117,7 +25650,7 @@ async function migrationCommand(args, environment) {
     const planPath = oneFlag2(parsed, "plan");
     if (planPath === undefined)
       throw new Error("migrate-general apply requires --plan");
-    const plan = MigrationPlanSchema.parse(await Bun.file(resolve11(planPath)).json());
+    const plan = MigrationPlanSchema.parse(await Bun.file(resolve12(planPath)).json());
     const manifest = await applyGeneralMigration(plan);
     return output(0, { schemaVersion: SCHEMA_VERSION, status: "applied", manifest });
   }
@@ -25162,7 +25695,7 @@ async function adjudicateCommand(args, environment) {
   if (acknowledged === noDissent) {
     throw new Error("adjudicate requires exactly one of --dissent-acknowledged or --no-dissent");
   }
-  const seatList = (name) => {
+  const seatList2 = (name) => {
     const raw = parsed.flags.get(name);
     if (raw === undefined)
       return [];
@@ -25207,8 +25740,8 @@ async function adjudicateCommand(args, environment) {
     decision,
     rationale,
     authorisedBy,
-    followedSeats: seatList("followed-seats"),
-    setAsideSeats: seatList("set-aside-seats"),
+    followedSeats: seatList2("followed-seats"),
+    setAsideSeats: seatList2("set-aside-seats"),
     dissentAcknowledged: acknowledged,
     createdAt: now
   };
@@ -25351,7 +25884,8 @@ async function handlerModeCommand(command, args, environment) {
       ...sessionKey === undefined ? {} : { sessionKey },
       timeoutMs,
       billingMode,
-      ...recordsRoot === undefined ? {} : { recordsRoot }
+      ...recordsRoot === undefined ? {} : { recordsRoot },
+      ...spendCap === undefined ? {} : { spendCap }
     },
     flags: parsed.flags,
     positionals: parsed.positionals,

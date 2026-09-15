@@ -210,6 +210,7 @@ cluster order is simply the order in which each group's first idea arrived, and 
 id in arrival order — is always in the output, so a reader who distrusts the grouping can ignore
 it entirely. Clusters keep their ids across passes wherever a group is still the best home for its
 members, and a number retired by a merge is never issued again.
+
 ## Forum
 
 `forum` puts a motion to many seats over several rounds and records what happened. Round one is
