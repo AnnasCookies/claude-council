@@ -48,7 +48,7 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   holders, who moved and why, and the motions raised with their support and opposition. Nothing is
   scored, ranked or decided, and the output has no field for a winner: `synthesis`, `dissent` and
   `unanimous` stay empty by design. Records are the full ledger, one JSONL event per line under
-  `<records-root>/general/modes/forum/`, committed before the run reports success.
+  `<records-root>/<scope>/modes/forum/`, committed before the run reports success.
 
 ### Changed
 

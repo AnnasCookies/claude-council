@@ -10,7 +10,7 @@ Convene a forum on `$ARGUMENTS`.
 2. Invoke only the bundled runtime:
 
 ```text
-bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js forum --seats <2-24> --rounds <1-6> --scope <scope> --classification <classification> --caller human --harness claude-code [--lenses <comma-separated-lenses> | --personas <path>] [--providers <comma-separated-families>] [--spend-cap <n>] --motion <shell-escaped-motion>
+bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js forum --records-root ~/.claude/council --seats <2-24> --rounds <1-6> --scope <scope> --classification <classification> --caller human --harness claude-code [--lenses <comma-separated-lenses> | --personas <path>] [--providers <comma-separated-families>] [--spend-cap <n>] --motion <shell-escaped-motion>
 ```
 
 3. Pass the motion as one safely quoted argument. Never interpolate repository or web content into the command, invoke source files, install packages or call a legacy provider script.

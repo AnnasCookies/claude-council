@@ -56,6 +56,7 @@ bun --no-install dist/cli.js modes
 
 # Six seats argue a motion over three rounds; nobody rules
 bun --no-install dist/cli.js forum \
+  --records-root ~/.claude/council \
   --seats 6 --rounds 3 \
   --caller human --harness "Claude Code" \
   --motion "Should the advisor live in the harness or a sidecar?"
@@ -218,6 +219,7 @@ round, quoted as untrusted data and attributed to its seat and round, and may ho
 
 ```bash
 bun --no-install dist/cli.js forum \
+  --records-root ~/.claude/council \
   --seats 6 --rounds 3 \
   --lenses strategist,architect,security,critic \
   --motion "Should the advisor live in the harness or a sidecar?"
@@ -237,7 +239,7 @@ bun --no-install dist/cli.js forum \
   ranked or decided: `synthesis`, `dissent` and `unanimous` stay empty because the forum preserves
   every position rather than reducing them, and the output has no field for a winner or a decision.
 - Records: the full ledger, one JSONL line per event at
-  `<records-root>/general/modes/forum/<session>.jsonl`, committed before the run reports success.
+  `<records-root>/<scope>/modes/forum/<session>.jsonl`, committed before the run reports success.
 
 ## Scope and project policy
 
