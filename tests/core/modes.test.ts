@@ -89,12 +89,13 @@ function options(overrides: Partial<SessionOptions> = {}): SessionOptions {
 }
 
 describe('modes registry', () => {
-  test('registers committee, second opinion, the advisor, ideation, forum and triage', () => {
+  test('registers committee, second opinion, the advisor, ideation, consultants, forum and triage', () => {
     expect([...MODE_NAMES]).toEqual([
       'committee',
       'second-opinion',
       'advisor',
       'ideation',
+      'consultants',
       'forum',
       'triage',
     ]);
@@ -105,11 +106,18 @@ describe('modes registry', () => {
     expect(modes.committee.spend.defaultCap(5, 2)).toBe(10);
     expect(modes['second-opinion'].spend.defaultCap(5, 1)).toBe(5);
     expect(modes.forum.spend.defaultCap(6, 3)).toBe(18);
+    expect(modes.consultants.pattern).toBe('parallel');
+    // consultants sizes its cap from the eligible family count alone: one reserved metered call
+    // per family covers the report round, the synthesiser and a follow-up from one shared ledger.
+    expect(modes.consultants.spend.defaultCap(3, 1)).toBe(3);
     // The registry is mixed, and each entry keeps its own type: a runner mode has `prepare` and
     // `defaults`, a handler mode has `handle`, and nothing has both.
     expect(isHandlerMode(modes.committee)).toBe(false);
     expect(isHandlerMode(modes.ideation)).toBe(true);
     expect(isHandlerMode(modes.forum)).toBe(true);
+    expect(isHandlerMode(modes.consultants)).toBe(true);
+    expect(modes.consultants.kind).toBe('handler');
+    expect(modes.consultants.acceptsPositionals).toBe(true);
     expect(typeof modes.ideation.handle).toBe('function');
     // triage is a handler mode alongside the advisor and ideation: it owns its execution and
     // never falls back to a metered key.
@@ -120,10 +128,10 @@ describe('modes registry', () => {
   });
 
   test('an unknown mode fails with the whole registered list', () => {
-    // `forum` and `triage` are registered now, so the example is a mode docs/modes.md specifies
+    // `consultants`, `forum` and `triage` are registered now, so the example is a mode docs/modes.md specifies
     // and this build does not carry.
     expect(() => getMode('audience')).toThrow(
-      /^Unknown mode: audience\. Registered modes: committee, second-opinion, advisor, ideation, forum, triage$/,
+      /^Unknown mode: audience\. Registered modes: committee, second-opinion, advisor, ideation, consultants, forum, triage$/,
     );
   });
 

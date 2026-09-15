@@ -1,5 +1,6 @@
 import { advisor } from './advisor';
 import { committee } from './committee';
+import { consultants } from './consultants';
 import { forum } from './forum';
 import { ideation } from './ideation';
 import { secondOpinion } from './second-opinion';
@@ -36,6 +37,7 @@ export const modes: Readonly<{
   readonly 'second-opinion': RunnerModeDefinition;
   readonly advisor: HandlerModeDefinition;
   readonly ideation: HandlerModeDefinition;
+  readonly consultants: HandlerModeDefinition;
   readonly forum: HandlerModeDefinition;
   readonly triage: HandlerModeDefinition;
 }> = Object.freeze({
@@ -43,6 +45,7 @@ export const modes: Readonly<{
   'second-opinion': runnerMode(secondOpinion),
   advisor,
   ideation,
+  consultants,
   forum,
   triage,
 }) satisfies Readonly<Record<ModeName, ModeDefinition>>;
