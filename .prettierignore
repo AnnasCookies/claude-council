@@ -11,3 +11,7 @@ tests/tmp/
 # Captured provider payloads are compared byte-exactly by the seat parsers.
 # Reformatting them silently breaks the transcript binding — never format these.
 tests/core/fixtures/
+
+# Plan and SDD scratch trees (gitignored); probes left there must not fail the gate.
+docs/superpowers/
+.superpowers/
