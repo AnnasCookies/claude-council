@@ -3,6 +3,7 @@ import { committee } from './committee';
 import { forum } from './forum';
 import { ideation } from './ideation';
 import { secondOpinion } from './second-opinion';
+import { triage } from './triage';
 import {
   SPECIFIED_MODE_NAMES,
   isHandlerMode,
@@ -36,12 +37,14 @@ export const modes: Readonly<{
   readonly advisor: HandlerModeDefinition;
   readonly ideation: HandlerModeDefinition;
   readonly forum: HandlerModeDefinition;
+  readonly triage: HandlerModeDefinition;
 }> = Object.freeze({
   committee: runnerMode(committee),
   'second-opinion': runnerMode(secondOpinion),
   advisor,
   ideation,
   forum,
+  triage,
 }) satisfies Readonly<Record<ModeName, ModeDefinition>>;
 
 /** What a build can run, keyed by specified name. Tests inject one to register a fixture mode. */

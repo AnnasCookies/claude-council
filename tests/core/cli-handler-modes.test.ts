@@ -592,7 +592,7 @@ describe('handler mode dispatch', () => {
       ideate: { mode: 'ideation', registered: true },
       consult: { mode: 'consultants', registered: false },
       forum: { mode: 'forum', registered: true },
-      triage: { mode: 'triage', registered: false },
+      triage: { mode: 'triage', registered: true },
       audience: { mode: 'audience', registered: false },
     });
     const unknown = await runCliFacade(['bogus']);
@@ -614,6 +614,7 @@ describe('handler mode dispatch', () => {
       ['advisor', 'handler'],
       ['ideation', 'handler'],
       ['forum', 'handler'],
+      ['triage', 'handler'],
       ['audience', 'handler'],
     ]);
     const builtIn = JSON.parse((await runCliFacade(['modes'])).stdout);
@@ -623,6 +624,7 @@ describe('handler mode dispatch', () => {
       'advisor',
       'ideation',
       'forum',
+      'triage',
     ]);
   });
 

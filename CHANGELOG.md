@@ -54,6 +54,19 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
 - The result envelope carries up to six rounds, which is the forum's ceiling. The council runner,
   its round executions and the persisted session record still refuse more than three.
+- **Triage mode.** `convene triage --schema pr-comment --in comments.json --seats 2 --json` sorts a
+  batch of items against a declared schema and returns a route per item, never taking it. One seat
+  by default, two under `--seats 2` for a disagreement check: seats that agree on class and route
+  route there, seats that disagree route to `human` with `agreed: false`, and both verdicts are
+  kept. A verdict that misses the declared schema is discarded for that seat and kept in the
+  record with its raw text; an item the secrets guard blocks, an item with no available seat and an
+  item with no valid verdict are listed in `unprocessed` with the reasons `policy`, `no-seat` and
+  `no-verdict` and are never routed. `--schema-file <path>` declares your own classes, severities
+  and routes; `--concurrency` bounds how many items are in flight (default 4, at most 8). Spend is
+  `never-metered`: `--billing api-only` is refused, a metered-only family is never seated, and a
+  missing voice is recorded rather than bought. The routed batch is one append-only JSONL log per
+  session under `<records-root>/general/modes/triage/`, committed before the run reports success
+  and rendered as minutes where `COUNCIL_MINUTES_DIR` is set. Plugin command `/convene:triage`.
 
 ## 2026.9.6
 

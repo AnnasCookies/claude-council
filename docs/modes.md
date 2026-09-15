@@ -399,6 +399,10 @@ each item scored against a schema (class, severity, route, confidence, reason). 
 and route; any item where two seats disagree is routed to a human. Tempo: fast, batch. Records:
 the routed batch with per-item verdicts.
 
+`--seats` takes 1 or 2 (default 1) and `--providers` sets the order families are seated in;
+`--concurrency` bounds how many items are in flight (default 4, at most 8); `--schema-file <path>`
+declares a schema of your own, and `human` is added to its routes when absent.
+
 **Consumer.** The agent.
 
 **Spend.** `sub-only`. If a seat is unavailable the batch runs with the remaining seat, or returns
@@ -439,7 +443,8 @@ every item as `unprocessed`. It never routes an item it did not read.
 **Example.**
 
 ```text
-council triage --schema pr-comment --in comments.json --seats 2 --json   # new
+convene triage --schema pr-comment --in comments.json --seats 2 --json
+convene triage --schema-file schemas/issue.json --in issues.json --concurrency 8
 ```
 
 ## Audience
