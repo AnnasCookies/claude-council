@@ -50,6 +50,13 @@ owns the JSONL event shapes, the output schema and the rebuild of a session from
 the engine's own everywhere it appears — the unclustered list is always in the output, and nothing
 in the mode scores, ranks or votes.
 
+`src/modes/consultants/` briefs one consultant per lens and keeps the session open: `lenses.ts`
+resolves catalogue lenses and personas, `context.ts` reads `--context` files inside the working
+directory (symlinks resolved before the containment check), `prompts.ts` holds the report, synthesis
+and follow-up prompts, `session.ts` the JSONL event shapes and the rebuild of a session from its log,
+and `index.ts` the handler. The synthesiser lists conflicts and never resolves one; the spend cap
+covers the whole session.
+
 `src/modes/forum/` runs one blind panel per round over the panel primitive: `answers.ts` holds the
 stance and motion contracts, `prompts.ts` the opening and reply prompts (every prior position
 quoted as untrusted data), `aggregate.ts` the position map, the moves and the motions, and
