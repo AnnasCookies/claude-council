@@ -13,6 +13,7 @@ import {
   panelEnvelopeSeats,
   runPanel,
   spreadSeats,
+  withCredentialFallback,
   type PanelLens,
   type ProviderAdapter,
   type ProviderFamily,
@@ -69,7 +70,7 @@ const audience: HandlerModeDefinition = {
             },
           },
         },
-        spend: { policy: 'never-metered' },
+        spend: input.spend,
       },
     );
     const session = input.options.sessionId ?? newModeSessionId('au', input.now());
@@ -109,6 +110,159 @@ const audience: HandlerModeDefinition = {
     };
   },
 };
+
+const voteAnswer = {
+  schema: VoteSchema,
+  instruction:
+    'Return exactly one JSON object with these keys: vote ("yes" or "no"), note (string). Do not wrap it in prose.',
+  jsonSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['vote', 'note'],
+    properties: {
+      vote: { type: 'string', enum: ['yes', 'no'] },
+      note: { type: 'string', minLength: 1 },
+    },
+  },
+};
+
+/**
+ * A capped mode whose subscription seat always fails and whose metered fallback would rescue it,
+ * so whatever the CLI put in the ledger is what decides the seat. It exists to prove `--spend-cap`
+ * reaches the handler path's seats rather than being parsed and dropped.
+ */
+const consultants: HandlerModeDefinition = {
+  kind: 'handler',
+  name: 'consultants',
+  knobs: {
+    participants: 'a few expensive seats',
+    pattern: 'parallel',
+    aggregation: 'one brief each',
+    tempo: 'hours',
+    records: 'the brief and its answers',
+  },
+  pattern: 'parallel',
+  spend: { policy: 'capped', defaultCap: (seats, rounds) => seats * rounds },
+  flags: { value: [], boolean: [] },
+  outputSchema: z.strictObject({ answered: z.number() }),
+  async handle(input) {
+    const seats = spreadSeats(
+      input.options.providerFamilies,
+      [{ name: 'brief', description: 'The consultant reads the brief.' }],
+      input.context.registry,
+    );
+    const panel = await runPanel(
+      { adapters: input.adapters, context: input.context },
+      {
+        seats,
+        prompt: () => input.options.motion ?? '',
+        answer: voteAnswer,
+        spend: input.spend,
+      },
+    );
+    const complete = panel.answered === seats.length;
+    return {
+      kind: 'result',
+      status: complete ? 'completed' : 'degraded',
+      session: input.options.sessionId ?? newModeSessionId('co', input.now()),
+      pattern: 'parallel',
+      rounds: 1,
+      seats: panelEnvelopeSeats(panel.seats),
+      output: { answered: panel.answered },
+      synthesis: null,
+      dissent: null,
+      unanimous: false,
+      degraded: [],
+      spend: panel.spend,
+      record: { session: null, paths: [] },
+    };
+  },
+};
+
+/** One family, its subscription always exhausted and a metered key that would answer instead. */
+async function cappedFixtureEnvironment(): Promise<{
+  environment: CliFacadeEnvironment;
+  metered: () => number;
+}> {
+  const registry = await loadModelRegistry();
+  let metered = 0;
+  const available = {
+    status: 'available',
+    provider: 'anthropic',
+    model: registry.anthropic.primary,
+    reason: '',
+  } as const;
+  const healthy = {
+    status: 'healthy',
+    provider: 'anthropic',
+    requestedModel: registry.anthropic.primary,
+    actualModel: registry.anthropic.primary,
+    latencyMs: 1,
+    reason: '',
+  } as const;
+  const subscription: ProviderAdapter = {
+    family: 'anthropic',
+    transport: registry.anthropic.transport,
+    async availability() {
+      return available;
+    },
+    async invoke(request: ProviderRequest) {
+      return {
+        status: 'failed',
+        seatId: request.seatId,
+        provider: 'anthropic',
+        requestedModel: registry.anthropic.primary,
+        role: request.role,
+        latencyMs: 1,
+        error: {
+          code: 'quota-exhausted',
+          message: 'Deterministic quota fixture.',
+          retryable: false,
+        },
+      };
+    },
+    async probe() {
+      return healthy;
+    },
+  };
+  const api: ProviderAdapter = {
+    family: 'anthropic',
+    transport: 'http',
+    async availability() {
+      return available;
+    },
+    async invoke(request: ProviderRequest) {
+      metered += 1;
+      return {
+        status: 'ok',
+        seatId: request.seatId,
+        provider: 'anthropic',
+        requestedModel: registry.anthropic.primary,
+        actualModel: registry.anthropic.primary,
+        modelIdentity: 'verified',
+        route: 'primary',
+        role: request.role,
+        latencyMs: 1,
+        credentialPath: 'api-key',
+        answer: JSON.stringify({ vote: 'yes', note: 'The metered key answered.' }),
+      };
+    },
+    async probe() {
+      return healthy;
+    },
+  };
+  return {
+    environment: {
+      registry,
+      adapters: { anthropic: withCredentialFallback(subscription, () => api, 'http') },
+      cwd: 'C:/fixture/project',
+      env: {},
+      now: () => NOW,
+      modes: { consultants },
+    },
+    metered: () => metered,
+  };
+}
 
 async function fixtureEnvironment(
   failing: readonly ProviderFamily[] = [],
@@ -276,6 +430,55 @@ describe('handler mode dispatch', () => {
     expect(envelope.degraded).toEqual(['caller-undeclared', 'voices-missing']);
   });
 
+  test('--spend-cap binds the metered fallbacks a capped handler mode may take', async () => {
+    const fixture = await cappedFixtureEnvironment();
+    const result = await runCliFacade(
+      ['consult', '--providers', 'anthropic', '--spend-cap', '0', '--motion', 'Bound the spend'],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(4);
+    const payload = JSON.parse(result.stdout);
+    const envelope = ResultEnvelopeSchema.parse(payload.envelope);
+    expect(fixture.metered()).toBe(0);
+    expect(envelope.spend).toEqual({
+      billing: 'sub-first',
+      policy: 'capped',
+      cap: 0,
+      used: 0,
+      fallbacks: 0,
+      refused: 1,
+      stoppedAtCap: true,
+    });
+    // The runner path reports an exhausted cap the same way: the seat keeps its own failure, the
+    // envelope is marked, and the command exits 4.
+    expect(envelope.seats[0]).toMatchObject({ family: 'anthropic', status: 'failed' });
+    expect(envelope.seats[0]?.reason).toContain('spend cap of 0');
+    expect(envelope.degraded).toContain('spend-cap-reached');
+    expect(payload.spendWarning).toContain('spend cap of 0');
+  });
+
+  test("without --spend-cap the ledger takes the mode's own default cap", async () => {
+    const fixture = await cappedFixtureEnvironment();
+    const result = await runCliFacade(
+      ['consult', '--providers', 'anthropic', '--motion', 'Spend what the mode allows'],
+      fixture.environment,
+    );
+    expect(result.exitCode).toBe(0);
+    const envelope = ResultEnvelopeSchema.parse(JSON.parse(result.stdout).envelope);
+    // defaultCap(seats, rounds) over the six eligible families and the one round.
+    expect(envelope.spend).toEqual({
+      billing: 'sub-first',
+      policy: 'capped',
+      cap: 6,
+      used: 1,
+      fallbacks: 1,
+      refused: 0,
+      stoppedAtCap: false,
+    });
+    expect(fixture.metered()).toBe(1);
+    expect(envelope.seats[0]).toMatchObject({ status: 'ok', transport: 'api', fallback: true });
+  });
+
   test('commits the session log and writes minutes when a records root is configured', async () => {
     const root = await mkdtemp(join(tmpdir(), 'council-handler-commit-'));
     try {
@@ -385,18 +588,23 @@ describe('handler mode dispatch', () => {
       expect(help.commands).toContain(command);
     }
     expect(help.handlerCommands).toEqual({
-      advise: 'advisor',
-      ideate: 'ideation',
-      consult: 'consultants',
-      forum: 'forum',
-      triage: 'triage',
-      audience: 'audience',
+      advise: { mode: 'advisor', registered: false },
+      ideate: { mode: 'ideation', registered: false },
+      consult: { mode: 'consultants', registered: false },
+      forum: { mode: 'forum', registered: false },
+      triage: { mode: 'triage', registered: false },
+      audience: { mode: 'audience', registered: false },
     });
     const unknown = await runCliFacade(['bogus']);
     expect(unknown.exitCode).toBe(2);
     expect(unknown.stderr).toContain('consult');
 
     const fixture = await fixtureEnvironment();
+    // A build that registers the mode says so, so the listing never advertises six subcommands
+    // that every one of them would refuse.
+    const injectedHelp = JSON.parse((await runCliFacade(['help'], fixture.environment)).stdout);
+    expect(injectedHelp.handlerCommands.audience).toEqual({ mode: 'audience', registered: true });
+    expect(injectedHelp.handlerCommands.forum).toEqual({ mode: 'forum', registered: false });
     const injected = JSON.parse((await runCliFacade(['modes'], fixture.environment)).stdout);
     expect(
       injected.modes.map((mode: { name: string; kind: string }) => [mode.name, mode.kind]),

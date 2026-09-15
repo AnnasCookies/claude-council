@@ -8,6 +8,7 @@ import type {
   ExecutionPattern,
   ModeSessionStore,
   MotionImpact,
+  PanelSpend,
   PersistedDecisionState,
   PolicyDecision,
   ProjectPolicy,
@@ -104,7 +105,7 @@ export interface RunnerModeDefinition {
   readonly pattern: ExecutionPattern;
   readonly defaults: ModeDefaults;
   readonly spend: ModeSpend;
-  readonly outputSchema: z.ZodTypeAny;
+  readonly outputSchema: z.ZodType<Record<string, unknown>>;
   /** Everything between policy preflight and seating: for the committee, the health preflight. */
   prepare(input: ModePrepareInput): Promise<ModePrepareOutcome>;
   /** The mode-specific `output` block of the result envelope. Must satisfy `outputSchema`. */
@@ -132,7 +133,6 @@ export interface HandlerCommonOptions {
   readonly timeoutMs: number;
   /** After the mode's spend policy was applied: never-metered modes always see `sub-only`. */
   readonly billingMode: BillingMode;
-  readonly spendCap?: number;
   readonly recordsRoot?: string;
 }
 
@@ -151,11 +151,25 @@ export interface HandlerInput {
    * The same outbound policy over payloads the CLI could not see at preflight — a draft, a
    * transcript window, a batch of items. A blocked decision must stop the handler before any
    * seat is invoked.
+   *
+   * Precisely what is and is not already covered. The CLI's preflight scans `--motion` and nothing
+   * else, so every other payload a mode reads — a file, stdin, a prior session's events, a batch of
+   * items — has been scanned by no one until this is called on it. The classification and
+   * project-policy destination checks always run, whether or not a mode calls this, because they
+   * are decided from the flags rather than from the text. `runPanel` applies the hard-secret
+   * backstop to every prompt unconditionally, so a mode that skips this on its own payloads
+   * under-reports redactions on the record rather than leaking a key to a provider.
    */
   readonly guard: (payloads: readonly string[]) => PolicyDecision;
   /** Null when no records root is configured; a mode that needs records must say so. */
   readonly sessions: ModeSessionStore | null;
-  readonly spend: SpendPolicy;
+  /**
+   * The spend the CLI built from the mode's policy and `--spend-cap`: `never-metered` carries no
+   * ledger, `capped` carries the one the session's metered fallbacks must reserve from. Pass it
+   * straight to `runPanel`, so the cap the caller asked for is the cap the seats are held to and
+   * the envelope's `spend.cap` is that same ledger's.
+   */
+  readonly spend: PanelSpend;
   readonly now: () => string;
 }
 
@@ -196,7 +210,7 @@ export interface HandlerModeDefinition {
   readonly pattern: ExecutionPattern;
   readonly spend: ModeSpend;
   readonly flags: HandlerModeFlags;
-  readonly outputSchema: z.ZodTypeAny;
+  readonly outputSchema: z.ZodType<Record<string, unknown>>;
   handle(input: HandlerInput): Promise<HandlerOutcome>;
 }
 

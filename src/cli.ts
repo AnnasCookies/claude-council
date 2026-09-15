@@ -56,6 +56,7 @@ import {
   type ModelRegistry,
 } from './substrate/models/registry';
 import { executePattern } from './substrate/patterns';
+import type { PanelSpend } from './substrate/patterns/panel';
 import { evaluateOutbound, type PolicyDecision } from './substrate/policy/data-guard';
 import { scanAndRedact } from './substrate/policy/secrets';
 import { createProviderRoster, type ProviderRoster } from './substrate/providers';
@@ -889,7 +890,7 @@ async function runCouncilCommand(
     });
   }
 
-  const mode = getRunnerMode(options.mode);
+  const mode = getRunnerMode(options.mode, modeRegistry(environment));
   const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters =
     environment.adapters ??
@@ -988,9 +989,7 @@ async function runCouncilCommand(
     degraded.push('legacy-significant-second-opinion');
   }
   if (ledger.refused > 0) degraded.push('spend-cap-reached');
-  const modeOutput = mode.outputSchema.parse(
-    mode.output({ result: execution, decisionState }),
-  ) as Record<string, unknown>;
+  const modeOutput = mode.outputSchema.parse(mode.output({ result: execution, decisionState }));
   const envelope: ResultEnvelope = buildEnvelope({
     mode: mode.name,
     session: executionOptions.runId,
@@ -1616,6 +1615,24 @@ async function handlerModeCommand(
   const sessions =
     recordsRoot === undefined ? null : ModeSessionStore.open(recordsRoot, sessionScope);
 
+  // The handler path's answer to `--spend-cap`. A never-metered mode has no ledger to hold — the
+  // panel enforces that policy by refusing every fallback — and a capped mode gets the ledger the
+  // caller asked for. The default is sized on the eligible families rather than the selected ones
+  // or the seat count, because a handler mode builds its own seats and the CLI cannot know how many
+  // until the mode has run: eligible is the widest roster its policy allows it to draw from. The
+  // mode hands this straight to `runPanel`, so the cap the envelope reports is this ledger's rather
+  // than a number nobody consulted.
+  const spend: PanelSpend =
+    mode.spend.policy === 'never-metered'
+      ? { policy: 'never-metered' }
+      : {
+          policy: 'capped',
+          billing: billingMode,
+          ledger: createSpendLedger(
+            spendCap ?? mode.spend.defaultCap(providerSelection.eligible.length, 1),
+          ),
+        };
+
   const input: HandlerInput = {
     command,
     options: {
@@ -1630,7 +1647,6 @@ async function handlerModeCommand(
       ...(sessionId === undefined ? {} : { sessionId }),
       timeoutMs,
       billingMode,
-      ...(spendCap === undefined ? {} : { spendCap }),
       ...(recordsRoot === undefined ? {} : { recordsRoot }),
     },
     flags: parsed.flags,
@@ -1641,7 +1657,7 @@ async function handlerModeCommand(
     policyDecision,
     guard,
     sessions,
-    spend: mode.spend.policy,
+    spend,
     now,
   };
   const outcome = await mode.handle(input);
@@ -1661,7 +1677,7 @@ async function handlerModeCommand(
   if (!caller.declared) degraded.push('caller-undeclared');
   if (outcome.spend.stoppedAtCap) degraded.push('spend-cap-reached');
   degraded.push(...outcome.degraded);
-  const modeOutput = mode.outputSchema.parse(outcome.output) as Record<string, unknown>;
+  const modeOutput = mode.outputSchema.parse(outcome.output);
   const envelope: ResultEnvelope = buildEnvelope({
     mode: mode.name,
     session: outcome.session,
@@ -1708,11 +1724,21 @@ async function handlerModeCommand(
   });
 }
 
-function help(): CliFacadeResult {
+function help(environment: CliFacadeEnvironment): CliFacadeResult {
+  // Listing the six subcommands without saying which are registered advertised six commands that
+  // every build refuses; `registered` is the honest half of that listing. The runtime error keeps
+  // its own wording, because it names the mode a build would have to add.
+  const registry = modeRegistry(environment);
+  const handlerCommands = Object.fromEntries(
+    Object.entries(HANDLER_COMMANDS).map(([command, mode]) => [
+      command,
+      { mode, registered: registry[mode] !== undefined },
+    ]),
+  );
   return output(0, {
     name: 'convene',
     commands: [...COMMANDS],
-    handlerCommands: HANDLER_COMMANDS,
+    handlerCommands,
     invocation: 'All execution is explicit; no automatic hook starts a council.',
     defaultSeatCount: DEFAULT_SEAT_COUNT,
     runOptions: {
@@ -1757,7 +1783,9 @@ export async function runCliFacade(
   try {
     const command = argv[0];
     const args = argv.slice(1);
-    if (command === undefined || command === '--help' || command === 'help') return help();
+    if (command === undefined || command === '--help' || command === 'help') {
+      return help(environment);
+    }
     if (command === 'run' || command === 'council' || command === 'second-opinion') {
       return await runCouncilCommand(command, args, environment);
     }

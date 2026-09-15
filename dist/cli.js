@@ -16834,10 +16834,12 @@ function structuredPrompt(prompt, contract) {
 
 ${prompt}`;
 }
-var claudeAnswerFormatGuard = "Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string. Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.";
-function claudeStructuredPrompt(prompt, contract) {
+var claudeAnswerFormatGuard = "Every string value must be plain prose in a single paragraph: no markdown, no headings, no bullet or numbering characters, and no line breaks or tab characters inside any string.";
+var councilAnswerLengthGuard = "Keep recommendation under 2500 characters and each array to at most eight entries of one or two sentences.";
+function claudeStructuredPrompt(prompt, contract, councilShape) {
+  const guard = councilShape ? `${claudeAnswerFormatGuard} ${councilAnswerLengthGuard}` : claudeAnswerFormatGuard;
   return `${contract.instruction}
-${claudeAnswerFormatGuard}
+${guard}
 
 ${prompt}`;
 }
@@ -17290,12 +17292,22 @@ var councilAnswerJsonSchema = {
     decisiveTest: { type: "string", minLength: 1 }
   }
 };
-var COUNCIL_ANSWER_CONTRACT = Object.freeze({
+function deepFreeze(value) {
+  for (const nested of Object.values(value)) {
+    if (typeof nested === "object" && nested !== null)
+      deepFreeze(nested);
+  }
+  return Object.freeze(value);
+}
+var COUNCIL_ANSWER_CONTRACT = deepFreeze({
   instruction: answerInstruction,
   jsonSchema: councilAnswerJsonSchema
 });
 function answerContract(request) {
   return request.answer ?? COUNCIL_ANSWER_CONTRACT;
+}
+function isCouncilShape(request) {
+  return request.answer === undefined;
 }
 function skipBenignNotices(renderedMessages) {
   const benignNotice = /^(?:warning|note|notice|info): [^\n]*$/i;
@@ -17311,7 +17323,7 @@ function skipBenignNotices(renderedMessages) {
 function parseFailure(code, actualModel) {
   return actualModel === undefined ? { status: "failed", code } : { status: "failed", code, actualModel };
 }
-function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt, contract) {
+function extractCodexOutput(stdout, workingDirectory, stderr, expectedPrompt, councilShape) {
   const normalised = stderr.replace(/\r\n/g, `
 `);
   const userPrefix = `
@@ -17376,7 +17388,7 @@ ${answerMarker}`).map((value) => value.trim());
     } catch {
       return parseFailure("identity-unverified", actualModel);
     }
-    if (contract === COUNCIL_ANSWER_CONTRACT && !CouncilAnswerSchema.safeParse(value).success) {
+    if (councilShape && !CouncilAnswerSchema.safeParse(value).success) {
       return parseFailure("identity-unverified", actualModel);
     }
   }
@@ -17627,7 +17639,7 @@ function createSubscriptionCliAdapter(config2, transport, resolveExecutable) {
         capture(request, config2.family, "provider-failure", `[${config2.executableName} stderr omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, result.status === "timed-out" ? "timed-out" : "failed", result.errorCode ?? "provider-failed", `${config2.executableName} subscription CLI failed`, result.durationMs);
       }
-      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt, contract), configuredRoute.primary, contract);
+      const output = config2.output(result.stdout, result.workingDirectory, result.stderr, structuredPrompt(request.prompt, contract), configuredRoute.primary, isCouncilShape(request));
       if (output.status === "failed") {
         capture(request, config2.family, "invalid-provider-response", `[${config2.executableName} output omitted]`);
         return seatError(request, config2.family, configuredRoute.primary, "failed", output.code, output.code === "unsafe-tool-isolation" ? `${config2.executableName} violated the governed tool-isolation policy` : `${config2.executableName} output did not include one verifiable model identity and answer`, result.durationMs, false, output.actualModel === undefined ? undefined : { actualModel: output.actualModel, modelIdentity: "unverified" }, { requestedEffort: config2.requestedEffort, credentialPath: "subscription" });
@@ -17749,7 +17761,7 @@ function createOpenAiCodexAdapter(transport = nativeCliTransport, resolveExecuta
         }
       };
     },
-    output: (stdout, workingDirectory, stderr, prompt, _requestedModel, contract) => extractCodexOutput(stdout, workingDirectory, stderr, prompt, contract)
+    output: (stdout, workingDirectory, stderr, prompt, _requestedModel, councilShape) => extractCodexOutput(stdout, workingDirectory, stderr, prompt, councilShape)
   }, transport, resolveExecutable);
 }
 function executableOnPath(name, env) {
@@ -18090,7 +18102,7 @@ function createAnthropicAdapter(transport = nativeCliTransport, resolveExecutabl
         ""
       ];
       const contract = answerContract(request);
-      const stdin = claudeStructuredPrompt(request.prompt, contract);
+      const stdin = claudeStructuredPrompt(request.prompt, contract, isCouncilShape(request));
       let result = await transport.run({
         executable,
         args: [
@@ -18271,13 +18283,14 @@ var EnvelopeRecordSchema = exports_external.strictObject({
   commitSha: exports_external.string().regex(/^[a-f0-9]{7,40}$/).optional(),
   minutes: exports_external.string().nullable().optional()
 });
+var MAX_ENVELOPE_ROUNDS = 6;
 var ResultEnvelopeSchema = exports_external.strictObject({
   schemaVersion: exports_external.literal(1),
   mode: NonEmptyStringSchema2,
   session: NonEmptyStringSchema2,
   caller: CallerSchema,
   pattern: ExecutionPatternSchema,
-  rounds: exports_external.number().int().min(0).max(3),
+  rounds: exports_external.number().int().min(0).max(MAX_ENVELOPE_ROUNDS),
   seats: exports_external.array(EnvelopeSeatSchema),
   output: exports_external.record(exports_external.string(), exports_external.unknown()),
   synthesis: exports_external.strictObject({ by: NonEmptyStringSchema2, text: NonEmptyStringSchema2 }).nullable(),
@@ -19688,6 +19701,8 @@ var PanelSeatSpecsSchema = exports_external.array(PanelSeatSpecSchema).min(1).su
     seen.add(seat.id);
   }
 });
+var DEFAULT_PANEL_CONCURRENCY = 6;
+var PanelConcurrencySchema = exports_external.number().int().min(1).max(24).default(DEFAULT_PANEL_CONCURRENCY);
 var UntrustedTagSchema = exports_external.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
 // src/substrate/policy/data-guard.ts
 import { createHash as createHash3 } from "crypto";
@@ -22230,10 +22245,11 @@ var ProjectIdSchema = exports_external.string().max(128).regex(/^[A-Za-z0-9](?:[
 var ModeSessionPrefixSchema = exports_external.string().regex(/^[a-z]{1,8}$/, "A session prefix is one to eight lower-case letters");
 var ModeSessionIdSchema = exports_external.string().regex(/^[a-z]{1,8}-\d{4}-\d{2}-\d{2}-[a-f0-9]{6}$/, "A session id is <prefix>-<yyyy-mm-dd>-<six hex characters>");
 var ModeSessionModeSchema = exports_external.string().regex(/^[a-z][a-z-]{0,31}$/, "A mode name is lower-case letters and hyphens");
+var ModeSessionDataSchema = exports_external.unknown().refine((value) => value !== undefined, "A mode session event needs JSON-serialisable data; pass null for an event that carries none");
 var ModeSessionEventSchema = exports_external.strictObject({
   at: TimestampSchema7,
   kind: exports_external.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "An event kind is a lower-case slug"),
-  data: exports_external.unknown()
+  data: ModeSessionDataSchema
 });
 var ModeSessionScopeSchema = exports_external.discriminatedUnion("scope", [
   exports_external.strictObject({ scope: exports_external.literal("general") }),
@@ -23189,7 +23205,7 @@ async function runCouncilCommand(command, args, environment) {
       })
     });
   }
-  const mode = getRunnerMode(options.mode);
+  const mode = getRunnerMode(options.mode, modeRegistry(environment));
   const billingMode = effectiveBillingMode(mode.spend.policy, options.billingMode);
   const adapters = environment.adapters ?? createProviderRoster({
     env: environment.env ?? process.env,
@@ -23707,6 +23723,11 @@ async function handlerModeCommand(command, args, environment) {
   };
   const sessionScope = scope === "general" ? { scope: "general" } : { scope: "project", projectId: requireProjectId(projectId) };
   const sessions = recordsRoot === undefined ? null : ModeSessionStore.open(recordsRoot, sessionScope);
+  const spend2 = mode.spend.policy === "never-metered" ? { policy: "never-metered" } : {
+    policy: "capped",
+    billing: billingMode,
+    ledger: createSpendLedger(spendCap ?? mode.spend.defaultCap(providerSelection.eligible.length, 1))
+  };
   const input = {
     command,
     options: {
@@ -23721,7 +23742,6 @@ async function handlerModeCommand(command, args, environment) {
       ...sessionId === undefined ? {} : { sessionId },
       timeoutMs,
       billingMode,
-      ...spendCap === undefined ? {} : { spendCap },
       ...recordsRoot === undefined ? {} : { recordsRoot }
     },
     flags: parsed.flags,
@@ -23732,7 +23752,7 @@ async function handlerModeCommand(command, args, environment) {
     policyDecision,
     guard,
     sessions,
-    spend: mode.spend.policy,
+    spend: spend2,
     now
   };
   const outcome = await mode.handle(input);
@@ -23800,11 +23820,16 @@ async function handlerModeCommand(command, args, environment) {
     envelope: emitted
   });
 }
-function help() {
+function help(environment) {
+  const registry3 = modeRegistry(environment);
+  const handlerCommands = Object.fromEntries(Object.entries(HANDLER_COMMANDS).map(([command, mode]) => [
+    command,
+    { mode, registered: registry3[mode] !== undefined }
+  ]));
   return output(0, {
     name: "convene",
     commands: [...COMMANDS],
-    handlerCommands: HANDLER_COMMANDS,
+    handlerCommands,
     invocation: "All execution is explicit; no automatic hook starts a council.",
     defaultSeatCount: DEFAULT_SEAT_COUNT,
     runOptions: {
@@ -23837,8 +23862,9 @@ async function runCliFacade(argv, environment = {}) {
   try {
     const command = argv[0];
     const args = argv.slice(1);
-    if (command === undefined || command === "--help" || command === "help")
-      return help();
+    if (command === undefined || command === "--help" || command === "help") {
+      return help(environment);
+    }
     if (command === "run" || command === "council" || command === "second-opinion") {
       return await runCouncilCommand(command, args, environment);
     }

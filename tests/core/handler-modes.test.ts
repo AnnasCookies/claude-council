@@ -92,7 +92,7 @@ function input(overrides: Partial<HandlerInput> = {}): HandlerInput {
     policyDecision: allowed,
     guard: () => allowed,
     sessions: null,
-    spend: 'never-metered',
+    spend: { policy: 'never-metered' },
     now: () => '2026-09-15T10:00:00.000Z',
     ...overrides,
   };
