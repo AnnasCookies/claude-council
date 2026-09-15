@@ -67,6 +67,14 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   missing voice is recorded rather than bought. The routed batch is one append-only JSONL log per
   session under `<records-root>/general/modes/triage/`, committed before the run reports success
   and rendered as minutes where `COUNCIL_MINUTES_DIR` is set. Plugin command `/convene:triage`.
+- **Consultants mode.** `convene consult --lens <names> --context <path> --motion "…"` seats one
+  consultant per named lens (catalogue lens or `--personas` persona), briefs them all on the same
+  material — files and directories rendered as untrusted evidence and passed through the secrets
+  guard first — and returns one report per lens plus a named synthesiser seat's list of cross-lens
+  conflicts, which the engine never resolves. `consult --session <id> --ask <lens> "<question>"`
+  puts a follow-up to exactly one consultant; `--forward <lens>` is the only way another
+  consultant's report reaches it. The session is an append-only JSONL log under the records root,
+  committed before the run reports success, and the spend cap covers the whole session.
 
 ## 2026.9.6
 

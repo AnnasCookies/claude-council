@@ -35,7 +35,7 @@ the five knobs from `docs/vision.md`, its execution pattern, its defaults, its s
 it prepares a session (the committee's health preflight lives here) and the shape of its `output`
 block; the CLI seats and runs it. A handler mode declares its own flags and runs itself on the
 panel primitive, returning the envelope fields the CLI cannot know. `committee` and
-`second-opinion` are runner modes; `advisor`, `ideation`, `forum` and `triage` are handler modes;
+`second-opinion` are runner modes; `advisor`, `ideation`, `consultants`, `forum` and `triage` are handler modes;
 `docs/modes.md` specifies the rest.
 
 The advisor owns one panel seat under `never-metered`, a bounded hold, and an append-only note

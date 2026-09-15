@@ -248,6 +248,19 @@ open for follow-ups. Records: the session with reports and the Q&A.
 - A consultant sees another consultant's report only when the caller forwards it in a question.
 - A follow-up goes to one named consultant. No broadcast.
 
+**Flags.** `--lens <names>` is comma-separated and repeatable, one seat per name, in the order
+named; a name is a catalogue lens (`strategist`, `architect`, `designer`, `researcher`,
+`maintainer`, `operator`, `security`, `privacy`, `systems`, `performance`, `critic`) or a persona
+from `--personas <file>`, a JSON array of `{ "name", "description" }`, which wins where both hold
+the name. `--context <path>` takes one file or directory per occurrence and is repeatable: a
+directory contributes up to 40 text files, each up to 64 KiB, and every omission is named in
+`degraded`. `--session <id>` continues a session; `--ask <lens> "<question>"` puts the question to
+one consultant, and `--forward <lens>` is the only way another consultant's report reaches it. The
+common flags (`--caller`, `--harness`, `--purpose`, `--scope`, `--classification`,
+`--project-policy`, `--providers`, `--billing`, `--spend-cap`, `--records-root`, `--timeout-ms`)
+are parsed as they are for every other subcommand. `consult` keeps a session, so it needs a
+records root.
+
 **Output.**
 
 ```json
@@ -262,8 +275,10 @@ open for follow-ups. Records: the session with reports and the Q&A.
 **Example.**
 
 ```text
-council consult --lens security,data-model,ux --context src/ docs/vision.md --motion "…"   # new
-council consult --session c7 --ask security "Does the fallback path leak the key in logs?"  # new
+convene consult --lens security,privacy,maintainer --context src --context docs/vision.md --motion "…"
+convene consult --lens security,data-model,ux --personas consultants.json --context src --motion "…"
+convene consult --session cs-2026-09-15-3f9a1c --ask security "Does the fallback path leak the key in logs?"
+convene consult --session cs-2026-09-15-3f9a1c --ask ux --forward security "Given that, what does the consent screen have to say?"
 ```
 
 ## Forum
