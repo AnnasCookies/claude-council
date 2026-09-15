@@ -2157,13 +2157,28 @@ export interface XaiAdapterOptions {
   billingMode?: BillingMode | undefined;
 }
 
-function withTransportResolution(
+/**
+ * Label an adapter with the transport decision that produced it, so a record says which credential
+ * path a seat took and why.
+ *
+ * Exported for the regression test that keeps the delegation below honest, and because it is the
+ * sibling of `withCredentialFallback` in every other respect.
+ */
+export function withTransportResolution(
   adapter: ProviderAdapter,
   transportResolution: ProviderTransportResolution,
 ): ProviderAdapter {
   return {
     ...adapter,
     transportResolution,
+    // DECISION: `invoke`, like `availability` and `probe` below, is forwarded explicitly rather
+    // than left to the `...adapter` spread, which copies only enumerable own properties. An
+    // adapter built as an object literal carries its methods as those and survives the spread by
+    // accident; one built as a class has them on the prototype, and the spread drops them —
+    // the same defect already fixed in `withCredentialFallback`, which this wrapper sits on top of.
+    async invoke(request) {
+      return adapter.invoke(request);
+    },
     async availability(context) {
       const availability = await adapter.availability(context);
       return availability.status === 'available'

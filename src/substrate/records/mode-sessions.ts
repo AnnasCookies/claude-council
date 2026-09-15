@@ -228,14 +228,40 @@ export class ModeSessionStore {
   }
 
   async append(mode: string, sessionId: string, event: ModeSessionEvent): Promise<RecordWrite> {
+    // Validated here rather than only inside the lock so a malformed event is refused before the
+    // scope directory is created for it.
     const record = ModeSessionEventSchema.parse(event);
+    return this.appendDerived(mode, sessionId, () => record);
+  }
+
+  /**
+   * Append an event the caller derives from the log as it stands, with the read, the derivation
+   * and the write all under one scope lock.
+   *
+   * `append` cannot give that guarantee: a caller that reads the log, decides something from it
+   * and then appends leaves a window between the two in which another call can append, so two
+   * overlapping callers each decide from the same stale log — two advisor notes both minted
+   * `n-1`, or two `--end` calls each reporting that they closed the session. `derive` runs inside
+   * the lock instead, and is deliberately synchronous: anything slow (consulting a seat) belongs
+   * outside it, leaving only the part of the decision that reads the log in here. Returning
+   * `null` appends nothing and reports no path, which is how a caller says the log already
+   * settled the question.
+   */
+  async appendDerived(
+    mode: string,
+    sessionId: string,
+    derive: (events: readonly ModeSessionEvent[]) => ModeSessionEvent | null,
+  ): Promise<RecordWrite> {
     const path = this.absolutePath(mode, sessionId);
     return withScopeWriteLock(dirname(path), async () => {
       const file = Bun.file(path);
       const existing = (await file.exists()) ? await file.text() : '';
       // A log that cannot be read back is not extended: appending to it would bury the corruption
       // under valid lines and make the whole session unreadable later.
-      parseEvents(existing, path);
+      const events = parseEvents(existing, path);
+      const derived = derive(events);
+      if (derived === null) return { paths: [] };
+      const record = ModeSessionEventSchema.parse(derived);
       // Rewrite-and-rename rather than appendFile: a crash midway through an append leaves a torn
       // last line that fails every later read, whereas the rename publishes the complete new log
       // or leaves the old one untouched. The lock keeps two appends from racing the rewrite.

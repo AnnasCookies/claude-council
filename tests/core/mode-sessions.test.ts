@@ -132,6 +132,27 @@ describe('ModeSessionStore', () => {
     });
   });
 
+  test('appendDerived decides from the log under the same lock that writes it', async () => {
+    await withRoot(async (root) => {
+      const store = ModeSessionStore.open(root);
+      const id = store.newSessionId('fo', NOW);
+      // Each caller numbers its own event from the log it was handed. Outside the lock ten
+      // overlapping callers would all read an empty log and all write event one.
+      await Promise.all(
+        Array.from({ length: 10 }, () =>
+          store.appendDerived('forum', id, (events) => event('turn', { n: events.length + 1 })),
+        ),
+      );
+      const events = await store.read('forum', id);
+      expect(events.map((entry) => (entry.data as { n: number }).n)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      ]);
+      // A derivation that decides the log already settled the question writes nothing at all.
+      expect(await store.appendDerived('forum', id, () => null)).toEqual({ paths: [] });
+      expect(await store.read('forum', id)).toHaveLength(10);
+    });
+  });
+
   test('serialises concurrent appends so every event lands once', async () => {
     await withRoot(async (root) => {
       const store = ModeSessionStore.open(root);
