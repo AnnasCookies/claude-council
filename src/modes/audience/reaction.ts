@@ -13,7 +13,13 @@ const MAX_STOPPED_AT_LENGTH = 120;
 export function truncateQuote(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length <= MAX_QUOTE_LENGTH) return trimmed;
-  return `${trimmed.slice(0, MAX_QUOTE_LENGTH - 1)}…`;
+  // `slice` cuts on UTF-16 units, so it can land between the two halves of an astral character's
+  // surrogate pair and leave a lone high surrogate immediately before the ellipsis. That unpaired
+  // unit round-trips through JSON and into the session log, but a strict JSONL reader — or the
+  // minutes — renders it back as U+FFFD, one silently corrupted character in an otherwise
+  // verbatim quote. Dropping it costs at most one UTF-16 unit of the 400-unit bound.
+  const sliced = trimmed.slice(0, MAX_QUOTE_LENGTH - 1).replace(/[\uD800-\uDBFF]$/, '');
+  return `${sliced}…`;
 }
 
 /**

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  PanelLensSchema,
   newModeSessionId,
   panelEnvelopeSeats,
   runPanel,
@@ -21,7 +22,9 @@ import {
 } from './reaction';
 import { AudienceTalliesSchema, tallyReactions } from './tally';
 
-const PersonaNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
+// The same lens-name rule `PanelLensSchema` already enforces on every persona; reused rather than
+// duplicated so the two never drift apart.
+const PersonaNameSchema = PanelLensSchema.shape.name;
 const NonEmptyStringSchema = z.string().trim().min(1);
 
 /**
@@ -165,10 +168,15 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
   const draft = await readDraft(draftPath, cwd);
   const question = resolveQuestion(input);
 
-  // The draft is the payload the CLI could not see at its own preflight, so it goes through the
-  // same outbound guard before a single seat is invoked: a high-confidence secret inside a draft
-  // is a blocked run, not a redacted prompt.
-  const decision = input.guard(question === undefined ? [draft.text] : [draft.text, question]);
+  // The draft, the personas and the question are all payloads the CLI could not see at its own
+  // preflight, so every one of them goes through the same outbound guard before a single seat is
+  // invoked: a high-confidence secret in a persona file is a blocked run, not a prompt the panel
+  // discovers and fails on mid-dispatch.
+  const decision = input.guard([
+    draft.text,
+    ...(question === undefined ? [] : [question]),
+    ...personas.flatMap((persona) => [persona.name, persona.description]),
+  ]);
   if (decision.kind === 'blocked') {
     return {
       kind: 'blocked',
@@ -180,6 +188,19 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
 
   const seating = resolveSeating(input);
   const seats = spreadSeats(seating.families, personas, input.context.registry);
+  const session = input.options.sessionId ?? newModeSessionId('au', input.now());
+  if (
+    input.options.sessionId !== undefined &&
+    input.sessions !== null &&
+    (await input.sessions.exists('audience', session))
+  ) {
+    // This mode is single-shot: one draft, one round, one log. Appending a second draft's
+    // reactions to an existing log would leave `draft` events the reader cannot tell apart, so a
+    // reused id is refused before any provider is called rather than silently appended to.
+    throw new Error(
+      `An audience session log already exists at ${input.sessions.recordPath('audience', session)}; choose another --session id`,
+    );
+  }
   const panel = await runPanel(
     { adapters: input.adapters, context: input.context },
     {
@@ -223,7 +244,6 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     tallies: tallyReactions(reactions.map((reaction) => reaction.fields)),
   };
 
-  const session = input.options.sessionId ?? newModeSessionId('au', input.now());
   const paths = await recordReactions(input, session, draft, panel.seats);
 
   const degraded: string[] = [];

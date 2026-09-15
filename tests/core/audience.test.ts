@@ -45,7 +45,30 @@ function reply(persona: string): {
   };
 }
 
-type Behaviour = 'ok' | 'prose' | 'quota-exhausted' | 'long-quote';
+type Behaviour = 'ok' | 'prose' | 'quota-exhausted' | 'long-quote' | 'astral-quote';
+
+/** 300 copies of an astral emoji: 600 UTF-16 units, so the 400-unit truncation cuts a pair in half. */
+const ASTRAL_QUOTE = '😀'.repeat(300);
+
+/**
+ * `String.prototype.isWellFormed` where this Bun has it; otherwise a manual scan for a surrogate
+ * with no partner, which is exactly what a mis-sliced astral character leaves behind.
+ */
+function isWellFormedQuote(value: string): boolean {
+  const checked = value as string & { isWellFormed?: () => boolean };
+  if (typeof checked.isWellFormed === 'function') return checked.isWellFormed();
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
 
 function adapter(
   family: ProviderFamily,
@@ -85,7 +108,9 @@ function adapter(
           : JSON.stringify(
               behaviour === 'long-quote'
                 ? { ...reply(request.role), quote: 'a'.repeat(MAX_QUOTE_LENGTH + 120) }
-                : reply(request.role),
+                : behaviour === 'astral-quote'
+                  ? { ...reply(request.role), quote: ASTRAL_QUOTE }
+                  : reply(request.role),
             );
       return {
         status: 'ok',
@@ -367,6 +392,27 @@ describe('the audience mode', () => {
     });
   });
 
+  test('a quote of astral characters is truncated without leaving a lone surrogate', async () => {
+    await withDraft(async (directory) => {
+      const calls: ProviderRequest[] = [];
+      const outcome = await audience.handle(
+        input({
+          cwd: directory,
+          flags: { personas: 'ops-manager', draft: 'announcement.md' },
+          families: ['anthropic'],
+          adapters: { anthropic: adapter('anthropic', 'astral-quote', calls) },
+        }),
+      );
+      if (outcome.kind !== 'result') throw new Error('unreachable');
+      const output = AudienceOutputSchema.parse(outcome.output);
+      const quote = output.reactions[0]?.quote;
+      expect(quote).toBeDefined();
+      expect(isWellFormedQuote(quote ?? '')).toBe(true);
+      expect(quote?.endsWith('…')).toBe(true);
+      expect(quote?.length).toBeLessThanOrEqual(MAX_QUOTE_LENGTH);
+    });
+  });
+
   test('never-metered: a spent subscription is a skipped voice and no metered call is made', async () => {
     await withDraft(async (directory) => {
       const subscriptionCalls: ProviderRequest[] = [];
@@ -445,6 +491,40 @@ describe('the audience mode', () => {
       expect(outcome.message).not.toContain('cHJpdmF0ZS1rZXktbWF0ZXJpYWw=');
       expect(calls).toHaveLength(0);
     }, `# Deploy notes\n\nkey = "${secret}"\n`);
+  });
+
+  test('a high-confidence secret in a personas file blocks the run before any seat is invoked', async () => {
+    const secret = [
+      ['-----BEGIN', 'PRIVATE KEY-----'].join(' '),
+      'cHJpdmF0ZS1rZXktbWF0ZXJpYWw=',
+      ['-----END', 'PRIVATE KEY-----'].join(' '),
+    ].join('\n');
+    await withDraft(async (directory) => {
+      const calls: ProviderRequest[] = [];
+      await writeFile(
+        join(directory, 'readers.json'),
+        JSON.stringify([{ name: 'ops-manager', description: `Also keep this key: ${secret}` }]),
+      );
+      const outcome = await audience.handle(
+        input({
+          cwd: directory,
+          flags: { 'personas-file': 'readers.json', draft: 'announcement.md' },
+          adapters: {
+            anthropic: adapter('anthropic', 'ok', calls),
+            openai: adapter('openai', 'ok', calls),
+            xai: adapter('xai', 'ok', calls),
+          },
+        }),
+      );
+      // Without the persona text in the guard's payload, this would reach `runPanel`, which finds
+      // the same secret in the prompt and throws — a usage-shaped failure rather than the clean,
+      // structured `blocked-policy` outcome the CLI turns into exit 3.
+      expect(outcome.kind).toBe('blocked');
+      if (outcome.kind !== 'blocked') throw new Error('unreachable');
+      expect(outcome.status).toBe('blocked-policy');
+      expect(outcome.decision?.reasonCodes).toContain('high-confidence-secret-detected');
+      expect(calls).toHaveLength(0);
+    });
   });
 
   test('a metered-only family is not seated, and a metered-only selection is refused', async () => {
@@ -539,6 +619,48 @@ describe('the audience mode', () => {
       expect(events[3]?.data).toMatchObject({ status: 'skipped', code: 'quota-exhausted' });
       expect(events[1]?.data).toMatchObject({ quote: reply('ops-manager').quote });
       expect(first.degraded).not.toContain('records-not-kept: no records root is configured');
+    });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test('a reused --session id is refused before any provider call, and the log is unchanged', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'convene-audience-reused-session-'));
+    await withDraft(async (directory) => {
+      const store = ModeSessionStore.open(root);
+      const calls: ProviderRequest[] = [];
+      const adapters = {
+        anthropic: adapter('anthropic', 'ok', calls),
+        openai: adapter('openai', 'ok', calls),
+        xai: adapter('xai', 'ok', calls),
+      };
+      const sessionId = 'au-2026-09-15-0a1b2c';
+      const first = await audience.handle(
+        input({
+          cwd: directory,
+          flags: { personas: PERSONAS, draft: 'announcement.md' },
+          adapters,
+          sessions: store,
+          sessionId,
+        }),
+      );
+      if (first.kind !== 'result') throw new Error('unreachable');
+      const before = await store.read('audience', sessionId);
+
+      await expect(
+        audience.handle(
+          input({
+            cwd: directory,
+            flags: { personas: PERSONAS, draft: 'announcement.md' },
+            adapters,
+            sessions: store,
+            sessionId,
+          }),
+        ),
+      ).rejects.toThrow(new RegExp(`${sessionId}.*choose another --session id`));
+
+      expect(calls).toHaveLength(3);
+      const after = await store.read('audience', sessionId);
+      expect(after).toEqual(before);
     });
     await rm(root, { recursive: true, force: true });
   });
