@@ -356,7 +356,7 @@ async function handle(input: HandlerInput): Promise<HandlerOutcome> {
     // A forum with nowhere to write is still worth running, but nothing survives the process: the
     // ledger of positions the mode exists to keep is gone the moment it exits, so that is degraded
     // rather than a silent `completed`.
-    degraded.push('records-not-kept');
+    degraded.push('records-not-kept: no records root is configured');
   }
 
   return {

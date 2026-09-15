@@ -312,7 +312,7 @@ describe('the forum mode', () => {
     expect(outcome.rounds).toBe(2);
     // No `--records-root` is configured in this fixture, so the run has nowhere to keep the
     // ledger it exists to keep; that is the one degraded reason here.
-    expect(outcome.degraded).toEqual(['records-not-kept']);
+    expect(outcome.degraded).toEqual(['records-not-kept: no records root is configured']);
     expect(outcome.synthesis).toBeNull();
     expect(outcome.dissent).toBeNull();
     expect(outcome.unanimous).toBe(false);
@@ -455,7 +455,10 @@ describe('the forum mode', () => {
     );
     expect(outcome.status).toBe('degraded');
     // No records root in this fixture either, so the missing-record reason is degraded too.
-    expect(outcome.degraded).toEqual(['seat-answers-missing', 'records-not-kept']);
+    expect(outcome.degraded).toEqual([
+      'seat-answers-missing',
+      'records-not-kept: no records root is configured',
+    ]);
     expect(outcome.seats[2]).toMatchObject({ status: 'invalid', family: 'xai' });
     const output = forum.outputSchema.parse(outcome.output) as {
       rounds: { positions: { seat: string }[] }[];
