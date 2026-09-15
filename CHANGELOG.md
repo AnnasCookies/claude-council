@@ -40,6 +40,20 @@ to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
   dropped from the fallbacks so a substituted model fails identity rather than billing quietly.
   See `docs/modes.md` and the Ideation section of the README. The plugin command is
   `/convene:ideate`.
+- **Forum mode.** `forum --seats <2-24> --rounds <1-6> --motion "…"` puts a motion to many seats
+  over several rounds. Round one is blind; later rounds carry every prior position from every round
+  as untrusted data attributed to its seat and round, and a seat may hold, revise or rebut.
+  `--lenses` names catalogue lenses and `--personas <file>` supplies your own; either is dealt round
+  and round when there are more seats than briefs. The output is the rounds, a position map with
+  holders, who moved and why, and the motions raised with their support and opposition. Nothing is
+  scored, ranked or decided, and the output has no field for a winner: `synthesis`, `dissent` and
+  `unanimous` stay empty by design. Records are the full ledger, one JSONL event per line under
+  `<records-root>/general/modes/forum/`, committed before the run reports success.
+
+### Changed
+
+- The result envelope carries up to six rounds, which is the forum's ceiling. The council runner,
+  its round executions and the persisted session record still refuse more than three.
 
 ## 2026.9.6
 
