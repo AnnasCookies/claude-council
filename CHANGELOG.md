@@ -4,6 +4,24 @@ All notable changes to convene are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to a `YYYY.M.BUILD` versioning scheme where `BUILD` resets each month.
 
+## Unreleased
+
+### Added
+
+- **Advisor mode.** `advise` seats one subscription family beside the working agent: `--watch`
+  reads a transcript window every Nth call, `--ask` answers a question, `--hold` takes a bounded
+  pause before a tool call in a named risk class (`destructive-git`, `delete`, `deploy`,
+  `payment`, `credential`), `--note` posts an external note, `--heed` records whether a note was
+  followed, `--start`, `--status` and `--end` manage the session. `--session` takes the harness's
+  own session key and the kernel maps it to a note log under `<scope>/modes/advisor/`. The seat
+  never reaches a metered key; an unavailable seat, a cadence skip, a policy block and a silent
+  seat are all recorded as notes. Only `--end` commits the log and renders minutes. The plugin
+  command is `/convene:advise`.
+- **Minutes carry the output block.** `renderMinutes` adds an `## Output` section with the mode's
+  own output, so a handler mode's minutes hold its result.
+- **Handler modes may take a session key and bare arguments** (`session: 'key'`,
+  `acceptsPositionals`), and `advise` reads stdin only with `--transcript -`.
+
 ## 2026.9.6
 
 ### Changed

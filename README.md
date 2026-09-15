@@ -95,7 +95,7 @@ bun --no-install dist/cli.js doctor --json
 bun --no-install dist/cli.js health --json
 ```
 
-The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
+The plugin slash commands are `/convene:council`, `/convene:second-opinion`, `/convene:ask`, `/convene:advise`, `/convene:status` and `/convene:result`. The compatibility `/ask --debate` path maps to `council`; ordinary `/ask` maps to `second-opinion`.
 
 Every execution is explicit. Command Markdown invokes `bun --no-install ${CLAUDE_PLUGIN_ROOT}/dist/cli.js`; it does not contain provider logic.
 
@@ -116,6 +116,41 @@ A run that reaches the committee through an older front door is marked in `degra
 `run` adds `legacy-run-alias`, and a significant `second-opinion` — `--impact high` or
 `--contested`, which has always taken the committee's quorum and rounds — adds
 `legacy-significant-second-opinion`.
+
+## Advisor
+
+`advise` runs the advisor mode from `docs/modes.md`: one subscription seat beside the working agent that reads a transcript window on a cadence, answers a question, or takes a bounded hold before a tool call in a named risk class. It speaks; the agent decides. It never reaches a metered key: an exhausted subscription or a down CLI is recorded as a `skipped` note with the reason. The transcript window is input only and never enters the record; the record is the session's note log, one JSONL file per harness session under `<records-root>/<scope>/modes/advisor/`, committed when the session ends.
+
+```bash
+# --session takes the harness's own session key; the kernel maps it to a log on first use.
+bun --no-install dist/cli.js advise --records-root ~/.claude/council --caller agent --harness claude-code \
+  --session claude:6a07f29b --hold --class destructive-git --tool "git push --force origin main" --window-ms 6000
+
+# Every third call consults the seat; the others return a note skipped for cadence.
+cat window.txt | bun --no-install dist/cli.js advise --records-root ~/.claude/council --caller agent --harness claude-code \
+  --session claude:6a07f29b --watch --every 3 --transcript -
+
+bun --no-install dist/cli.js advise --records-root ~/.claude/council --caller human --harness claude-code \
+  --session manual-2026-09-15 --ask "Is there a simpler route than a migration here?"
+bun --no-install dist/cli.js advise --records-root ~/.claude/council --session claude:6a07f29b --heed n-42 yes
+bun --no-install dist/cli.js advise --records-root ~/.claude/council --session claude:6a07f29b --note --from omp "the native seat's note"
+bun --no-install dist/cli.js advise --records-root ~/.claude/council --session claude:6a07f29b --status
+bun --no-install dist/cli.js advise --records-root ~/.claude/council --session claude:6a07f29b --end
+```
+
+Verbs: `--start` (create a log and print its id), `--watch --every N --transcript -|<path>` (cadence; `--cadence-family` names a cheaper seat), `--hold --class <destructive-git|delete|deploy|payment|credential> --tool "<text>" [--window-ms N]` (default window 8000 ms; on timeout the note is `no-advice`), `--ask "<question>"`, `--note --from <harness> "<text>"`, `--heed <note-id> yes|no|unknown`, `--status`, `--end`. Every note carries `id`, `trigger`, `severity`, `text`, `refersTo`, `heeded`, `status` (`ok`, `skipped`, `no-advice`), `reason`, `seat` and `at`. Exit `0` for every verb that ran, whatever the note's status; `2` for a usage error; `3` for a policy block. The risk class is chosen by the harness hook from its configuration, never inferred by the kernel.
+
+**Off by default.** The harness hooks in dotagents enable themselves only when `CONVENE_ADVISOR=1` is set or a `.convene/advisor` file exists in the working directory. What each harness wires:
+
+| Harness     | Hold before a tool call                                                            | Cadence                                              | Heed                 | Wired by                                                                               |
+| ----------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------- |
+| Claude Code | `PreToolUse` on `Bash`, note as `additionalContext`, always `allow`                | `Stop`, note as `additionalContext`                  | `PostToolUse`        | `~/.claude/scripts/convene-advisor-hook.ts` and `~/.claude/hooks/convene-advisor.json` |
+| codex       | `[[hooks.PreToolUse]]`, same script and contract                                   | `[[hooks.Stop]]`                                     | `PostToolUse`        | the same script, registered in `~/.codex/config.toml`                                  |
+| grok        | `[[hooks.PreToolUse]]`, `decision: "allow"`, note reaches the model after the call | recorded only (a Stop note would keep the turn open) | `PostToolUse`        | the same script with `--harness grok`, registered in `~/.grok/config.toml`             |
+| omp, pi     | `tool_call` extension, never `block`, note as a steer message                      | `turn_end`, note queued for the next turn            | `tool_execution_end` | `agent/extensions/convene-advisor.ts`                                                  |
+| agy         | none                                                                               | none                                                 | none                 | on demand only: `advise --ask`                                                         |
+
+omp's native `advisor:` seat is not wired; `--note --from omp` is the contract for when it is.
 
 ## Scope and project policy
 

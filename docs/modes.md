@@ -175,11 +175,14 @@ transcript window in, note out, `heed` back.
 **Example.**
 
 ```text
-council advise --session s1 --watch --every 3 --transcript -            # new; window on stdin
-council advise --session s1 --hold --class destructive-git --tool "git push --force origin main"   # new
-council advise --session s1 --ask "Is there a simpler route than a migration here?"                # new
-council advise --session s1 --heed n-42 yes                                                        # new
-council advise --session s1 --note --from omp \"…\"   # new; omp's native seat posts into the shared log
+convene advise --records-root ~/.claude/council --session s1 --start                    # create the log, print its id
+convene advise --records-root ~/.claude/council --session s1 --watch --every 3 --transcript -   # window on stdin
+convene advise --records-root ~/.claude/council --session s1 --hold --class destructive-git --tool "git push --force origin main" --window-ms 6000
+convene advise --records-root ~/.claude/council --session s1 --ask "Is there a simpler route than a migration here?"
+convene advise --records-root ~/.claude/council --session s1 --heed n-42 yes
+convene advise --records-root ~/.claude/council --session s1 --note --from omp "…"      # omp's native seat posts into the shared log
+convene advise --records-root ~/.claude/council --session s1 --status
+convene advise --records-root ~/.claude/council --session s1 --end                      # commits the note log
 ```
 
 ## Second opinion
