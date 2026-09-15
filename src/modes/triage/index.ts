@@ -450,7 +450,12 @@ export const triage: HandlerModeDefinition = {
             // round is blind by construction.
             prompt: () => itemPrompt(declared, item),
             answer,
-            spend: { policy: 'never-metered' },
+            // The CLI already built this run's spend from the mode's never-metered policy and
+            // `--spend-cap`, sized before any seat was resolved; passing it through — as every
+            // other handler mode does — keeps it the one ledger every seat and the envelope's
+            // `spend.cap` agree on, rather than a second policy object reasserted here that could
+            // drift from it.
+            spend: input.spend,
           },
         );
         return { item, seats: panel.seats, spend: panel.spend };

@@ -6,6 +6,7 @@ import type { HandlerInput } from '../../src/modes';
 import { TriageOutputSchema, triage } from '../../src/modes/triage';
 import {
   ModeSessionStore,
+  createSpendLedger,
   evaluateOutbound,
   withCredentialFallback,
   type Availability,
@@ -13,6 +14,7 @@ import {
   type ModelRegistry,
   type ModeSessionEvent,
   type ModelTransport,
+  type PanelSpend,
   type ProjectPolicy,
   type ProviderAdapter,
   type ProviderContext,
@@ -141,6 +143,7 @@ interface FixtureOptions {
   readonly families?: readonly ProviderFamily[];
   readonly sessions?: ModeSessionStore | null;
   readonly sessionId?: string;
+  readonly spend?: PanelSpend;
 }
 
 function handlerInput(options: FixtureOptions): HandlerInput {
@@ -184,8 +187,9 @@ function handlerInput(options: FixtureOptions): HandlerInput {
     sessions: options.sessions ?? null,
     // `HandlerInput.spend` is a `PanelSpend`, never a bare policy name: a never-metered mode is
     // handed `{ policy: 'never-metered' }`, exactly what the CLI itself builds from the mode's
-    // declared spend policy before it calls a handler.
-    spend: { policy: 'never-metered' },
+    // declared spend policy before it calls a handler. A fixture may override this to prove the
+    // handler passes it through to the panel rather than reasserting its own policy.
+    spend: options.spend ?? { policy: 'never-metered' },
     now: () => NOW,
   };
 }
@@ -321,6 +325,35 @@ describe('the triage desk', () => {
       });
       expect(anthropic.requests).toHaveLength(2);
       expect(anthropic.probes()).toBe(0);
+    });
+  });
+
+  test('passes the CLI-built spend through to the panel, not a hardcoded policy', async () => {
+    await withTempRoot(async (root) => {
+      const anthropic = fakeSeat('anthropic', answers('anthropic', verdict()));
+      const path = await batchFile(root, [{ id: 'c1', text: 'One item.' }]);
+      // A `capped` spend never reaches a real triage run through the CLI (its mode policy is
+      // fixed `never-metered`), but the handler must not know that: it has to hand `input.spend`
+      // to the panel unexamined, the same as every other handler mode. A hardcoded
+      // `{ policy: 'never-metered' }` here would force every seat's ledger to
+      // `createSpendLedger(0)` regardless of this fixture, so the ledger the seat's request
+      // context actually carries proves which one the handler used.
+      const capped: PanelSpend = {
+        policy: 'capped',
+        billing: 'sub-only',
+        ledger: createSpendLedger(7),
+      };
+      await triage.handle(
+        handlerInput({
+          adapters: { anthropic: anthropic.adapter },
+          flags: { in: path },
+          spend: capped,
+        }),
+      );
+
+      const request = anthropic.requests[0];
+      if (request === undefined) throw new Error('unreachable');
+      expect(request.context.spend?.cap).toBe(7);
     });
   });
 
